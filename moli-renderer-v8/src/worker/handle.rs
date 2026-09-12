@@ -1,8 +1,8 @@
 //! Worker-side message types and parent-facing handle.
 
 use crate::protocol_types::{
-    SubresourceAuthCredentials, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
-    SubresourceResourceType, WebSocketFrameDirection, WebSocketFrameOpcode,
+    SubresourceAuthCredentials, SubresourceNetworkRecord, SubresourceResourceType,
+    WebSocketFrameDirection, WebSocketFrameOpcode,
 };
 use crate::runtime::{
     RendererRuntimeInspectorMessage, RendererRuntimeInspectorResponseSender,
@@ -457,7 +457,6 @@ pub(crate) enum WorkerErrorSource {
 pub(crate) struct WorkerPendingFetchContinue {
     pub(crate) fetch_id: u32,
     pub(crate) internal_id: u64,
-    pub(crate) network_request_handle: Option<SubresourceNetworkRequestHandle>,
     pub(crate) url: Url,
     pub(crate) method: String,
     pub(crate) body: Option<Vec<u8>>,
@@ -471,7 +470,6 @@ pub(crate) struct WorkerPendingFetchContinue {
 pub(crate) struct WorkerPendingXhrContinue {
     pub(crate) xhr_id: u32,
     pub(crate) internal_id: u64,
-    pub(crate) network_request_handle: Option<SubresourceNetworkRequestHandle>,
     pub(crate) url: Url,
     pub(crate) method: String,
     pub(crate) body: Option<Vec<u8>>,
@@ -577,16 +575,27 @@ impl WorkerRuntimeEvent {
 pub(crate) struct WorkerDevToolsHandle {
     worker_tx: mpsc::UnboundedSender<WorkerMessage>,
     inspector_tasks: WorkerInspectorTaskRunner,
+    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+    termination_requested: Arc<AtomicBool>,
+    resource_cancellation: crate::network::context::WorkerResourceCancellation,
 }
 
 impl WorkerDevToolsHandle {
     pub(crate) fn new(
         wake_tx: mpsc::UnboundedSender<WorkerMessage>,
         isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+        termination_requested: Arc<AtomicBool>,
+        resource_cancellation: crate::network::context::WorkerResourceCancellation,
     ) -> Self {
         Self {
-            inspector_tasks: WorkerInspectorTaskRunner::new(wake_tx.clone(), isolate_handle),
+            inspector_tasks: WorkerInspectorTaskRunner::new(
+                wake_tx.clone(),
+                isolate_handle.clone(),
+            ),
             worker_tx: wake_tx,
+            isolate_handle,
+            termination_requested,
+            resource_cancellation,
         }
     }
 
@@ -631,8 +640,15 @@ impl WorkerDevToolsHandle {
         self.inspector_tasks.dispose(message);
     }
 
-    pub(crate) fn terminate_for_devtools(&self) -> bool {
-        self.dispose("Worker closed before Inspector task dispatch");
+    pub(crate) fn request_termination(&self) -> bool {
+        self.dispose("Worker terminated before Inspector task dispatch");
+        self.termination_requested.store(true, Ordering::Release);
+        if let Some(handle) = self.isolate_handle.lock().as_ref() {
+            handle.terminate_execution();
+        }
+        // Rust synchronous IO cannot observe a V8 interrupt or queued message.
+        // Cancel its load before waiting for the Worker to leave that boundary.
+        self.resource_cancellation.begin_detach();
         self.worker_tx.send(WorkerMessage::Terminate).is_ok()
     }
 }
@@ -648,8 +664,6 @@ pub(crate) struct WorkerHandle {
 #[derive(Debug)]
 pub(crate) struct WorkerThread {
     join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
-    termination_requested: Arc<AtomicBool>,
     devtools: WorkerDevToolsHandle,
 }
 
@@ -678,8 +692,13 @@ impl WorkerHandle {
         isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
         termination_requested: Arc<AtomicBool>,
     ) -> Self {
-        let devtools = WorkerDevToolsHandle::new(tx.clone(), Arc::clone(&isolate_handle));
-        let thread = WorkerThread::new(isolate_handle, termination_requested, devtools);
+        let devtools = WorkerDevToolsHandle::new(
+            tx.clone(),
+            isolate_handle,
+            termination_requested,
+            Default::default(),
+        );
+        let thread = WorkerThread::new(devtools);
         thread.set_join_handle(join_handle);
         Self::from_thread(tx, rx, thread)
     }
@@ -1056,15 +1075,9 @@ impl Drop for WorkerHandle {
 }
 
 impl WorkerThread {
-    pub(crate) fn new(
-        isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
-        termination_requested: Arc<AtomicBool>,
-        devtools: WorkerDevToolsHandle,
-    ) -> Arc<Self> {
+    pub(crate) fn new(devtools: WorkerDevToolsHandle) -> Arc<Self> {
         Arc::new(Self {
             join_handle: Mutex::new(None),
-            isolate_handle,
-            termination_requested,
             devtools,
         })
     }
@@ -1074,14 +1087,7 @@ impl WorkerThread {
     }
 
     pub(crate) fn request_termination(&self) {
-        self.devtools
-            .dispose("Worker terminated before Inspector task dispatch");
-        // Reject already-selected work before interrupting V8.
-        self.termination_requested.store(true, Ordering::Release);
-        if let Some(handle) = self.isolate_handle.lock().as_ref() {
-            handle.terminate_execution();
-        }
-        let _ = self.devtools.worker_tx.send(WorkerMessage::Terminate);
+        self.devtools.request_termination();
     }
 
     pub(crate) fn join(&self) {

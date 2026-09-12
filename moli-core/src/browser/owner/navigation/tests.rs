@@ -1218,7 +1218,15 @@ async fn native_shared_worker_network_xhr_success_and_fetch_failure_without_devt
             false,
         ),
     ] {
-        let (_, record) = shared_worker_network_before_close(script, url).await;
+        let (occurrence, record) = shared_worker_network_before_close(script, url).await;
+        if success {
+            assert!(
+                matches!(&occurrence.renderer.item,
+                crate::page::RendererNetworkOutputItem::Resource(item)
+                    if matches!(item.as_ref(), crate::page::ScriptNetworkOutputItem::SubresourceBodyFinished(_))),
+                "local XHR completes its admitted request instead of reporting a detached complete-only record"
+            );
+        }
         assert_eq!(
             matches!(
                 record.outcome(),
@@ -1227,6 +1235,28 @@ async fn native_shared_worker_network_xhr_success_and_fetch_failure_without_devt
             success
         );
     }
+}
+
+#[tokio::test]
+async fn native_shared_worker_network_sync_xhr_completes_before_close_without_devtools() {
+    let (occurrence, record) = shared_worker_network_before_close(
+        "onconnect=()=>{const x=new XMLHttpRequest();x.open('GET','data:text/plain,native-sync-xhr',false);x.send();close()}",
+        "data:text/plain,native-sync-xhr",
+    ).await;
+    assert_eq!(
+        record.resource_type(),
+        crate::page::SubresourceResourceType::Xhr
+    );
+    let crate::page::RendererNetworkOutputItem::Resource(item) = &occurrence.renderer.item else {
+        panic!("XHR resource completion");
+    };
+    let crate::page::ScriptNetworkOutputItem::SubresourceBodyFinished(body) = item.as_ref() else {
+        panic!("local XHR must finish its original request");
+    };
+    let crate::page::SubresourceBodyFinishedResult::Ready(body) = body.result() else {
+        panic!("synchronous local XHR must succeed");
+    };
+    assert_eq!(body.clone_body_bytes(), b"native-sync-xhr");
 }
 
 async fn shared_worker_network_before_close(

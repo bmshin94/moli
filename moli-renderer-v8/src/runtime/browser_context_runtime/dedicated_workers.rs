@@ -106,7 +106,7 @@ impl RendererDedicatedWorkerRegistry {
                 DedicatedWorkerExecution::Loading | DedicatedWorkerExecution::Retired(_) => None,
             };
             if let Some(worker) = worker {
-                let _ = worker.terminate_for_devtools();
+                let _ = worker.request_termination();
             } else {
                 host.retire();
             }
@@ -224,7 +224,7 @@ impl RendererDedicatedWorkerHost {
                 *execution = DedicatedWorkerExecution::Running(worker)
             }
             DedicatedWorkerExecution::Retired(_) => {
-                let _ = worker.terminate_for_devtools();
+                let _ = worker.request_termination();
             }
             DedicatedWorkerExecution::Running(_) => panic!("one physical Worker binds once"),
         }
@@ -320,7 +320,7 @@ impl RendererBrowserContextRuntime {
     pub fn close_dedicated_worker_for_devtools(&self, instance: u64) -> bool {
         self.inner.dedicated_workers.host(instance).is_some_and(|host| {
             let execution = host.0.execution.lock();
-            matches!(&*execution, DedicatedWorkerExecution::Running(worker) if worker.terminate_for_devtools())
+            matches!(&*execution, DedicatedWorkerExecution::Running(worker) if worker.request_termination())
         })
     }
 }

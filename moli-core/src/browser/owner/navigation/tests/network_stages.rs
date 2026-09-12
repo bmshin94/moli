@@ -13,11 +13,19 @@ enum WorkerKind {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum RequestKind {
+    Fetch,
+    Xhr,
+    SyncXhr,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Finish {
     Complete,
     PartialFailure,
     DetachedKeepalive,
     DetachedBeforeHeadersFailure,
+    RetiredCancellation,
 }
 
 impl Finish {
@@ -26,6 +34,10 @@ impl Finish {
             self,
             Self::DetachedKeepalive | Self::DetachedBeforeHeadersFailure
         )
+    }
+
+    fn retires_before_headers(self) -> bool {
+        self.keepalive() || matches!(self, Self::RetiredCancellation)
     }
 }
 
@@ -79,7 +91,129 @@ async fn native_worker_stages_detached_failure_before_headers() {
     worker_network_stages(WorkerKind::Dedicated, Finish::DetachedBeforeHeadersFailure).await;
 }
 
+#[tokio::test]
+async fn native_worker_stages_dedicated_xhr() {
+    worker_network_stages_with_request(WorkerKind::Dedicated, Finish::Complete, RequestKind::Xhr)
+        .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_nested_xhr() {
+    worker_network_stages_with_request(WorkerKind::Nested, Finish::Complete, RequestKind::Xhr)
+        .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_shared_xhr() {
+    worker_network_stages_with_request(WorkerKind::Shared, Finish::Complete, RequestKind::Xhr)
+        .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_dedicated_sync_xhr() {
+    worker_network_stages_with_request(
+        WorkerKind::Dedicated,
+        Finish::Complete,
+        RequestKind::SyncXhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_shared_sync_xhr() {
+    worker_network_stages_with_request(WorkerKind::Shared, Finish::Complete, RequestKind::SyncXhr)
+        .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_xhr_partial_failure_retains_received_body() {
+    worker_network_stages_with_request(
+        WorkerKind::Dedicated,
+        Finish::PartialFailure,
+        RequestKind::Xhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_sync_xhr_partial_failure_retains_received_body() {
+    worker_network_stages_with_request(
+        WorkerKind::Dedicated,
+        Finish::PartialFailure,
+        RequestKind::SyncXhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_dedicated_xhr_retirement_cancels_request() {
+    worker_network_stages_with_request(
+        WorkerKind::Dedicated,
+        Finish::RetiredCancellation,
+        RequestKind::Xhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_nested_xhr_retirement_cancels_request() {
+    worker_network_stages_with_request(
+        WorkerKind::Nested,
+        Finish::RetiredCancellation,
+        RequestKind::Xhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_shared_xhr_retirement_cancels_request() {
+    worker_network_stages_with_request(
+        WorkerKind::Shared,
+        Finish::RetiredCancellation,
+        RequestKind::Xhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_dedicated_sync_xhr_retirement_cancels_request() {
+    worker_network_stages_with_request(
+        WorkerKind::Dedicated,
+        Finish::RetiredCancellation,
+        RequestKind::SyncXhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_nested_sync_xhr_retirement_cancels_request() {
+    worker_network_stages_with_request(
+        WorkerKind::Nested,
+        Finish::RetiredCancellation,
+        RequestKind::SyncXhr,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_stages_shared_sync_xhr_retirement_cancels_request() {
+    worker_network_stages_with_request(
+        WorkerKind::Shared,
+        Finish::RetiredCancellation,
+        RequestKind::SyncXhr,
+    )
+    .await;
+}
+
 async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
+    worker_network_stages_with_request(kind, finish, RequestKind::Fetch).await;
+}
+
+async fn worker_network_stages_with_request(
+    kind: WorkerKind,
+    finish: Finish,
+    request_kind: RequestKind,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let url = format!("{origin}/probe");
@@ -88,16 +222,23 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
     let (chunk, release_chunk) = oneshot::channel();
     let (tail, release_tail) = oneshot::channel();
     let server = tokio::spawn(async move {
-        let fetch = format!(
-            "fetch('/probe',{{keepalive:{}}}).then(r=>r.text()).catch(()=>{{}})",
-            finish.keepalive()
-        );
+        let request_script = match request_kind {
+            RequestKind::Fetch => format!(
+                "fetch('/probe',{{keepalive:{}}}).then(r=>r.text()).catch(()=>{{}})",
+                finish.keepalive()
+            ),
+            RequestKind::Xhr | RequestKind::SyncXhr => format!(
+                "try{{const xhr=new XMLHttpRequest();xhr.open('GET','/probe',{});xhr.send();}}catch(_){{}}",
+                matches!(request_kind, RequestKind::Xhr)
+            ),
+        };
         let worker_script = match kind {
-            WorkerKind::Dedicated => fetch.clone(),
+            WorkerKind::Dedicated => request_script.clone(),
             WorkerKind::Nested => "globalThis.child = new Worker('/nested.js')".into(),
-            WorkerKind::Shared => format!("onconnect=()=>{{{fetch}}}"),
+            WorkerKind::Shared => format!("onconnect=()=>{{{request_script}}}"),
             WorkerKind::Service => {
-                format!("addEventListener('install',event=>event.waitUntil({fetch}))")
+                assert!(matches!(request_kind, RequestKind::Fetch));
+                format!("addEventListener('install',event=>event.waitUntil({request_script}))")
             }
         };
         let bootstrap = match kind {
@@ -123,7 +264,10 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
             if path == "/probe" {
                 requested.send(()).unwrap();
                 release_headers.await.unwrap();
-                if matches!(finish, Finish::DetachedBeforeHeadersFailure) {
+                if matches!(
+                    finish,
+                    Finish::DetachedBeforeHeadersFailure | Finish::RetiredCancellation
+                ) {
                     break;
                 }
                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
@@ -138,7 +282,7 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
             let (content_type, body) = match path {
                 "/" => ("text/html", html.as_str()),
                 "/worker.js" => ("text/javascript", worker_script.as_str()),
-                "/nested.js" => ("text/javascript", fetch.as_str()),
+                "/nested.js" => ("text/javascript", request_script.as_str()),
                 other => panic!("unexpected Worker fixture request: {other}"),
             };
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
@@ -166,6 +310,14 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
                     && request.url().as_str() == url
                 {
                     assert_eq!(request.keepalive(), finish.keepalive());
+                    assert_eq!(
+                        request.resource_type(),
+                        match request_kind {
+                            RequestKind::Fetch => crate::page::SubresourceResourceType::Fetch,
+                            RequestKind::Xhr | RequestKind::SyncXhr =>
+                                crate::page::SubresourceResourceType::Xhr,
+                        }
+                    );
                     break (
                         owner,
                         occurrence.renderer.source.clone(),
@@ -191,7 +343,8 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
     assert!(browser.subscribe().unwrap().0.network_requests.iter().any(|request|
         request.owner == NetworkOwner::Worker(owner) && request.renderer_source == source
         && matches!(&request.state, NetworkRequestState::Started(start) if start.handle() == handle)));
-    if finish.keepalive() {
+    let mut buffered = std::collections::VecDeque::new();
+    if finish.retires_before_headers() {
         if let crate::page::RendererNetworkSource::Worker(
             crate::page::RendererWorkerIdentity::Service { run, .. },
         ) = &source
@@ -199,11 +352,12 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
             assert!(browser.subscribe().unwrap().0.workers.iter().any(|worker|
                 worker.handle() == owner && matches!(worker, crate::browser::WorkerSnapshot::Service { worker, .. } if worker.execution.active_run() == Some(run))));
         }
-        context
-            .close_web_contents(contents)
-            .unwrap()
-            .close_async()
-            .await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            context.close_web_contents(contents).unwrap().close_async(),
+        )
+        .await
+        .expect("Worker retirement must finish with the response headers held");
         if let WorkerHandle::Service { version, .. } = owner {
             context
                 .execute_service_worker_command(crate::browser::ServiceWorkerCommand::StopVersion {
@@ -214,8 +368,8 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let event = events.recv().await.unwrap();
-                let retired = match event.event {
-                    BrowserEvent::WorkerDestroyed(closed) => closed == owner,
+                let retired = match &event.event {
+                    BrowserEvent::WorkerDestroyed(closed) => *closed == owner,
                     BrowserEvent::WorkerUpdated(worker) if worker.handle() == owner => matches!(worker,
                         crate::browser::WorkerSnapshot::Service { worker, .. } if worker.execution == crate::browser::ServiceWorkerExecution::Stopped),
                     _ => false,
@@ -224,10 +378,13 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
                     assert!(event.sequence > sequence);
                     break;
                 }
+                // Cancellation can finish before the WorkerDestroyed fact.
+                // Preserve the real FIFO instead of discarding that completion.
+                buffered.push_back(event);
             }
         })
         .await
-        .expect("the original Worker must retire while its keepalive response is held");
+        .expect("the original Worker must retire while its response is held");
         assert!(
             browser
                 .subscribe()
@@ -239,8 +396,14 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
                     crate::browser::WorkerSnapshot::Service { worker, .. } if worker.execution == crate::browser::ServiceWorkerExecution::Stopped))
         );
     }
-    headers.send(()).unwrap();
-    let stages = if matches!(finish, Finish::DetachedBeforeHeadersFailure) {
+    let mut headers = Some(headers);
+    if !matches!(finish, Finish::RetiredCancellation) {
+        headers.take().unwrap().send(()).unwrap();
+    }
+    let stages = if matches!(
+        finish,
+        Finish::DetachedBeforeHeadersFailure | Finish::RetiredCancellation
+    ) {
         vec![(2, None)]
     } else {
         vec![(0, Some(chunk)), (1, Some(tail)), (2, None)]
@@ -248,7 +411,10 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
     for (stage, release) in stages {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let event = events.recv().await.unwrap();
+                let event = match buffered.pop_front() {
+                    Some(event) => event,
+                    None => events.recv().await.unwrap(),
+                };
                 let occurrence = match &event.event {
                     BrowserEvent::NetworkActivity(occurrence)
                     | BrowserEvent::NetworkRequestCompleted(occurrence)
@@ -287,7 +453,7 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
                 };
                 match (finish, body.result()) {
                     (
-                        Finish::DetachedBeforeHeadersFailure,
+                        Finish::DetachedBeforeHeadersFailure | Finish::RetiredCancellation,
                         SubresourceBodyFinishedResult::Failed(error),
                     ) => assert!(!error.is_empty()),
                     (
@@ -315,9 +481,14 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
             release.send(()).unwrap();
         }
     }
+    // Only let the server close after observing native cancellation. Otherwise
+    // a fixture-induced disconnect could falsely prove retirement cancellation.
+    if let Some(headers) = headers {
+        headers.send(()).unwrap();
+    }
     server.await.unwrap();
     if let WorkerHandle::Service { version, .. } = owner
-        && !finish.keepalive()
+        && !finish.retires_before_headers()
     {
         context
             .execute_service_worker_command(crate::browser::ServiceWorkerCommand::StopVersion {
@@ -325,7 +496,7 @@ async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
             })
             .unwrap();
     }
-    if !finish.keepalive() {
+    if !finish.retires_before_headers() {
         context
             .close_web_contents(contents)
             .unwrap()

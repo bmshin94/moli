@@ -7531,6 +7531,7 @@ async fn worker_fetch_body_consumption_after_stream_abort_preserves_abort_reason
 
 #[tokio::test]
 async fn worker_xmlhttprequest_abort_cancels_inflight_request_and_ignores_late_completion() {
+    let mut network_records = WorkerNetworkRecords::default();
     ensure_v8();
     let (base_url, server) = spawn_path_response_http_server(vec![(
         "/assets/data.txt",
@@ -7572,11 +7573,7 @@ async fn worker_xmlhttprequest_abort_cancels_inflight_request_and_ignores_late_c
         loader,
     );
 
-    let network = timeout(TIMEOUT, handle.recv())
-        .await
-        .expect("native cancellation result")
-        .expect("Worker channel");
-    let record = expect_subresource_network_record(network);
+    let record = network_records.recv_record(&mut handle).await;
     assert_eq!(record.url().as_str(), format!("{base_url}/assets/data.txt"));
     assert!(record.request_handle().is_some());
     assert!(
@@ -7592,6 +7589,7 @@ async fn worker_xmlhttprequest_abort_cancels_inflight_request_and_ignores_late_c
 
 #[tokio::test]
 async fn worker_xmlhttprequest_timeout_cancels_inflight_request_and_ignores_late_completion() {
+    let mut network_records = WorkerNetworkRecords::default();
     ensure_v8();
     let (base_url, server) = spawn_path_response_http_server(vec![(
         "/assets/data.txt",
@@ -7639,11 +7637,7 @@ async fn worker_xmlhttprequest_timeout_cancels_inflight_request_and_ignores_late
         loader,
     );
 
-    let network = timeout(TIMEOUT, handle.recv())
-        .await
-        .expect("native cancellation result")
-        .expect("Worker channel");
-    let record = expect_subresource_network_record(network);
+    let record = network_records.recv_record(&mut handle).await;
     assert_eq!(record.url().as_str(), format!("{base_url}/assets/data.txt"));
     assert!(record.request_handle().is_some());
     assert!(

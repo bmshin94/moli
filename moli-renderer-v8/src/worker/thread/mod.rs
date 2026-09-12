@@ -1444,8 +1444,22 @@ fn spawn_worker_after_binding(
     let worker_wake_tx = parent_to_worker_tx.clone();
     let isolate_handle = Arc::new(Mutex::new(None));
     let worker_isolate_handle = Arc::clone(&isolate_handle);
-    let devtools =
-        WorkerDevToolsHandle::new(parent_to_worker_tx.clone(), Arc::clone(&isolate_handle));
+    let resource_task_runner = worker_context_runtime
+        .resource_task_runner()
+        .expect("BrowserContext must select a resource executor before starting a Worker");
+    let loader = resource_loader_for_worker_context(
+        request_client,
+        &network_policy,
+        &global_kind,
+        resource_task_runner,
+    );
+    let termination_requested = Arc::new(AtomicBool::new(false));
+    let devtools = WorkerDevToolsHandle::new(
+        parent_to_worker_tx.clone(),
+        Arc::clone(&isolate_handle),
+        Arc::clone(&termination_requested),
+        loader.cancellation(),
+    );
     if let WorkerGlobalKind::Dedicated(host) = &global_kind {
         host.bind_execution(devtools.clone());
     }
@@ -1453,10 +1467,9 @@ fn spawn_worker_after_binding(
     // is published before execution can emit Console/Network or retire.
     after_binding();
     let worker_inspector_tasks = devtools.inspector_tasks().clone();
-    let termination_requested = Arc::new(AtomicBool::new(false));
     let worker_termination_requested = Arc::clone(&termination_requested);
 
-    let thread = super::handle::WorkerThread::new(isolate_handle, termination_requested, devtools);
+    let thread = super::handle::WorkerThread::new(devtools);
     let registrar = worker_context_runtime.worker_threads.clone();
     registrar.spawn(&thread, move || {
         std::thread::Builder::new()
@@ -1475,7 +1488,7 @@ fn spawn_worker_after_binding(
                 runtime.block_on(worker_main(
                     script_source,
                     script_url,
-                    request_client,
+                    loader,
                     script_kind,
                     module_static_import_initiator_url,
                     module_credentials_mode,
@@ -1604,7 +1617,7 @@ fn resource_loader_for_worker_context(
 async fn worker_main(
     script_source: WorkerScriptSource,
     script_url: String,
-    request_client: ResourceRequestClient,
+    loader: WorkerResourceLoader,
     script_kind: WorkerScriptKind,
     module_static_import_initiator_url: Option<url::Url>,
     module_credentials_mode: RequestCredentialsMode,
@@ -1646,16 +1659,6 @@ async fn worker_main(
     debug!(url = %script_url, "worker started");
     let mut bootstrap_completion =
         WorkerBootstrapCompletionReporter::new(bootstrap_completion_target);
-    let resource_task_runner = worker_context_runtime
-        .resource_task_runner()
-        .expect("BrowserContext must select a resource executor before starting a Worker");
-    let loader = resource_loader_for_worker_context(
-        request_client,
-        &network_policy,
-        &global_kind,
-        resource_task_runner,
-    );
-
     // ── Create worker-level V8 isolate ─────────────────────────────────────
     let worker_indexed_db_manager = indexed_db_manager.clone();
     let storage_bucket_store = storage_bucket_store.unwrap_or_else(|| {

@@ -542,7 +542,7 @@ pub(in crate::worker) fn continue_pending_worker_csp_report(
         Err(error) => {
             record_worker_content_security_policy_report_failure(
                 state,
-                continuation.network_request_handle,
+                Some(pending.handle),
                 pending.document_url,
                 pending.request,
                 format!("csp report: {error}"),
@@ -563,7 +563,7 @@ pub(in crate::worker) fn continue_pending_worker_csp_report(
         let message = format!("csp report: blocked bad port for `{}`", request.url);
         record_worker_content_security_policy_report_failure(
             state,
-            continuation.network_request_handle,
+            Some(pending.handle),
             document_url,
             request,
             message,
@@ -573,7 +573,7 @@ pub(in crate::worker) fn continue_pending_worker_csp_report(
     if load.blocks_url(&request.url) {
         record_worker_content_security_policy_report_failure(
             state,
-            continuation.network_request_handle,
+            Some(pending.handle),
             document_url,
             request,
             crate::network_host::BLOCKED_BY_CLIENT_ERROR_TEXT.to_owned(),
@@ -583,7 +583,7 @@ pub(in crate::worker) fn continue_pending_worker_csp_report(
     if load.network_offline() {
         record_worker_content_security_policy_report_failure(
             state,
-            continuation.network_request_handle,
+            Some(pending.handle),
             document_url,
             request,
             "Network emulation offline".to_owned(),
@@ -603,7 +603,7 @@ pub(in crate::worker) fn continue_pending_worker_csp_report(
             client_id,
             load,
             policy_context,
-            continuation.network_request_handle,
+            Some(pending.handle),
             document_url,
             request,
             request_body,
@@ -615,7 +615,7 @@ pub(in crate::worker) fn continue_pending_worker_csp_report(
         parent_tx,
         global_kind,
         load,
-        continuation.network_request_handle,
+        Some(pending.handle),
         document_url,
         request,
         request_body,
@@ -637,7 +637,7 @@ pub(in crate::worker) fn fail_pending_worker_csp_report(
     pending.load.finish();
     record_worker_content_security_policy_report_failure(
         state,
-        continuation.network_request_handle,
+        Some(pending.handle),
         pending.document_url,
         pending.request,
         error_text,
@@ -670,7 +670,7 @@ pub(in crate::worker) fn fulfill_pending_worker_csp_report(
     send_worker_content_security_policy_report_success(
         state.parent_tx.clone(),
         state.global_kind.clone(),
-        continuation.network_request_handle,
+        Some(pending.handle),
         pending.document_url,
         pending.request,
         request_body,

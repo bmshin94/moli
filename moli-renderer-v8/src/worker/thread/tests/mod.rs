@@ -276,14 +276,6 @@ async fn recv_post_json(handle: &mut WorkerHandle) -> String {
     }
 }
 
-fn expect_subresource_network_record(message: WorkerToParentMessage) -> SubresourceNetworkRecord {
-    match message {
-        WorkerToParentMessage::Network(observation) => observation.worker_record_for_test().clone(),
-        WorkerToParentMessage::WebSocketSubresource(record) => record,
-        other => panic!("expected worker subresource network record, got {other:?}"),
-    }
-}
-
 /// Explicitly reconstruct the terminal view used by metadata/body assertions.
 /// Raw transport-stage timing is tested separately at the native Browser gates.
 #[derive(Default)]

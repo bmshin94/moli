@@ -105,8 +105,13 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_, parent_rx) = tokio::sync::mpsc::unbounded_channel();
         let isolate = Arc::new(Mutex::new(None));
-        let devtools = WorkerDevToolsHandle::new(tx.clone(), Arc::clone(&isolate));
-        let thread = WorkerThread::new(isolate, Arc::new(AtomicBool::new(false)), devtools);
+        let devtools = WorkerDevToolsHandle::new(
+            tx.clone(),
+            isolate,
+            Arc::new(AtomicBool::new(false)),
+            Default::default(),
+        );
+        let thread = WorkerThread::new(devtools);
         let handle = WorkerHandle::from_thread(tx, parent_rx, Arc::clone(&thread));
         (thread, handle, rx)
     }
