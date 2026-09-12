@@ -26,7 +26,7 @@ use crate::exception_reporting::{V8ExceptionReport, build_event_handler_exceptio
 #[cfg(test)]
 use crate::network::ResourceRequestClientOwner;
 use crate::network::{
-    ResourceRequestClient, ScriptResponseFailure, ScriptResponseResult,
+    ResourceRequestClient, ResourceResponseFailure, ResourceResponseResult,
     context::{WorkerResourceLoader, WorkerResourceOwner},
     loads::{ResourceLoadDisposition, ResourceLoadKind},
 };
@@ -70,10 +70,10 @@ use super::global_scope::{
     WorkerFetchEvent, WorkerGlobalState, WorkerIsolateTimerQueues, WorkerOpfsCompletion,
     WorkerWebCryptoCompletion, WorkerXhrCompletion, close_worker_owned_broadcast_channels,
     close_worker_owned_message_ports, dispatch_nested_worker_event,
-    dispatch_worker_csp_violation_event, dispatch_worker_websocket_event,
-    drain_service_worker_client_focus_result, drain_service_worker_client_navigate_result,
-    drain_service_worker_client_query_result, drain_service_worker_clients_open_window_result,
-    drain_service_worker_get_notifications_result,
+    dispatch_worker_content_security_policy_violation_event_for_state,
+    dispatch_worker_websocket_event, drain_service_worker_client_focus_result,
+    drain_service_worker_client_navigate_result, drain_service_worker_client_query_result,
+    drain_service_worker_clients_open_window_result, drain_service_worker_get_notifications_result,
     drain_service_worker_periodic_sync_get_tags_result,
     drain_service_worker_periodic_sync_registration_result,
     drain_service_worker_periodic_sync_unregistration_result,
@@ -104,7 +104,7 @@ use super::module_runtime::{
     worker_dynamic_module_import_waits_for_fetch, worker_has_pending_dynamic_module_imports,
     worker_has_runnable_dynamic_module_imports,
 };
-use super::script_loading::WorkerScriptTransfer;
+use super::network_transfer::WorkerResourceTransfer;
 
 pub(super) type WorkerExceptionError = Box<(V8ExceptionReport, Option<v8::Global<v8::Value>>)>;
 
@@ -648,11 +648,20 @@ fn start_worker_module_graph_fetch(
     completion_tx: mpsc::UnboundedSender<WorkerModuleGraphFetchCompletion>,
 ) {
     let fetch_id = request.fetch_id();
-    let Some(network) = WorkerScriptTransfer::start(
+    let Some(network) = WorkerResourceTransfer::start(
         state.global_kind.network(),
         state.parent_tx.network_observer(),
-        request.initiator_url(),
-        request.url(),
+        |network| {
+            super::global_scope::worker_request_started(
+                network,
+                request.initiator_url(),
+                request.url(),
+                "GET",
+                &[],
+                &None,
+                crate::types::SubresourceResourceType::Script,
+            )
+        },
     ) else {
         let _ = completion_tx.send(WorkerModuleGraphFetchCompletion::new(
             fetch_id,
@@ -700,7 +709,7 @@ fn start_worker_module_graph_fetch(
         &content_security_reporting_endpoints,
     ) {
         let message = module_graph_csp_violation_message(&violation);
-        network.failed(&ScriptResponseFailure::Request(message.clone()));
+        network.failed(&ResourceResponseFailure::Request(message.clone()));
         let mut completion = WorkerModuleGraphFetchCompletion::new(fetch_id, Err(message))
             .with_csp_violation(violation);
         if let Some(report_only_violation) = initial_csp_report_only_violation {
@@ -715,7 +724,7 @@ fn start_worker_module_graph_fetch(
             "Failed to load module worker dependency",
         )
     {
-        network.failed(&ScriptResponseFailure::Request(message.clone()));
+        network.failed(&ResourceResponseFailure::Request(message.clone()));
         let _ = completion_tx.send(WorkerModuleGraphFetchCompletion::new(
             fetch_id,
             Err(message),
@@ -730,7 +739,7 @@ fn start_worker_module_graph_fetch(
                 .with_network_partition_key(state.network_partition_key.clone())
                 .with_browser_request_metadata(browser_request_metadata),
             Err(error) => {
-                network.failed(&ScriptResponseFailure::Request(error.to_string()));
+                network.failed(&ResourceResponseFailure::Request(error.to_string()));
                 let _ = completion_tx.send(WorkerModuleGraphFetchCompletion::new(
                     fetch_id,
                     Err(error.to_string()),
@@ -762,7 +771,7 @@ fn start_worker_module_graph_fetch(
     let completion_tx_for_callback = completion_tx.clone();
     let response_started_at = Instant::now();
     let callback_network = network.clone();
-    let send_completion = move |result: ScriptResponseResult| {
+    let send_completion = move |result: ResourceResponseResult| {
         let mut csp_violation = None;
         let mut csp_report_only_violation = initial_csp_report_only_violation;
         let result = result
@@ -861,7 +870,7 @@ fn start_worker_module_graph_fetch(
                     .with_response_referrer_policy(response_referrer_policy))
             })
             .inspect_err(|message| {
-                callback_network.failed(&ScriptResponseFailure::Request(message.clone()));
+                callback_network.failed(&ResourceResponseFailure::Request(message.clone()));
             });
         let mut completion = WorkerModuleGraphFetchCompletion::new(fetch_id, result);
         if let Some(violation) = csp_report_only_violation {
@@ -877,7 +886,7 @@ fn start_worker_module_graph_fetch(
         ResourceLoadDisposition::Ordinary,
         None,
     ) else {
-        network.failed(&ScriptResponseFailure::Request(
+        network.failed(&ResourceResponseFailure::Request(
             "worker module dependency fetch rejected during shutdown".to_owned(),
         ));
         let _ = completion_tx.send(WorkerModuleGraphFetchCompletion::new(
@@ -895,7 +904,7 @@ fn start_worker_module_graph_fetch(
             send_completion,
         )
     {
-        network.failed(&ScriptResponseFailure::Request(error.to_string()));
+        network.failed(&ResourceResponseFailure::Request(error.to_string()));
         let mut completion = WorkerModuleGraphFetchCompletion::new(
             fetch_id,
             Err(format!(
@@ -3033,12 +3042,14 @@ async fn worker_main(
                 let global = ctx.global(scope);
                 if worker_dynamic_module_import_waits_for_fetch(scope, completion.fetch_id()) {
                     if let Some(violation) = completion.csp_report_only_violation() {
-                        let loader = state.borrow().loader.clone();
-                        dispatch_worker_csp_violation_event(scope, &loader, violation);
+                        dispatch_worker_content_security_policy_violation_event_for_state(
+                            scope, &state, violation,
+                        );
                     }
                     if let Some(violation) = completion.csp_violation() {
-                        let loader = state.borrow().loader.clone();
-                        dispatch_worker_csp_violation_event(scope, &loader, violation);
+                        dispatch_worker_content_security_policy_violation_event_for_state(
+                            scope, &state, violation,
+                        );
                     }
                     if let Some(advance) = resume_worker_dynamic_module_fetch(scope, *completion) {
                         handle_worker_dynamic_module_import_advance(
@@ -3050,12 +3061,14 @@ async fn worker_main(
                     }
                 } else if pending_module_bootstrap.is_some() {
                     if let Some(violation) = completion.csp_report_only_violation() {
-                        let loader = state.borrow().loader.clone();
-                        dispatch_worker_csp_violation_event(scope, &loader, violation);
+                        dispatch_worker_content_security_policy_violation_event_for_state(
+                            scope, &state, violation,
+                        );
                     }
                     if let Some(violation) = completion.csp_violation() {
-                        let loader = state.borrow().loader.clone();
-                        dispatch_worker_csp_violation_event(scope, &loader, violation);
+                        dispatch_worker_content_security_policy_violation_event_for_state(
+                            scope, &state, violation,
+                        );
                     }
                     let bootstrap_fetch_matches = pending_module_bootstrap
                         .as_ref()

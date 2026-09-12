@@ -15,7 +15,7 @@ pub(crate) mod loads;
 pub mod navigation;
 mod policy;
 mod request_client;
-mod script_response;
+pub(crate) mod resource_response;
 mod task_runner;
 
 pub use backend::{
@@ -30,8 +30,8 @@ pub use devtools_resource_load::{
 };
 pub use policy::{PageNetworkPolicy, PageNetworkPolicySnapshot};
 pub use request_client::{ResourceRequestClient, ResourceRequestClientOwner};
-pub(crate) use script_response::{
-    ScriptResponseFailure, ScriptResponseHead, ScriptResponseObserver, ScriptResponseResult,
+pub(crate) use resource_response::{
+    ResourceResponseFailure, ResourceResponseHead, ResourceResponseObserver, ResourceResponseResult,
 };
 pub use task_runner::RendererResourceTaskRunner;
 

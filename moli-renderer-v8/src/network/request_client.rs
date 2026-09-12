@@ -18,7 +18,7 @@ use moli_fetch::{
 use crate::{protocol_types::OptionalResourceFetchMask, types::SubresourceResourceType};
 
 use super::{
-    ScriptResponseFailure, ScriptResponseHead, ScriptResponseObserver, ScriptResponseResult,
+    ResourceResponseFailure, ResourceResponseObserver, ResourceResponseResult,
     backend::{
         BrowserResourceRuntime, BrowserResourceRuntimeDiagnostics, BrowserResourceRuntimeOwner,
         BrowserResourceRuntimeOwnerRoot, RawSubresourceCacheKey, ScriptTextCacheKey,
@@ -378,11 +378,11 @@ impl ResourceRequestClient {
         &self,
         request: Request,
         resource_load: loads::ResourceLoadLease,
-        observer: Option<Arc<dyn ScriptResponseObserver>>,
+        observer: Option<Arc<dyn ResourceResponseObserver>>,
         callback: F,
     ) -> Result<()>
     where
-        F: FnOnce(ScriptResponseResult) + Send + 'static,
+        F: FnOnce(ResourceResponseResult) + Send + 'static,
     {
         let request = self.apply_network_policy(request)?;
         if let Some(result) = local_text_response(&request.url) {
@@ -556,7 +556,7 @@ impl ResourceRequestClient {
         key: ScriptTextCacheKey,
         load: SharedScriptTextLoad,
         request: Request,
-        result: ScriptResponseResult,
+        result: ResourceResponseResult,
     ) {
         self.resource_runtime
             .memory_cache()
@@ -581,11 +581,11 @@ impl ResourceRequestClient {
         &self,
         request: Request,
         resource_load: loads::ResourceLoadLease,
-        observer: Arc<dyn ScriptResponseObserver>,
+        observer: Arc<dyn ResourceResponseObserver>,
         callback: F,
     ) -> Result<()>
     where
-        F: FnOnce(ScriptResponseResult) + Send + 'static,
+        F: FnOnce(ResourceResponseResult) + Send + 'static,
     {
         let request = self.apply_network_policy(request)?;
         self.start_script_text_fetch(request, resource_load, Some(observer), callback);
@@ -596,10 +596,10 @@ impl ResourceRequestClient {
         &self,
         request: Request,
         resource_load: loads::ResourceLoadLease,
-        observer: Option<Arc<dyn ScriptResponseObserver>>,
+        observer: Option<Arc<dyn ResourceResponseObserver>>,
         callback: F,
     ) where
-        F: FnOnce(ScriptResponseResult) + Send + 'static,
+        F: FnOnce(ResourceResponseResult) + Send + 'static,
     {
         let client = self.clone();
         let cancel = FetchCancelHandle::new();
@@ -617,8 +617,8 @@ impl ResourceRequestClient {
         &self,
         request: Request,
         cancel: FetchCancelHandle,
-        observer: Option<&dyn ScriptResponseObserver>,
-    ) -> ScriptResponseResult {
+        observer: Option<&dyn ResourceResponseObserver>,
+    ) -> ResourceResponseResult {
         if let Some(result) = local_text_response(&request.url) {
             return result.map_err(Into::into);
         }
@@ -633,31 +633,8 @@ impl ResourceRequestClient {
         let observed = self
             .fetch_raw_stream_with_cancel_after_policy_and_network_metadata(request, cancel)
             .await
-            .map_err(ScriptResponseFailure::from)?;
-        let (mut response, request_observation) = observed.into_parts();
-        let head = Arc::new(ScriptResponseHead {
-            head: response.head(),
-            network_request_headers: request_observation.map(|request| request.into_headers()),
-        });
-        if let Some(observer) = observer {
-            observer.response_started(head.clone());
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.next_chunk().await {
-            bytes.extend_from_slice(&chunk);
-            if let Some(observer) = observer {
-                observer.data_received(chunk.len());
-            }
-        }
-        if let Err(error) = response.finish().await {
-            return Err(ScriptResponseFailure::PartialBody {
-                message: format!("{error:#}"),
-                response: head,
-                body: moli_page_types::SubresourceResponseBody::from_bytes(bytes),
-            });
-        }
-        Ok(RawResponse::from_head_and_body(head.head.clone(), bytes)
-            .into_lossy_materialized_text_response())
+            .map_err(ResourceResponseFailure::from)?;
+        super::resource_response::collect_observed_response(observed, observer).await
     }
 
     async fn fetch_text_stream_with_cancel_after_policy(

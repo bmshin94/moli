@@ -14,7 +14,7 @@ use moli_http_cache::{HttpCacheVaryHeader, cacheable_response_parts_policy, unix
 use parking_lot::Mutex;
 use url::Url;
 
-use crate::network::{ScriptResponseHead, ScriptResponseObserver, ScriptResponseResult};
+use crate::network::{ResourceResponseHead, ResourceResponseObserver, ResourceResponseResult};
 
 /// Strong-reference budget for renderer subresources.
 ///
@@ -39,7 +39,7 @@ pub struct SharedMemoryResourceCacheDiagnostics {
 }
 
 pub(in crate::network) type SharedScriptTextLoad = Arc<ScriptTextLoad>;
-type ScriptTextLoadResult = ScriptResponseResult;
+type ScriptTextLoadResult = ResourceResponseResult;
 type ScriptTextLoadCallback = Box<dyn FnOnce(ScriptTextLoadResult) + Send + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -178,14 +178,14 @@ enum ScriptTextLoadPhase {
     #[default]
     Pending,
     Responding {
-        response: Arc<ScriptResponseHead>,
+        response: Arc<ResourceResponseHead>,
         received: usize,
     },
     Finished(Box<ScriptTextLoadResult>),
 }
 
 struct ScriptTextConsumer {
-    observer: Option<Arc<dyn ScriptResponseObserver>>,
+    observer: Option<Arc<dyn ResourceResponseObserver>>,
     callback: ScriptTextLoadCallback,
 }
 
@@ -230,7 +230,7 @@ impl ScriptTextLoad {
 
     pub(in crate::network) fn wait_callback(
         self: &Arc<Self>,
-        observer: Option<Arc<dyn ScriptResponseObserver>>,
+        observer: Option<Arc<dyn ResourceResponseObserver>>,
         callback: ScriptTextLoadCallback,
     ) -> Option<ScriptTextConsumerLease> {
         let mut state = self.state.lock();
@@ -327,8 +327,8 @@ impl ScriptTextLoad {
     }
 }
 
-impl ScriptResponseObserver for ScriptTextLoad {
-    fn response_started(&self, response: Arc<ScriptResponseHead>) {
+impl ResourceResponseObserver for ScriptTextLoad {
+    fn response_started(&self, response: Arc<ResourceResponseHead>) {
         let mut state = self.state.lock();
         assert!(
             matches!(state.phase, ScriptTextLoadPhase::Pending),
@@ -1046,11 +1046,11 @@ mod tests {
     #[test]
     fn completed_failed_script_load_retains_response_for_admitted_waiter() {
         let load = ScriptTextLoad::pending(SCOPE);
-        let response = Arc::new(ScriptResponseHead {
+        let response = Arc::new(ResourceResponseHead {
             head: response("https://cache.test/failed.js", "//").head(),
             network_request_headers: Some(vec![("x-request".into(), "original".into())]),
         });
-        load.finish(Err(crate::network::ScriptResponseFailure::PartialBody {
+        load.finish(Err(crate::network::ResourceResponseFailure::PartialBody {
             message: "truncated".into(),
             response: response.clone(),
             body: moli_page_types::SubresourceResponseBody::from_bytes(b"//".to_vec()),
@@ -1063,7 +1063,7 @@ mod tests {
             }),
         );
         assert!(lease.is_none());
-        let crate::network::ScriptResponseFailure::PartialBody {
+        let crate::network::ResourceResponseFailure::PartialBody {
             response: received,
             body,
             message,

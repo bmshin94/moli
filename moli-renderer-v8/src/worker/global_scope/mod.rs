@@ -134,8 +134,9 @@ mod xhr;
 
 use content_security_policy::*;
 pub(in crate::worker) use content_security_policy::{
-    continue_pending_worker_csp_report, fail_pending_worker_csp_report,
-    fulfill_pending_worker_csp_report,
+    continue_pending_worker_csp_report,
+    dispatch_worker_content_security_policy_violation_event_for_state,
+    fail_pending_worker_csp_report, fulfill_pending_worker_csp_report,
 };
 pub(crate) use fetch::*;
 use import_scripts::*;
@@ -144,16 +145,6 @@ pub(in crate::worker) use interception::{
 };
 use timers::*;
 pub(crate) use xhr::*;
-
-pub(super) fn dispatch_worker_csp_violation_event<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    loader: &crate::network::context::WorkerResourceLoader,
-    violation: &crate::content_security_policy::ContentSecurityPolicyUrlViolation,
-) {
-    content_security_policy::dispatch_worker_content_security_policy_violation_event(
-        scope, loader, violation,
-    );
-}
 
 pub(super) const WORKER_GLOBAL_LISTENERS_SLOT: &str = "__moliWorkerGlobalListeners";
 pub(crate) const WORKER_STATE_SLOT: &str = "__workerState";
@@ -1330,8 +1321,8 @@ pub(super) struct PendingWorkerXhr {
     pub(super) paused_response: Option<PausedWorkerSubresourceResponse>,
 }
 
-pub(super) struct PendingWorkerCspReport {
-    handle: SubresourceNetworkRequestHandle,
+pub(super) struct WorkerCspReport {
+    network: Arc<super::network_transfer::WorkerResourceTransfer>,
     pub(super) load: ResourceLoadLease,
     pub(super) document_url: Url,
     pub(super) request: Request,
@@ -1637,7 +1628,7 @@ pub(crate) struct WorkerGlobalState {
     /// Worker XHR id counter.
     pub(super) next_xhr_id: u32,
     /// Worker-owned CSP report requests paused for Fetch domain request-stage interception.
-    pub(super) pending_csp_reports: HashMap<u32, PendingWorkerCspReport>,
+    pub(super) pending_csp_reports: HashMap<u32, WorkerCspReport>,
     /// Worker-local TextDecoder state. TextEncoder is stateless, but TextDecoder
     /// can stream and needs decoder state tied to this worker's isolate.
     pub(crate) text_codecs: TextCodecStore,

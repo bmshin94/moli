@@ -10,18 +10,18 @@ use tokio::{
 };
 
 use crate::network::{BrowserResourceRuntimeOwner, BrowserResourceRuntimeOwnerRoot};
-use crate::network::{ScriptResponseHead, ScriptResponseObserver, ScriptResponseResult};
+use crate::network::{ResourceResponseHead, ResourceResponseObserver, ResourceResponseResult};
 
 #[derive(Debug)]
 enum ScriptProgress {
-    Head(std::sync::Arc<ScriptResponseHead>),
+    Head(std::sync::Arc<ResourceResponseHead>),
     Data(usize),
 }
 
 struct ScriptProgressObserver(tokio::sync::mpsc::UnboundedSender<ScriptProgress>);
 
-impl ScriptResponseObserver for ScriptProgressObserver {
-    fn response_started(&self, response: std::sync::Arc<ScriptResponseHead>) {
+impl ResourceResponseObserver for ScriptProgressObserver {
+    fn response_started(&self, response: std::sync::Arc<ResourceResponseHead>) {
         let _ = self.0.send(ScriptProgress::Head(response));
     }
 
@@ -35,7 +35,7 @@ fn start_observed_script(
     url: &str,
 ) -> Result<(
     tokio::sync::mpsc::UnboundedReceiver<ScriptProgress>,
-    oneshot::Receiver<ScriptResponseResult>,
+    oneshot::Receiver<ResourceResponseResult>,
 )> {
     let request = Request::get(url)?
         .with_page_network_policy()
@@ -123,7 +123,7 @@ async fn check_observed_shared_script(partial_failure: bool) -> Result<()> {
     if partial_failure {
         drop(stream);
         let result = timeout(Duration::from_secs(3), second).await??;
-        let crate::network::ScriptResponseFailure::PartialBody {
+        let crate::network::ResourceResponseFailure::PartialBody {
             response,
             body,
             message,

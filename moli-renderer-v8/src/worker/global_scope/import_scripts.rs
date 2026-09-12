@@ -1,6 +1,6 @@
 use super::*;
-use crate::network::{ScriptResponseFailure, ScriptResponseResult};
-use crate::worker::script_loading::WorkerScriptTransfer;
+use crate::network::{ResourceResponseFailure, ResourceResponseResult};
+use crate::worker::network_transfer::WorkerResourceTransfer;
 
 pub(super) struct WorkerImportScriptSource {
     pub(super) final_url: Url,
@@ -45,11 +45,20 @@ pub(super) fn materialize_worker_import_source(
 ) -> Result<WorkerImportScriptSource, WorkerImportScriptError> {
     let network = {
         let state = state.borrow();
-        WorkerScriptTransfer::start(
+        WorkerResourceTransfer::start(
             state.global_kind.network(),
             state.parent_tx.network_observer(),
-            state.current_script_url.as_ref().unwrap_or(script_url),
-            script_url,
+            |network| {
+                super::worker_request_started(
+                    network,
+                    state.current_script_url.as_ref().unwrap_or(script_url),
+                    script_url,
+                    "GET",
+                    &[],
+                    &None,
+                    crate::types::SubresourceResourceType::Script,
+                )
+            },
         )
         .ok_or_else(|| WorkerImportScriptError::network("worker is shutting down"))?
     };
@@ -152,7 +161,7 @@ pub(super) fn materialize_worker_import_source(
     })();
     result.inspect_err(|error| {
         if let WorkerImportScriptError::DomException { message, .. } = error {
-            network.failed(&ScriptResponseFailure::Request(message.clone()));
+            network.failed(&ResourceResponseFailure::Request(message.clone()));
         }
     })
 }
@@ -163,7 +172,7 @@ pub(super) fn fetch_worker_import_source_blocking(
     initiator_url: Option<Url>,
     referrer_policy: Option<String>,
     network_partition_key: Option<String>,
-    network: &Arc<WorkerScriptTransfer>,
+    network: &Arc<WorkerResourceTransfer>,
 ) -> Result<WorkerImportScriptSource, String> {
     let request_url = script_url.clone();
     let mut request = moli_fetch::Request::new("GET", script_url.as_str(), None, vec![])
@@ -195,7 +204,7 @@ pub(super) fn fetch_worker_import_source_blocking(
             request,
             load,
             network.clone(),
-            move |result: ScriptResponseResult| {
+            move |result: ResourceResponseResult| {
                 if let Err(error) = send.send(result) {
                     callback_network.complete(&error.0);
                 }

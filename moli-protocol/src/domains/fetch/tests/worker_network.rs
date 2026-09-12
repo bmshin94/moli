@@ -48,44 +48,28 @@ async fn completed_worker_request(
     .expect("the exact Worker must commit its terminal fact")
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn dedicated_fetch_without_worker_attachment() {
-    worker_fetch_without_attachment(false, false, UnattachedWorkerFinish::Fulfill).await;
+macro_rules! worker_without_attachment_tests {
+    ($($name:ident: $shared:literal, $nested:literal, $finish:ident, $resource:ident;)*) => {
+        $(#[tokio::test(flavor = "multi_thread")]
+        async fn $name() {
+            worker_request_without_attachment($shared, $nested, UnattachedWorkerFinish::$finish, Resource::$resource).await;
+        })*
+    };
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn shared_fetch_without_worker_attachment() {
-    worker_fetch_without_attachment(true, false, UnattachedWorkerFinish::Fulfill).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn dedicated_fetch_retirement_without_worker_attachment() {
-    worker_fetch_without_attachment(false, false, UnattachedWorkerFinish::Retire).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn shared_fetch_retirement_without_worker_attachment() {
-    worker_fetch_without_attachment(true, false, UnattachedWorkerFinish::Retire).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn dedicated_fetch_retirement_snapshot_without_worker_attachment() {
-    worker_fetch_without_attachment(false, false, UnattachedWorkerFinish::RetireSnapshot).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn shared_fetch_retirement_snapshot_without_worker_attachment() {
-    worker_fetch_without_attachment(true, false, UnattachedWorkerFinish::RetireSnapshot).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn nested_dedicated_fetch_without_worker_attachment() {
-    worker_fetch_without_attachment(false, true, UnattachedWorkerFinish::Fulfill).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn shared_ancestor_fetch_without_worker_attachment() {
-    worker_fetch_without_attachment(true, true, UnattachedWorkerFinish::Fulfill).await;
+worker_without_attachment_tests! {
+    dedicated_fetch_without_worker_attachment: false, false, Fulfill, Fetch;
+    shared_fetch_without_worker_attachment: true, false, Fulfill, Fetch;
+    dedicated_fetch_retirement_without_worker_attachment: false, false, Retire, Fetch;
+    shared_fetch_retirement_without_worker_attachment: true, false, Retire, Fetch;
+    dedicated_fetch_retirement_snapshot_without_worker_attachment: false, false, RetireSnapshot, Fetch;
+    shared_fetch_retirement_snapshot_without_worker_attachment: true, false, RetireSnapshot, Fetch;
+    nested_dedicated_fetch_without_worker_attachment: false, true, Fulfill, Fetch;
+    shared_ancestor_fetch_without_worker_attachment: true, true, Fulfill, Fetch;
+    dedicated_csp_retirement_without_worker_attachment: false, false, Retire, CspReport;
+    dedicated_csp_retirement_snapshot_without_worker_attachment: false, false, RetireSnapshot, CspReport;
+    shared_csp_retirement_without_worker_attachment: true, false, Retire, CspReport;
+    shared_csp_retirement_snapshot_without_worker_attachment: true, false, RetireSnapshot, CspReport;
 }
 
 enum UnattachedWorkerFinish {
@@ -94,18 +78,23 @@ enum UnattachedWorkerFinish {
     RetireSnapshot,
 }
 
-async fn worker_fetch_without_attachment(
+async fn worker_request_without_attachment(
     shared: bool,
     nested: bool,
     finish: UnattachedWorkerFinish,
+    resource: Resource,
 ) {
+    let csp_report = matches!(resource, Resource::CspReport);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, Router::new()
             .route("/page", get(|| async { ([(CONTENT_TYPE.as_str(), "text/html")], "<!doctype html>") }))
-            .route("/worker.js", get(|| async { ([(CONTENT_TYPE.as_str(), "text/javascript")],
-                "async function run(reply){const r=await fetch('/body');reply(await r.text());}onmessage=()=>run(postMessage);onconnect=e=>{const p=e.ports[0];p.onmessage=()=>run(v=>p.postMessage(v));p.start();p.postMessage('ready');};if(typeof postMessage==='function')postMessage('ready');") }))
+            .route("/worker.js", get(move || async move { (
+                [(CONTENT_TYPE.as_str(), "text/javascript"), ("Content-Security-Policy", if csp_report { "connect-src 'none'; report-uri /body" } else { "" })],
+                format!("async function run(reply){{{}}}onmessage=()=>run(postMessage);onconnect=e=>{{const p=e.ports[0];p.onmessage=()=>run(v=>p.postMessage(v));p.start();p.postMessage('ready');}};if(typeof postMessage==='function')postMessage('ready');",
+                    if csp_report { "await fetch('/blocked').catch(()=>{});reply('reported');" } else { "const r=await fetch('/body');reply(await r.text());" })
+            ) }))
         ).await.unwrap();
     });
     let mut ctx = TestContext::new();
@@ -191,6 +180,21 @@ async fn worker_fetch_without_attachment(
                 }
             }
         }).await.expect("Worker retirement must not need a Protocol consumer");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while ctx
+                .conn
+                .subscribe_browser_events()
+                .unwrap()
+                .0
+                .network_requests
+                .iter()
+                .any(|request| request.owner == NetworkOwner::Worker(pause.worker))
+            {
+                native.recv().await.unwrap();
+            }
+        })
+        .await
+        .expect("retiring the paused Worker must release its original request source");
         assert!(!pause.pause.is_available());
         if matches!(finish, UnattachedWorkerFinish::RetireSnapshot) {
             let snapshot = ctx.conn.subscribe_browser_events().unwrap().0;
@@ -270,6 +274,7 @@ enum Resource {
 
 #[derive(Clone, Copy, Debug)]
 enum Decision {
+    RequestContinue,
     RequestFail,
     RequestAbort,
     ResponseAbort,
@@ -346,10 +351,12 @@ worker_network_cases!(true, Xhr,
 );
 
 worker_network_cases!(false, CspReport,
+    dedicated_csp_request_continue: RequestContinue,
     dedicated_csp_request_fail: RequestFail,
     dedicated_csp_request_fulfill: RequestFulfill,
 );
 worker_network_cases!(true, CspReport,
+    shared_csp_request_continue: RequestContinue,
     shared_csp_request_fail: RequestFail,
     shared_csp_request_fulfill: RequestFulfill,
 );
@@ -360,6 +367,7 @@ async fn assert_worker_network_owner(shared: bool, resource_kind: Resource, deci
     let request_stage = matches!(
         decision,
         Decision::RequestFail
+            | Decision::RequestContinue
             | Decision::RequestFulfill
             | Decision::RequestFulfillBinary
             | Decision::RequestFulfillCorsBlocked
@@ -606,6 +614,14 @@ if (typeof postMessage === 'function') postMessage('ready');
         .await;
     }
     let (method, params) = match decision {
+        Decision::RequestContinue => (
+            "Fetch.continueRequest",
+            json!({
+                "requestId":request_id,"method":"PATCH",
+                "headers":[{"name":"x-worker-request","value":"intercepted"},{"name":"content-type","value":"text/plain"}],
+                "postData":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "intercepted-payload"),
+            }),
+        ),
         Decision::RequestFail | Decision::ResponseFail => (
             "Fetch.failRequest",
             json!({"requestId":request_id,"errorReason":"Failed"}),
@@ -650,6 +666,7 @@ if (typeof postMessage === 'function') postMessage('ready');
     let result = take_response_by_id(&mut ctx, 11);
     let value = &result["result"]["result"]["value"];
     let expected_body = match decision {
+        Decision::RequestContinue => Some("server-body"),
         Decision::RequestFail
         | Decision::ResponseFail
         | Decision::RequestAbort
@@ -684,6 +701,16 @@ if (typeof postMessage === 'function') postMessage('ready');
         assert_eq!(value["text"], body);
     }
     let (completed, record) = completed_worker_request(&mut native, &url).await;
+    if matches!(decision, Decision::RequestContinue) {
+        assert_eq!(record.method(), "PATCH");
+        assert_eq!(
+            record.request_body_bytes(),
+            Some(b"intercepted-payload".as_slice())
+        );
+        assert!(record.request_headers().iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("x-worker-request") && value == "intercepted"
+        }));
+    }
     let owner = completed.owner;
     assert!(if shared {
         matches!(owner, NetworkOwner::Worker(WorkerHandle::Shared { .. }))
@@ -753,7 +780,7 @@ if (typeof postMessage === 'function') postMessage('ready');
     .await;
     // Native commit does not imply that Protocol consumed the original FIFO.
     // Query wire artifacts only after this exact request's publication fence.
-    if !binary && !csp_report {
+    if !binary && (!csp_report || matches!(decision, Decision::RequestContinue)) {
         ctx.process_async(json!({"id":20,"method":"Network.getRequestPostData","sessionId":worker_session,"params":{"requestId":network_id}})).await;
         ctx.expect_result(
             20,

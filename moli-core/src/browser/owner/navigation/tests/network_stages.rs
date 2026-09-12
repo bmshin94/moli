@@ -20,9 +20,15 @@ enum RequestKind {
     ImportScript,
     StaticModule,
     DynamicModule,
+    CspReport,
+    ModuleCspReport,
 }
 
 impl RequestKind {
+    fn is_report(self) -> bool {
+        matches!(self, Self::CspReport | Self::ModuleCspReport)
+    }
+
     fn is_script(self) -> bool {
         matches!(
             self,
@@ -34,6 +40,7 @@ impl RequestKind {
 #[derive(Clone, Copy, Debug)]
 enum Finish {
     Complete,
+    UnfollowedRedirect,
     PartialFailure,
     DetachedKeepalive,
     DetachedBeforeHeadersFailure,
@@ -217,7 +224,7 @@ async fn native_worker_stages_shared_sync_xhr_retirement_cancels_request() {
     .await;
 }
 
-macro_rules! script_stage_tests {
+macro_rules! worker_stage_tests {
     ($($name:ident: $worker:ident, $request:ident, $finish:ident;)*) => {
         $(
             #[tokio::test]
@@ -230,7 +237,21 @@ macro_rules! script_stage_tests {
     };
 }
 
-script_stage_tests! {
+worker_stage_tests! {
+    native_worker_csp_stages_redirect_body: Dedicated, CspReport, UnfollowedRedirect;
+    native_worker_csp_stages_dynamic_module: Dedicated, ModuleCspReport, Complete;
+    native_worker_csp_stages_shared_dynamic_module: Shared, ModuleCspReport, Complete;
+    native_worker_csp_stages_dynamic_module_detached: Dedicated, ModuleCspReport, DetachedKeepalive;
+    native_worker_csp_stages_dedicated: Dedicated, CspReport, Complete;
+    native_worker_csp_stages_nested: Nested, CspReport, Complete;
+    native_worker_csp_stages_shared: Shared, CspReport, Complete;
+    native_worker_csp_stages_service: Service, CspReport, Complete;
+    native_worker_csp_stages_partial_failure: Dedicated, CspReport, PartialFailure;
+    native_worker_csp_stages_dedicated_detached: Dedicated, CspReport, DetachedKeepalive;
+    native_worker_csp_stages_nested_detached: Nested, CspReport, DetachedKeepalive;
+    native_worker_csp_stages_shared_detached: Shared, CspReport, DetachedKeepalive;
+    native_worker_csp_stages_service_detached: Service, CspReport, DetachedKeepalive;
+    native_worker_csp_stages_detached_failure: Dedicated, CspReport, DetachedBeforeHeadersFailure;
     native_worker_script_stages_dedicated_import: Dedicated, ImportScript, Complete;
     native_worker_script_stages_nested_import: Nested, ImportScript, Complete;
     native_worker_script_stages_shared_import: Shared, ImportScript, Complete;
@@ -289,6 +310,8 @@ async fn worker_network_stages_with_request(
             RequestKind::ImportScript => "try{importScripts('/probe')}catch(_){}".into(),
             RequestKind::StaticModule => "import '/probe';".into(),
             RequestKind::DynamicModule => "import('/probe').catch(()=>{})".into(),
+            RequestKind::CspReport => "fetch('/blocked').catch(()=>{})".into(),
+            RequestKind::ModuleCspReport => "import('/blocked').catch(()=>{})".into(),
         };
         let options = if matches!(request_kind, RequestKind::StaticModule) {
             "{type:'module'}"
@@ -311,7 +334,10 @@ async fn worker_network_stages_with_request(
                 request_script.clone()
             }
             WorkerKind::Service => {
-                assert!(matches!(request_kind, RequestKind::Fetch));
+                assert!(matches!(
+                    request_kind,
+                    RequestKind::Fetch | RequestKind::CspReport
+                ));
                 format!("addEventListener('install',event=>event.waitUntil({request_script}))")
             }
         };
@@ -341,6 +367,34 @@ async fn worker_network_stages_with_request(
             let request = String::from_utf8(request).unwrap();
             let path = request.split_whitespace().nth(1).unwrap();
             if path == "/probe" {
+                if request_kind.is_report() {
+                    assert!(request.starts_with("POST /probe HTTP/1.1"));
+                    let length = request
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .expect("report body length");
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).await.unwrap();
+                    let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        report["csp-report"]["effective-directive"],
+                        if matches!(request_kind, RequestKind::ModuleCspReport) {
+                            "script-src"
+                        } else {
+                            "connect-src"
+                        }
+                    );
+                    assert!(
+                        report["csp-report"]["blocked-uri"]
+                            .as_str()
+                            .unwrap()
+                            .ends_with("/blocked")
+                    );
+                }
                 requested.send(()).unwrap();
                 release_headers.await.unwrap();
                 if matches!(
@@ -354,7 +408,12 @@ async fn worker_network_stages_with_request(
                 } else {
                     "text/plain"
                 };
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                let status = if matches!(finish, Finish::UnfollowedRedirect) {
+                    "302 Found\r\nLocation: /must-not-follow"
+                } else {
+                    "200 OK"
+                };
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
                 release_chunk.await.unwrap();
                 stream
                     .write_all(&response_body.as_bytes()[..2])
@@ -375,7 +434,16 @@ async fn worker_network_stages_with_request(
                 "/nested.js" => ("text/javascript", request_script.as_str()),
                 other => panic!("unexpected Worker fixture request: {other}"),
             };
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            let csp = if request_kind.is_report() && path != "/" {
+                if matches!(request_kind, RequestKind::ModuleCspReport) {
+                    "Content-Security-Policy: script-src 'none'; report-uri /probe\r\n"
+                } else {
+                    "Content-Security-Policy: connect-src 'none'; report-uri /probe\r\n"
+                }
+            } else {
+                ""
+            };
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{csp}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         }
     });
     let service = BrowserService::start().unwrap();
@@ -399,11 +467,16 @@ async fn worker_network_stages_with_request(
                         item.as_ref()
                     && request.url().as_str() == url
                 {
-                    assert_eq!(request.keepalive(), finish.keepalive());
+                    assert_eq!(
+                        request.keepalive(),
+                        finish.keepalive() || request_kind.is_report()
+                    );
                     assert_eq!(
                         request.resource_type(),
                         match request_kind {
                             RequestKind::Fetch => crate::page::SubresourceResourceType::Fetch,
+                            RequestKind::CspReport | RequestKind::ModuleCspReport =>
+                                crate::page::SubresourceResourceType::CspReport,
                             RequestKind::Xhr | RequestKind::SyncXhr =>
                                 crate::page::SubresourceResourceType::Xhr,
                             RequestKind::ImportScript
@@ -551,7 +624,7 @@ async fn worker_network_stages_with_request(
                         SubresourceBodyFinishedResult::Failed(error),
                     ) => assert!(!error.is_empty()),
                     (
-                        Finish::Complete | Finish::DetachedKeepalive,
+                        Finish::Complete | Finish::UnfollowedRedirect | Finish::DetachedKeepalive,
                         SubresourceBodyFinishedResult::Ready(body),
                     ) => assert_eq!(body.clone_body_bytes(), response_body.as_bytes()),
                     (

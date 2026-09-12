@@ -424,7 +424,7 @@ impl NativeModuleGraphFetchRequest {
         let kind = self.kind;
         let integrity = self.fetch_metadata.request_metadata.integrity.clone();
         let request = self.request()?;
-        let completion = move |response: crate::network::ScriptResponseResult| {
+        let completion = move |response: crate::network::ResourceResponseResult| {
             let mut network_result: Option<SharedNavigationResponseResult> = None;
             let result = response
                 .map_err(|error| {
