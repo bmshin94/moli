@@ -5027,6 +5027,19 @@ fn navigator_media_capabilities_rejects_insecure_encrypted_queries_as_promises()
 }
 
 #[test]
+fn navigator_media_capabilities_matches_the_software_chromium_profile() {
+    let mut vm = new_storage_test_vm("https://media-capabilities-profile.test/");
+    vm.eval(&format!("globalThis.__profile = 'pending'; ({}).then(value => {{ globalThis.__profile = value; }}, error => {{ globalThis.__profile = String(error); }});",
+        include_str!("../../../../tests/fixtures/media-capabilities.js")))
+        .expect("capability profile should evaluate");
+    assert_eq!(
+        vm.eval("globalThis.__profile")
+            .expect("profile queries should settle"),
+        "[3,3,3,0,3,3,3,3]"
+    );
+}
+
+#[test]
 fn navigator_media_capabilities_resolves_normalized_headless_results() {
     let mut vm = new_storage_test_vm("https://secure-media-capabilities.test/");
 
@@ -5080,7 +5093,7 @@ fn navigator_media_capabilities_resolves_normalized_headless_results() {
     assert_eq!(
         vm.eval("String(globalThis.__mediaCapabilitiesResults)")
             .expect("MediaCapabilities results should settle"),
-        r#"{"decoding":["boolean",false,false,null,false,"file",24],"encoding":["boolean",false,false,false,"record","audio/webm; codecs=\"opus\""]}"#
+        r#"{"decoding":["boolean",true,false,null,false,"file",24],"encoding":["boolean",false,false,false,"record","audio/webm; codecs=\"opus\""]}"#
     );
 }
 
@@ -6458,7 +6471,8 @@ fn zhihu_probe_window_capabilities_exist_on_global_scope() {
               openType: typeof open,
               mediaSourceType: typeof MediaSource,
               mediaSourceProbe: MediaSource.isTypeSupported('video/mp4; codecs="avc1.42E01E"'),
-              mediaSourceNope: MediaSource.isTypeSupported('video/webm; codecs="vp09.00.10.08"'),
+              mediaSourceVp9: MediaSource.isTypeSupported('video/webm; codecs="vp09.00.10.08"'),
+              mediaSourceNope: MediaSource.isTypeSupported('video/webm; codecs="not-a-codec"'),
               availLeft: screen.availLeft,
               availTop: screen.availTop
             })
@@ -6468,7 +6482,7 @@ fn zhihu_probe_window_capabilities_exist_on_global_scope() {
 
     assert_eq!(
         result,
-        r#"{"stopType":"function","printType":"function","openType":"function","mediaSourceType":"function","mediaSourceProbe":true,"mediaSourceNope":false,"availLeft":0,"availTop":0}"#
+        r#"{"stopType":"function","printType":"function","openType":"function","mediaSourceType":"function","mediaSourceProbe":true,"mediaSourceVp9":true,"mediaSourceNope":false,"availLeft":0,"availTop":0}"#
     );
 }
 #[test]
@@ -6888,7 +6902,7 @@ fn zhihu_bot_detection_harness_fixture_matches_stable_moli_baseline() {
     assert_eq!(value["mediaSource"]["name"], "MediaSource");
     assert_eq!(value["mediaSource"]["staticName"], "isTypeSupported");
     assert_eq!(value["mediaSource"]["avc1"], true);
-    assert_eq!(value["mediaSource"]["vp09"], false);
+    assert_eq!(value["mediaSource"]["vp09"], true);
     assert_eq!(value["mediaSource"]["instanceOf"], true);
     assert_eq!(value["mediaSource"]["prototypeMatches"], true);
     assert_eq!(value["mediaSource"]["ownKeys"], serde_json::json!([]));
