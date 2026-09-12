@@ -10,7 +10,7 @@ use moli_page_types::{
     SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResponseStarted,
 };
 
-pub(super) fn publish_worker_network_item(
+pub(in crate::worker) fn publish_worker_network_item(
     observer: &crate::worker::WorkerNetworkObserver,
     network: &crate::runtime::RendererWorkerNetworkRequest,
     item: ScriptNetworkOutputItem,
@@ -93,7 +93,7 @@ fn worker_fetch_request(pending: &PendingWorkerFetch) -> SubresourceRequestStart
     .with_keepalive(pending.request_metadata.keepalive)
 }
 
-pub(super) fn worker_request_started(
+pub(in crate::worker) fn worker_request_started(
     network: &crate::runtime::RendererWorkerNetworkRequest,
     document_url: &Url,
     url: &Url,
@@ -147,7 +147,7 @@ fn record_worker_fetch_started(state: &WorkerGlobalState, pending: &PendingWorke
     );
 }
 
-pub(super) fn record_worker_fetch_response(
+pub(in crate::worker) fn record_worker_fetch_response(
     observer: &crate::worker::WorkerNetworkObserver,
     network: &crate::runtime::RendererWorkerNetworkRequest,
     head: ResponseHead,

@@ -251,6 +251,18 @@ fn inspect_payload_with_image_data(payload: &V8StructuredClonePayload, expressio
     result.to_rust_string_lossy(scope)
 }
 
+// Script receipts now share the parent FIFO with behavior messages. Keep the
+// caller's original timeout and payload/error assertions; native stage, owner
+// and retirement ordering are checked separately by Browser's gated tests.
+async fn recv_behavior_message(handle: &mut WorkerHandle) -> Option<WorkerToParentMessage> {
+    loop {
+        let message = handle.recv().await?;
+        if !matches!(message, WorkerToParentMessage::Network(_)) {
+            return Some(message);
+        }
+    }
+}
+
 fn expect_post_json(message: WorkerToParentMessage) -> String {
     match message {
         WorkerToParentMessage::Post(payload) => stringify_payload(&payload),

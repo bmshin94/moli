@@ -2737,7 +2737,7 @@ async fn worker_blob_surface_supports_response_blob_and_blob_url_import_scripts(
         "http://127.0.0.1/worker/main.js".into(),
     );
 
-    let first = timeout(TIMEOUT, handle.recv())
+    let first = timeout(TIMEOUT, recv_behavior_message(&mut handle))
         .await
         .expect("timed out")
         .expect("channel closed");
@@ -2746,7 +2746,7 @@ async fn worker_blob_surface_supports_response_blob_and_blob_url_import_scripts(
         r#"{"blobCtor":"function","blobTag":"[object Blob]","size":22,"type":"text/plain;charset=utf-8","text":"hello from worker blob","blobUrlPrefix":true}"#
     );
 
-    let second = timeout(TIMEOUT, handle.recv())
+    let second = timeout(TIMEOUT, recv_behavior_message(&mut handle))
         .await
         .expect("timed out")
         .expect("channel closed");
@@ -4546,7 +4546,7 @@ async fn worker_importscripts_applies_loader_network_policy_extra_http_headers()
         },
     );
 
-    let msg = timeout(TIMEOUT, handle.recv())
+    let msg = timeout(TIMEOUT, recv_behavior_message(&mut handle))
         .await
         .expect("timed out")
         .expect("channel closed");
@@ -4613,7 +4613,7 @@ async fn module_worker_dependency_applies_loader_network_policy_extra_http_heade
         },
     );
 
-    let msg = timeout(TIMEOUT, handle.recv())
+    let msg = timeout(TIMEOUT, recv_behavior_message(&mut handle))
         .await
         .expect("timed out")
         .expect("channel closed");
@@ -6260,6 +6260,17 @@ async fn worker_importscripts_websocket_resolves_against_imported_script_url() {
         loader,
         vec![format!("{websocket_base_url}/worker/imported/blocked/*")],
     );
+
+    let script = network_records.recv_record(&mut handle).await;
+    assert_eq!(
+        script.url().as_str(),
+        format!("{base_url}/worker/imported/ws.js")
+    );
+    assert_eq!(script.resource_type(), SubresourceResourceType::Script);
+    assert!(matches!(
+        script.outcome(),
+        SubresourceNetworkOutcome::Success { .. }
+    ));
 
     let record = network_records.recv_record(&mut handle).await;
     assert_eq!(record.url().as_str(), expected_url);

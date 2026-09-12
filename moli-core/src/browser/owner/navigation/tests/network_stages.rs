@@ -17,6 +17,18 @@ enum RequestKind {
     Fetch,
     Xhr,
     SyncXhr,
+    ImportScript,
+    StaticModule,
+    DynamicModule,
+}
+
+impl RequestKind {
+    fn is_script(self) -> bool {
+        matches!(
+            self,
+            Self::ImportScript | Self::StaticModule | Self::DynamicModule
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -205,6 +217,44 @@ async fn native_worker_stages_shared_sync_xhr_retirement_cancels_request() {
     .await;
 }
 
+macro_rules! script_stage_tests {
+    ($($name:ident: $worker:ident, $request:ident, $finish:ident;)*) => {
+        $(
+            #[tokio::test]
+            async fn $name() {
+                worker_network_stages_with_request(
+                    WorkerKind::$worker, Finish::$finish, RequestKind::$request,
+                ).await;
+            }
+        )*
+    };
+}
+
+script_stage_tests! {
+    native_worker_script_stages_dedicated_import: Dedicated, ImportScript, Complete;
+    native_worker_script_stages_nested_import: Nested, ImportScript, Complete;
+    native_worker_script_stages_shared_import: Shared, ImportScript, Complete;
+    native_worker_script_stages_service_import: Service, ImportScript, Complete;
+    native_worker_script_stages_dedicated_static_module: Dedicated, StaticModule, Complete;
+    native_worker_script_stages_nested_static_module: Nested, StaticModule, Complete;
+    native_worker_script_stages_shared_static_module: Shared, StaticModule, Complete;
+    native_worker_script_stages_service_static_module: Service, StaticModule, Complete;
+    native_worker_script_stages_dedicated_dynamic_module: Dedicated, DynamicModule, Complete;
+    native_worker_script_stages_nested_dynamic_module: Nested, DynamicModule, Complete;
+    native_worker_script_stages_shared_dynamic_module: Shared, DynamicModule, Complete;
+    native_worker_script_stages_import_partial_failure: Dedicated, ImportScript, PartialFailure;
+    native_worker_script_stages_static_module_partial_failure: Dedicated, StaticModule, PartialFailure;
+    native_worker_script_stages_dynamic_module_partial_failure: Dedicated, DynamicModule, PartialFailure;
+    native_worker_script_stages_dedicated_import_retirement: Dedicated, ImportScript, RetiredCancellation;
+    native_worker_script_stages_nested_import_retirement: Nested, ImportScript, RetiredCancellation;
+    native_worker_script_stages_shared_import_retirement: Shared, ImportScript, RetiredCancellation;
+    native_worker_script_stages_service_import_retirement: Service, ImportScript, RetiredCancellation;
+    native_worker_script_stages_dedicated_static_module_retirement: Dedicated, StaticModule, RetiredCancellation;
+    native_worker_script_stages_nested_static_module_retirement: Nested, StaticModule, RetiredCancellation;
+    native_worker_script_stages_shared_static_module_retirement: Shared, StaticModule, RetiredCancellation;
+    native_worker_script_stages_service_static_module_retirement: Service, StaticModule, RetiredCancellation;
+}
+
 async fn worker_network_stages(kind: WorkerKind, finish: Finish) {
     worker_network_stages_with_request(kind, finish, RequestKind::Fetch).await;
 }
@@ -217,6 +267,11 @@ async fn worker_network_stages_with_request(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let url = format!("{origin}/probe");
+    let response_body = if request_kind.is_script() {
+        "//ok"
+    } else {
+        "body"
+    };
     let (requested, request_arrived) = oneshot::channel();
     let (headers, release_headers) = oneshot::channel();
     let (chunk, release_chunk) = oneshot::channel();
@@ -231,24 +286,48 @@ async fn worker_network_stages_with_request(
                 "try{{const xhr=new XMLHttpRequest();xhr.open('GET','/probe',{});xhr.send();}}catch(_){{}}",
                 matches!(request_kind, RequestKind::Xhr)
             ),
+            RequestKind::ImportScript => "try{importScripts('/probe')}catch(_){}".into(),
+            RequestKind::StaticModule => "import '/probe';".into(),
+            RequestKind::DynamicModule => "import('/probe').catch(()=>{})".into(),
+        };
+        let options = if matches!(request_kind, RequestKind::StaticModule) {
+            "{type:'module'}"
+        } else {
+            "{}"
         };
         let worker_script = match kind {
             WorkerKind::Dedicated => request_script.clone(),
-            WorkerKind::Nested => "globalThis.child = new Worker('/nested.js')".into(),
+            WorkerKind::Nested => format!("globalThis.child = new Worker('/nested.js',{options})"),
+            WorkerKind::Shared if request_kind.is_script() => {
+                format!("{request_script};onconnect=()=>{{}}")
+            }
             WorkerKind::Shared => format!("onconnect=()=>{{{request_script}}}"),
+            WorkerKind::Service
+                if matches!(
+                    request_kind,
+                    RequestKind::ImportScript | RequestKind::StaticModule
+                ) =>
+            {
+                request_script.clone()
+            }
             WorkerKind::Service => {
                 assert!(matches!(request_kind, RequestKind::Fetch));
                 format!("addEventListener('install',event=>event.waitUntil({request_script}))")
             }
         };
         let bootstrap = match kind {
-            WorkerKind::Dedicated | WorkerKind::Nested => {
-                "globalThis.worker = new Worker('/worker.js')"
+            WorkerKind::Dedicated => {
+                format!("globalThis.worker = new Worker('/worker.js',{options})")
             }
+            WorkerKind::Nested => "globalThis.worker = new Worker('/worker.js')".into(),
             WorkerKind::Shared => {
-                "globalThis.worker = new SharedWorker('/worker.js');worker.port.start()"
+                format!(
+                    "globalThis.worker = new SharedWorker('/worker.js',{options});worker.port.start()"
+                )
             }
-            WorkerKind::Service => "navigator.serviceWorker.register('/worker.js')",
+            WorkerKind::Service => {
+                format!("navigator.serviceWorker.register('/worker.js',{options})")
+            }
         };
         let html = format!("<!doctype html><script>{bootstrap}</script>");
         loop {
@@ -270,12 +349,23 @@ async fn worker_network_stages_with_request(
                 ) {
                     break;
                 }
-                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
+                let mime = if request_kind.is_script() {
+                    "text/javascript"
+                } else {
+                    "text/plain"
+                };
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
                 release_chunk.await.unwrap();
-                stream.write_all(b"bo").await.unwrap();
+                stream
+                    .write_all(&response_body.as_bytes()[..2])
+                    .await
+                    .unwrap();
                 release_tail.await.unwrap();
                 if !matches!(finish, Finish::PartialFailure) {
-                    stream.write_all(b"dy").await.unwrap();
+                    stream
+                        .write_all(&response_body.as_bytes()[2..])
+                        .await
+                        .unwrap();
                 }
                 break;
             }
@@ -316,6 +406,10 @@ async fn worker_network_stages_with_request(
                             RequestKind::Fetch => crate::page::SubresourceResourceType::Fetch,
                             RequestKind::Xhr | RequestKind::SyncXhr =>
                                 crate::page::SubresourceResourceType::Xhr,
+                            RequestKind::ImportScript
+                            | RequestKind::StaticModule
+                            | RequestKind::DynamicModule =>
+                                crate::page::SubresourceResourceType::Script,
                         }
                     );
                     break (
@@ -459,7 +553,7 @@ async fn worker_network_stages_with_request(
                     (
                         Finish::Complete | Finish::DetachedKeepalive,
                         SubresourceBodyFinishedResult::Ready(body),
-                    ) => assert_eq!(body.clone_body_bytes(), b"body"),
+                    ) => assert_eq!(body.clone_body_bytes(), response_body.as_bytes()),
                     (
                         Finish::PartialFailure,
                         SubresourceBodyFinishedResult::FailedWithPartialBody {
@@ -468,7 +562,10 @@ async fn worker_network_stages_with_request(
                         },
                     ) => {
                         assert!(!error_text.is_empty());
-                        assert_eq!(partial_body.clone_body_bytes(), b"bo");
+                        assert_eq!(
+                            partial_body.clone_body_bytes(),
+                            &response_body.as_bytes()[..2]
+                        );
                     }
                     other => {
                         panic!("native terminal must retain the actual transport result: {other:?}")

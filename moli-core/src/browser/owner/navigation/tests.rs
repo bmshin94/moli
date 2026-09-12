@@ -1555,14 +1555,50 @@ async fn native_dedicated_worker_network_xhr_success_and_fetch_failure_without_d
     .await;
 }
 
+#[tokio::test]
+async fn native_worker_local_script_import_completes_before_close_without_devtools() {
+    dedicated_worker_network_before_close(
+        "importScripts('data:text/javascript,globalThis.nativeImport=1');close()",
+        &[("data:text/javascript,globalThis.nativeImport=1", true)],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_local_script_dynamic_module_completes_before_close_without_devtools() {
+    dedicated_worker_network_before_close(
+        "import('data:text/javascript,globalThis.nativeDynamic=1').then(()=>close())",
+        &[("data:text/javascript,globalThis.nativeDynamic=1", true)],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn native_worker_local_script_static_module_completes_before_close_without_devtools() {
+    dedicated_worker_network_before_close_with_kind(
+        "import 'data:text/javascript,globalThis.nativeStatic=1';close()",
+        &[("data:text/javascript,globalThis.nativeStatic=1", true)],
+        "module",
+    )
+    .await;
+}
+
 async fn dedicated_worker_network_before_close(script: &str, urls: &[(&str, bool)]) {
+    dedicated_worker_network_before_close_with_kind(script, urls, "classic").await;
+}
+
+async fn dedicated_worker_network_before_close_with_kind(
+    script: &str,
+    urls: &[(&str, bool)],
+    kind: &str,
+) {
     use crate::browser::{NetworkOwner, WorkerHandle, WorkerSnapshot};
     let service = BrowserService::start().unwrap();
     let browser = service.handle();
     let (context, contents) = context_with_contents(&service);
     let (_, mut events) = browser.subscribe().unwrap();
     let script = format!("data:text/javascript,{script}");
-    navigate(&context, contents, &format!("data:text/html,<script>globalThis.worker=new Worker({script:?}, {{name:'native-dedicated-network'}})</script>")).await;
+    navigate(&context, contents, &format!("data:text/html,<script>globalThis.worker=new Worker({script:?}, {{name:'native-dedicated-network',type:{kind:?}}})</script>")).await;
     let mut root = None;
     let mut created = Vec::new();
     let mut completed = Vec::new();
