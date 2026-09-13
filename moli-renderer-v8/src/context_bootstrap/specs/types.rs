@@ -88,6 +88,8 @@ pub(in crate::context_bootstrap) enum ConstructorKind {
     RtcPeerConnection,
     RtcIceCandidate,
     RtcSessionDescription,
+    RtcPeerConnectionIceEvent,
+    RtcDataChannelEvent,
     Navigator,
     WorkerNavigator,
     Permissions,
