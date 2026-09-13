@@ -259,10 +259,6 @@ pub(super) fn active_owner_ids_for_instance(
     runtime_service.active_owner_ids_for_instance(instance_id)
 }
 
-pub(super) fn owner_lifecycle_is_empty(runtime_service: &SharedWorkerRuntimeService) -> bool {
-    runtime_service.owner_lifecycle_is_empty()
-}
-
 pub(super) fn install_owner_wake_sender(
     runtime_service: &SharedWorkerRuntimeService,
 ) -> tokio::sync::mpsc::UnboundedReceiver<SharedWorkerRuntimeOwnerWake> {

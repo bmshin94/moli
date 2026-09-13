@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_connect_and_remove_drive_owner_lifecycle_projection() {
+    async fn runtime_connect_and_remove_update_registry_owners() {
         let service = test_support::runtime_service();
         let message_port_owner = test_support::SharedWorkerPageClientHarness::new();
         let message_port_registry = crate::message_port_runtime::new_message_port_registry();
@@ -264,12 +264,12 @@ mod tests {
 
         service.remove_client(client_id);
 
-        assert!(test_support::owner_lifecycle_is_empty(&service));
+        assert!(test_support::matching_is_empty(&service));
         drop(browser_context_runtime);
     }
 
     #[tokio::test]
-    async fn owner_lifecycle_projection_collapses_multiple_clients_from_same_owner() {
+    async fn registry_membership_groups_multiple_clients_from_same_owner() {
         let service = test_support::runtime_service();
         let message_port_owner = test_support::SharedWorkerPageClientHarness::new();
         let message_port_registry = crate::message_port_runtime::new_message_port_registry();
@@ -310,11 +310,11 @@ mod tests {
         assert_eq!(
             test_support::active_owner_ids_for_instance(&service, instance_id),
             vec![owner_id],
-            "removing one of two wrapper-level clients must not emit owner removal"
+            "removing one of two clients must preserve its owner membership"
         );
 
         service.remove_client(second_client_id);
-        assert!(test_support::owner_lifecycle_is_empty(&service));
+        assert!(test_support::matching_is_empty(&service));
         drop(browser_context_runtime);
     }
 }

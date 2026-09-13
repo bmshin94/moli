@@ -6,7 +6,6 @@
 
 mod client;
 mod client_endpoint;
-mod client_owner_lifecycle;
 mod client_removal;
 mod commands;
 mod connection;

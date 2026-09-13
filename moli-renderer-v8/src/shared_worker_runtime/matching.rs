@@ -7,13 +7,10 @@ use moli_shared_worker::{
     SharedWorkerClientId, SharedWorkerClientOwnerId, SharedWorkerClientRemoval,
     SharedWorkerConnectAction, SharedWorkerDescriptor, SharedWorkerInstanceId,
     SharedWorkerInstanceRemoval, SharedWorkerKey, SharedWorkerLoadFailure, SharedWorkerLoadReady,
-    SharedWorkerObservedAction, SharedWorkerRegistry, SharedWorkerRegistryDiagnostics,
+    SharedWorkerRegistry, SharedWorkerRegistryDiagnostics,
 };
 
-use super::{
-    client_owner_lifecycle::SharedWorkerClientOwnerLifecycleStore,
-    host::SharedRendererSharedWorkerHost,
-};
+use super::host::SharedRendererSharedWorkerHost;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SharedWorkerClientOwnerIdAllocator {
@@ -38,7 +35,6 @@ impl SharedWorkerClientOwnerIdAllocator {
 #[derive(Default)]
 pub(super) struct SharedWorkerMatchingStore {
     registry: SharedWorkerRegistry<SharedRendererSharedWorkerHost>,
-    client_owner_lifecycle: SharedWorkerClientOwnerLifecycleStore,
     client_owner_id_allocator: SharedWorkerClientOwnerIdAllocator,
 }
 
@@ -62,11 +58,8 @@ impl SharedWorkerMatchingStore {
         descriptor: SharedWorkerDescriptor,
         client_owner_id: SharedWorkerClientOwnerId,
     ) -> SharedWorkerConnectAction<SharedRendererSharedWorkerHost> {
-        self.consume_observed_action(self.registry.connect_with_owner_observed(
-            key,
-            descriptor,
-            client_owner_id,
-        ))
+        self.registry
+            .connect_with_owner(key, descriptor, client_owner_id)
     }
 
     pub(super) fn finish_loading(
@@ -83,31 +76,27 @@ impl SharedWorkerMatchingStore {
         key: &SharedWorkerKey,
         instance_id: SharedWorkerInstanceId,
     ) -> SharedWorkerLoadFailure {
-        self.consume_observed_action(self.registry.fail_loading_observed(key, instance_id))
+        self.registry.fail_loading(key, instance_id)
     }
 
     pub(super) fn remove_client(
         &self,
         client_id: SharedWorkerClientId,
     ) -> SharedWorkerClientRemoval<SharedRendererSharedWorkerHost> {
-        self.consume_observed_action(self.registry.remove_client_observed(client_id))
+        self.registry.remove_client(client_id)
     }
 
     pub(super) fn remove_instance(
         &self,
         instance_id: SharedWorkerInstanceId,
     ) -> SharedWorkerInstanceRemoval<SharedRendererSharedWorkerHost> {
-        self.consume_observed_action(self.registry.remove_instance_observed(instance_id))
+        self.registry.remove_instance(instance_id)
     }
 
     pub(super) fn remove_all_instances(
         &self,
     ) -> Vec<SharedWorkerInstanceRemoval<SharedRendererSharedWorkerHost>> {
-        self.registry
-            .remove_all_instances_observed()
-            .into_iter()
-            .map(|observed| self.consume_observed_action(observed))
-            .collect()
+        self.registry.remove_all_instances()
     }
 
     pub(super) fn running_host(
@@ -141,24 +130,12 @@ impl SharedWorkerMatchingStore {
         self.client_owner_id_allocator.allocate()
     }
 
-    fn consume_observed_action<T>(&self, observed: SharedWorkerObservedAction<T>) -> T {
-        self.client_owner_lifecycle
-            .apply_events(observed.owner_events);
-        observed.action
-    }
-
     #[cfg(test)]
     pub(super) fn active_owner_ids_for_instance(
         &self,
         instance_id: SharedWorkerInstanceId,
     ) -> Vec<SharedWorkerClientOwnerId> {
-        self.client_owner_lifecycle
-            .active_owner_ids_for_instance(instance_id)
-    }
-
-    #[cfg(test)]
-    pub(super) fn owner_lifecycle_is_empty(&self) -> bool {
-        self.client_owner_lifecycle.is_empty()
+        self.registry.client_owner_ids_for_instance(instance_id)
     }
 
     #[cfg(test)]

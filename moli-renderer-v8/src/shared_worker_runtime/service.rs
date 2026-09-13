@@ -298,11 +298,6 @@ impl SharedWorkerRuntimeService {
     }
 
     #[cfg(test)]
-    pub(super) fn owner_lifecycle_is_empty(&self) -> bool {
-        self.inner.matching.owner_lifecycle_is_empty()
-    }
-
-    #[cfg(test)]
     pub(super) fn loading_hosts_empty(&self) -> bool {
         self.inner.hosts.is_empty()
     }

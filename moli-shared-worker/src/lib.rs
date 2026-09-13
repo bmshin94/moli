@@ -18,7 +18,7 @@ pub use options::{
     SharedWorkerDescriptor, SharedWorkerSameSiteCookies, SharedWorkerScriptType,
 };
 pub use registry::{
-    SharedWorkerClientOwnerEvent, SharedWorkerClientRemoval, SharedWorkerConnectAction,
-    SharedWorkerInstanceRemoval, SharedWorkerLoadFailure, SharedWorkerLoadReady,
-    SharedWorkerObservedAction, SharedWorkerRegistry, SharedWorkerRegistryDiagnostics,
+    SharedWorkerClientRemoval, SharedWorkerConnectAction, SharedWorkerInstanceRemoval,
+    SharedWorkerLoadFailure, SharedWorkerLoadReady, SharedWorkerRegistry,
+    SharedWorkerRegistryDiagnostics,
 };

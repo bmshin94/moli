@@ -45,15 +45,6 @@ impl<I> SharedWorkerEntry<I> {
         self.clients.is_empty()
     }
 
-    fn client_owner_id(
-        &self,
-        client_id: SharedWorkerClientId,
-    ) -> Option<SharedWorkerClientOwnerId> {
-        self.clients
-            .iter()
-            .find_map(|client| (client.client_id == client_id).then_some(client.owner_id))
-    }
-
     fn client_ids(&self) -> Vec<SharedWorkerClientId> {
         self.clients.iter().map(|client| client.client_id).collect()
     }
@@ -66,13 +57,6 @@ impl<I> SharedWorkerEntry<I> {
             }
         }
         owners
-    }
-
-    fn client_count_for_owner(&self, owner_id: SharedWorkerClientOwnerId) -> usize {
-        self.clients
-            .iter()
-            .filter(|client| client.owner_id == owner_id)
-            .count()
     }
 }
 
@@ -94,34 +78,6 @@ impl<I> SharedWorkerRegistryState<I> {
         self.next_instance_id += 1;
         SharedWorkerInstanceId::new(self.next_instance_id)
     }
-}
-
-fn last_client_removed_event(
-    instance_id: SharedWorkerInstanceId,
-    owner_id: Option<SharedWorkerClientOwnerId>,
-    emit: bool,
-) -> Vec<SharedWorkerClientOwnerEvent> {
-    match (owner_id, emit) {
-        (Some(owner_id), true) => vec![SharedWorkerClientOwnerEvent::LastClientRemoved {
-            instance_id,
-            owner_id,
-        }],
-        _ => Vec::new(),
-    }
-}
-
-fn last_client_removed_events<I>(
-    instance_id: SharedWorkerInstanceId,
-    entry: &SharedWorkerEntry<I>,
-) -> Vec<SharedWorkerClientOwnerEvent> {
-    entry
-        .client_owner_ids()
-        .into_iter()
-        .map(|owner_id| SharedWorkerClientOwnerEvent::LastClientRemoved {
-            instance_id,
-            owner_id,
-        })
-        .collect()
 }
 
 /// Result of a renderer attempting to connect one SharedWorker client.
@@ -209,27 +165,6 @@ pub enum SharedWorkerInstanceRemoval<I> {
     Missing,
 }
 
-/// Owner-level lifecycle event derived from port-level client changes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SharedWorkerClientOwnerEvent {
-    FirstClientAdded {
-        instance_id: SharedWorkerInstanceId,
-        owner_id: SharedWorkerClientOwnerId,
-    },
-    LastClientRemoved {
-        instance_id: SharedWorkerInstanceId,
-        owner_id: SharedWorkerClientOwnerId,
-    },
-}
-
-/// Registry action plus owner-level lifecycle events produced atomically under
-/// the registry lock.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SharedWorkerObservedAction<T> {
-    pub action: T,
-    pub owner_events: Vec<SharedWorkerClientOwnerEvent>,
-}
-
 /// Owner-scoped registry for SharedWorker instances and clients.
 #[derive(Debug)]
 pub struct SharedWorkerRegistry<I> {
@@ -289,19 +224,10 @@ where
         key: SharedWorkerKey,
         descriptor: SharedWorkerDescriptor,
     ) -> SharedWorkerConnectAction<I> {
-        self.connect_observed(key, descriptor).action
-    }
-
-    /// Connect a new client and return owner-level lifecycle events.
-    pub fn connect_observed(
-        &self,
-        key: SharedWorkerKey,
-        descriptor: SharedWorkerDescriptor,
-    ) -> SharedWorkerObservedAction<SharedWorkerConnectAction<I>> {
         let mut state = self.state.lock();
         let client_id = state.next_client_id();
-        let client_owner_id = SharedWorkerClientOwnerId::unique_for_client(client_id);
-        Self::connect_locked(&mut state, key, descriptor, client_id, client_owner_id)
+        let owner_id = SharedWorkerClientOwnerId::unique_for_client(client_id);
+        Self::connect_locked(&mut state, key, descriptor, client_id, owner_id)
     }
 
     /// Connect a new client owned by an embedder browsing context/frame.
@@ -311,18 +237,6 @@ where
         descriptor: SharedWorkerDescriptor,
         client_owner_id: SharedWorkerClientOwnerId,
     ) -> SharedWorkerConnectAction<I> {
-        self.connect_with_owner_observed(key, descriptor, client_owner_id)
-            .action
-    }
-
-    /// Connect a new client owned by an embedder context and return owner-level
-    /// lifecycle events.
-    pub fn connect_with_owner_observed(
-        &self,
-        key: SharedWorkerKey,
-        descriptor: SharedWorkerDescriptor,
-        client_owner_id: SharedWorkerClientOwnerId,
-    ) -> SharedWorkerObservedAction<SharedWorkerConnectAction<I>> {
         let mut state = self.state.lock();
         let client_id = state.next_client_id();
         Self::connect_locked(&mut state, key, descriptor, client_id, client_owner_id)
@@ -334,7 +248,7 @@ where
         descriptor: SharedWorkerDescriptor,
         client_id: SharedWorkerClientId,
         client_owner_id: SharedWorkerClientOwnerId,
-    ) -> SharedWorkerObservedAction<SharedWorkerConnectAction<I>> {
+    ) -> SharedWorkerConnectAction<I> {
         let instance_id = state.next_instance_id();
         let client = SharedWorkerClientRecord {
             client_id,
@@ -342,13 +256,9 @@ where
         };
         if let Some(entry) = state.entries.get_mut(&key) {
             if let Err(error) = entry.ensure_compatible_with(&descriptor) {
-                return SharedWorkerObservedAction {
-                    action: SharedWorkerConnectAction::RejectClient { client_id, error },
-                    owner_events: Vec::new(),
-                };
+                return SharedWorkerConnectAction::RejectClient { client_id, error };
             }
             let instance_id = entry.instance_id;
-            let first_client_for_owner = entry.client_count_for_owner(client_owner_id) == 0;
             entry.add_client(client);
             let action = match &entry.state {
                 SharedWorkerEntryState::Loading => SharedWorkerConnectAction::QueueWhileLoading {
@@ -364,38 +274,21 @@ where
                 }
             };
             state.client_keys.insert(client_id, key);
-            return SharedWorkerObservedAction {
-                action,
-                owner_events: first_client_for_owner
-                    .then_some(SharedWorkerClientOwnerEvent::FirstClientAdded {
-                        instance_id,
-                        owner_id: client_owner_id,
-                    })
-                    .into_iter()
-                    .collect(),
-            };
+            return action;
         }
-
-        let clients = vec![client];
         state.client_keys.insert(client_id, key.clone());
         state.entries.insert(
             key,
             SharedWorkerEntry {
                 instance_id,
                 descriptor,
-                clients,
+                clients: vec![client],
                 state: SharedWorkerEntryState::Loading,
             },
         );
-        SharedWorkerObservedAction {
-            action: SharedWorkerConnectAction::StartLoading {
-                instance_id,
-                client_id,
-            },
-            owner_events: vec![SharedWorkerClientOwnerEvent::FirstClientAdded {
-                instance_id,
-                owner_id: client_owner_id,
-            }],
+        SharedWorkerConnectAction::StartLoading {
+            instance_id,
+            client_id,
         }
     }
 
@@ -433,74 +326,38 @@ where
         key: &SharedWorkerKey,
         instance_id: SharedWorkerInstanceId,
     ) -> SharedWorkerLoadFailure {
-        self.fail_loading_observed(key, instance_id).action
-    }
-
-    /// Fail a loading slot and return owner-level removal events.
-    pub fn fail_loading_observed(
-        &self,
-        key: &SharedWorkerKey,
-        instance_id: SharedWorkerInstanceId,
-    ) -> SharedWorkerObservedAction<SharedWorkerLoadFailure> {
         let mut state = self.state.lock();
         let Some(entry) = state.entries.get(key) else {
-            return SharedWorkerObservedAction {
-                action: SharedWorkerLoadFailure::Stale,
-                owner_events: Vec::new(),
-            };
+            return SharedWorkerLoadFailure::Stale;
         };
         if entry.instance_id != instance_id
             || !matches!(entry.state, SharedWorkerEntryState::Loading)
         {
-            return SharedWorkerObservedAction {
-                action: SharedWorkerLoadFailure::Stale,
-                owner_events: Vec::new(),
-            };
+            return SharedWorkerLoadFailure::Stale;
         }
         let entry = state.entries.remove(key).expect("entry checked above");
-        let owner_events = last_client_removed_events(instance_id, &entry);
         let clients = entry.client_ids();
         for client_id in &clients {
             state.client_keys.remove(client_id);
         }
-        SharedWorkerObservedAction {
-            action: SharedWorkerLoadFailure::Failed {
-                instance_id,
-                clients,
-            },
-            owner_events,
+        SharedWorkerLoadFailure::Failed {
+            instance_id,
+            clients,
         }
     }
 
     /// Remove one client and return whether the embedder should cancel/terminate.
     pub fn remove_client(&self, client_id: SharedWorkerClientId) -> SharedWorkerClientRemoval<I> {
-        self.remove_client_observed(client_id).action
-    }
-
-    /// Remove one client and return owner-level lifecycle events.
-    pub fn remove_client_observed(
-        &self,
-        client_id: SharedWorkerClientId,
-    ) -> SharedWorkerObservedAction<SharedWorkerClientRemoval<I>> {
         let mut state = self.state.lock();
         let Some(key) = state.client_keys.remove(&client_id) else {
-            return SharedWorkerObservedAction {
-                action: SharedWorkerClientRemoval::Missing,
-                owner_events: Vec::new(),
-            };
+            return SharedWorkerClientRemoval::Missing;
         };
         let Some(entry) = state.entries.get_mut(&key) else {
-            return SharedWorkerObservedAction {
-                action: SharedWorkerClientRemoval::Missing,
-                owner_events: Vec::new(),
-            };
+            return SharedWorkerClientRemoval::Missing;
         };
         let instance_id = entry.instance_id;
-        let owner_id = entry.client_owner_id(client_id);
-        let last_client_for_owner =
-            owner_id.is_some_and(|owner_id| entry.client_count_for_owner(owner_id) == 1);
         if !entry.remove_client(client_id) {
-            let action = match &entry.state {
+            return match &entry.state {
                 SharedWorkerEntryState::Loading => {
                     SharedWorkerClientRemoval::RemovedFromLoading { instance_id }
                 }
@@ -511,17 +368,9 @@ where
                     }
                 }
             };
-            return SharedWorkerObservedAction {
-                action,
-                owner_events: last_client_removed_event(
-                    instance_id,
-                    owner_id,
-                    last_client_for_owner,
-                ),
-            };
         }
         let entry = state.entries.remove(&key).expect("entry checked above");
-        let action = match entry.state {
+        match entry.state {
             SharedWorkerEntryState::Loading => {
                 SharedWorkerClientRemoval::CancelLoading { instance_id, key }
             }
@@ -530,10 +379,6 @@ where
                 key,
                 instance,
             },
-        };
-        SharedWorkerObservedAction {
-            action,
-            owner_events: last_client_removed_event(instance_id, owner_id, last_client_for_owner),
         }
     }
 
@@ -593,7 +438,13 @@ where
             .entries
             .values()
             .find(|entry| entry.instance_id == instance_id)
-            .map(|entry| entry.client_count_for_owner(owner_id))
+            .map(|entry| {
+                entry
+                    .clients
+                    .iter()
+                    .filter(|client| client.owner_id == owner_id)
+                    .count()
+            })
             .unwrap_or_default()
     }
 
@@ -615,27 +466,15 @@ where
         &self,
         instance_id: SharedWorkerInstanceId,
     ) -> SharedWorkerInstanceRemoval<I> {
-        self.remove_instance_observed(instance_id).action
-    }
-
-    /// Remove one instance and return owner-level removal events.
-    pub fn remove_instance_observed(
-        &self,
-        instance_id: SharedWorkerInstanceId,
-    ) -> SharedWorkerObservedAction<SharedWorkerInstanceRemoval<I>> {
         let mut state = self.state.lock();
         let Some(key) = state
             .entries
             .iter()
             .find_map(|(key, entry)| (entry.instance_id == instance_id).then(|| key.clone()))
         else {
-            return SharedWorkerObservedAction {
-                action: SharedWorkerInstanceRemoval::Missing,
-                owner_events: Vec::new(),
-            };
+            return SharedWorkerInstanceRemoval::Missing;
         };
         let entry = state.entries.remove(&key).expect("entry checked above");
-        let owner_events = last_client_removed_events(instance_id, &entry);
         let clients = entry.client_ids();
         for client_id in &clients {
             state.client_keys.remove(client_id);
@@ -644,30 +483,16 @@ where
             SharedWorkerEntryState::Loading => None,
             SharedWorkerEntryState::Running { instance } => Some(instance),
         };
-        SharedWorkerObservedAction {
-            action: SharedWorkerInstanceRemoval::Removed {
-                key,
-                instance_id,
-                clients,
-                instance,
-            },
-            owner_events,
+        SharedWorkerInstanceRemoval::Removed {
+            key,
+            instance_id,
+            clients,
+            instance,
         }
     }
 
-    /// Remove every loading or running instance, usually because the owning
-    /// browser context / storage partition is shutting down.
+    /// Remove every loading or running instance when its Context shuts down.
     pub fn remove_all_instances(&self) -> Vec<SharedWorkerInstanceRemoval<I>> {
-        self.remove_all_instances_observed()
-            .into_iter()
-            .map(|observed| observed.action)
-            .collect()
-    }
-
-    /// Remove every instance and return owner-level removal events.
-    pub fn remove_all_instances_observed(
-        &self,
-    ) -> Vec<SharedWorkerObservedAction<SharedWorkerInstanceRemoval<I>>> {
         let mut state = self.state.lock();
         let entries = std::mem::take(&mut state.entries);
         state.client_keys.clear();
@@ -676,19 +501,15 @@ where
             .map(|(key, entry)| {
                 let clients = entry.client_ids();
                 let instance_id = entry.instance_id;
-                let owner_events = last_client_removed_events(instance_id, &entry);
                 let instance = match entry.state {
                     SharedWorkerEntryState::Loading => None,
                     SharedWorkerEntryState::Running { instance } => Some(instance),
                 };
-                SharedWorkerObservedAction {
-                    action: SharedWorkerInstanceRemoval::Removed {
-                        key,
-                        instance_id,
-                        clients,
-                        instance,
-                    },
-                    owner_events,
+                SharedWorkerInstanceRemoval::Removed {
+                    key,
+                    instance_id,
+                    clients,
+                    instance,
                 }
             })
             .collect()
@@ -1347,14 +1168,13 @@ mod tests {
     }
 
     #[test]
-    fn observed_connect_and_remove_report_owner_refcount_edges() {
+    fn owner_membership_survives_until_its_last_client_is_removed() {
         let registry = SharedWorkerRegistry::<u64>::default();
-        let key = key("owner-observed");
+        let key = key("owner-membership");
         let descriptor = SharedWorkerDescriptor::default();
         let owner_id = owner(30);
-
-        let first = registry.connect_with_owner_observed(key.clone(), descriptor.clone(), owner_id);
-        let (instance_id, first_client) = match first.action {
+        let first = registry.connect_with_owner(key.clone(), descriptor.clone(), owner_id);
+        let (instance_id, first_client) = match first {
             SharedWorkerConnectAction::StartLoading {
                 instance_id,
                 client_id,
@@ -1362,82 +1182,80 @@ mod tests {
             other => panic!("expected StartLoading, got {other:?}"),
         };
         assert_eq!(
-            first.owner_events,
-            vec![SharedWorkerClientOwnerEvent::FirstClientAdded {
-                instance_id,
-                owner_id,
-            }]
+            registry.client_owner_ids_for_instance(instance_id),
+            vec![owner_id]
         );
-
-        let second = registry.connect_with_owner_observed(key, descriptor, owner_id);
-        let second_client = match second.action {
+        let second_client = match registry.connect_with_owner(key, descriptor, owner_id) {
             SharedWorkerConnectAction::QueueWhileLoading { client_id, .. } => client_id,
             other => panic!("expected QueueWhileLoading, got {other:?}"),
         };
-        assert!(second.owner_events.is_empty());
-
-        let first_removed = registry.remove_client_observed(first_client);
         assert_eq!(
-            first_removed.action,
+            registry.client_owner_ids_for_instance(instance_id),
+            vec![owner_id]
+        );
+        assert_eq!(
+            registry.remove_client(first_client),
             SharedWorkerClientRemoval::RemovedFromLoading { instance_id }
         );
-        assert!(first_removed.owner_events.is_empty());
-
-        let second_removed = registry.remove_client_observed(second_client);
+        assert_eq!(
+            registry.client_owner_ids_for_instance(instance_id),
+            vec![owner_id]
+        );
         assert!(matches!(
-            second_removed.action,
+            registry.remove_client(second_client),
             SharedWorkerClientRemoval::CancelLoading { .. }
         ));
-        assert_eq!(
-            second_removed.owner_events,
-            vec![SharedWorkerClientOwnerEvent::LastClientRemoved {
-                instance_id,
-                owner_id,
-            }]
+        assert!(
+            registry
+                .client_owner_ids_for_instance(instance_id)
+                .is_empty()
         );
+        assert!(registry.is_empty());
     }
 
     #[test]
-    fn observed_instance_removal_reports_each_owner_once() {
+    fn instance_removal_releases_clients_from_every_owner() {
         let registry = SharedWorkerRegistry::<u64>::default();
         let key = key("owner-remove-instance");
         let descriptor = SharedWorkerDescriptor::default();
         let owner_a = owner(40);
         let owner_b = owner(41);
-        let first = registry.connect_with_owner(key.clone(), descriptor.clone(), owner_a);
-        let instance_id = match first {
-            SharedWorkerConnectAction::StartLoading { instance_id, .. } => instance_id,
-            other => panic!("expected StartLoading, got {other:?}"),
-        };
-        assert!(matches!(
-            registry.connect_with_owner(key.clone(), descriptor.clone(), owner_a),
-            SharedWorkerConnectAction::QueueWhileLoading { .. }
-        ));
-        assert!(matches!(
-            registry.connect_with_owner(key, descriptor, owner_b),
-            SharedWorkerConnectAction::QueueWhileLoading { .. }
-        ));
-
-        let removed = registry.remove_instance_observed(instance_id);
-
-        assert!(matches!(
-            removed.action,
-            SharedWorkerInstanceRemoval::Removed { .. }
-        ));
+        let instance_id =
+            match registry.connect_with_owner(key.clone(), descriptor.clone(), owner_a) {
+                SharedWorkerConnectAction::StartLoading { instance_id, .. } => instance_id,
+                other => panic!("expected StartLoading, got {other:?}"),
+            };
+        for owner in [owner_a, owner_b] {
+            assert!(matches!(
+                registry.connect_with_owner(key.clone(), descriptor.clone(), owner),
+                SharedWorkerConnectAction::QueueWhileLoading { .. }
+            ));
+        }
         assert_eq!(
-            removed.owner_events,
-            vec![
-                SharedWorkerClientOwnerEvent::LastClientRemoved {
-                    instance_id,
-                    owner_id: owner_a,
-                },
-                SharedWorkerClientOwnerEvent::LastClientRemoved {
-                    instance_id,
-                    owner_id: owner_b,
-                },
-            ]
+            registry.client_owner_ids_for_instance(instance_id),
+            vec![owner_a, owner_b]
+        );
+        let clients = registry.clients_for_instance(instance_id);
+        assert_eq!(clients.len(), 3);
+        let SharedWorkerInstanceRemoval::Removed {
+            clients: removed, ..
+        } = registry.remove_instance(instance_id)
+        else {
+            panic!("instance must be removed")
+        };
+        assert_eq!(removed, clients);
+        assert!(
+            registry
+                .client_owner_ids_for_instance(instance_id)
+                .is_empty()
         );
         assert!(registry.is_empty());
+        for client in clients {
+            assert_eq!(
+                registry.remove_client(client),
+                SharedWorkerClientRemoval::Missing
+            );
+        }
     }
 
     #[test]
