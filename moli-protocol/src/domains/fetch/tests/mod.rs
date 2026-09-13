@@ -319,6 +319,7 @@ async fn spawn_digest_proxy(
 }
 
 mod basics;
+mod binary_request;
 mod command_correlation;
 mod navigation_auth;
 mod navigation_control;
