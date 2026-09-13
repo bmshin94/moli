@@ -347,10 +347,16 @@ pub enum RendererNetworkInput {
 
 pub struct RendererNetworkCommit {
     pub occurrence: Arc<RendererNetworkOccurrence>,
+    parent_request: Option<moli_page_types::SubresourceNetworkRequestHandle>,
     committed: watch::Sender<Option<(u64, RendererNetworkSource)>>,
 }
 
 impl RendererNetworkCommit {
+    /// A physical preflight inherits only its still-admitted parent's authority.
+    pub fn parent_request(&self) -> Option<moli_page_types::SubresourceNetworkRequestHandle> {
+        self.parent_request
+    }
+
     pub fn commit(self, browser_sequence: u64, source: RendererNetworkSource) {
         assert_ne!(browser_sequence, 0, "native occurrence needs a sequence");
         self.committed
@@ -391,21 +397,86 @@ enum WorkerNetworkSourceState {
 /// One admitted request keeps only its native source, never a Worker or VM.
 /// Clones share the same request identity and release one source lease together.
 #[derive(Clone, Debug)]
-pub(crate) struct RendererWorkerNetworkRequest(Arc<WorkerNetworkRequestInner>);
+pub(crate) struct RendererWorkerNetworkRequest {
+    lease: Arc<WorkerNetworkRequestInner>,
+    handle: moli_page_types::SubresourceNetworkRequestHandle,
+}
 
 #[derive(Debug)]
 struct WorkerNetworkRequestInner {
     source: RendererWorkerNetworkReporter,
-    handle: moli_page_types::SubresourceNetworkRequestHandle,
+    admitted_handle: moli_page_types::SubresourceNetworkRequestHandle,
 }
 
 impl RendererWorkerNetworkRequest {
     pub(crate) fn handle(&self) -> moli_page_types::SubresourceNetworkRequestHandle {
-        self.0.handle
+        self.handle
     }
 
     pub(crate) fn report(&self, item: ScriptNetworkOutputItem) -> RendererNetworkObservation {
-        self.0.source.report_item(item)
+        self.lease.source.reporter.report_source(
+            RendererNetworkSource::Worker(self.lease.source.source.clone()),
+            item,
+            (self.handle != self.lease.admitted_handle).then_some(self.lease.admitted_handle),
+        )
+    }
+
+    /// A physical preflight belongs to an already-admitted request, including
+    /// a keepalive continuing after its Worker retires. It shares that lease,
+    /// while ordinary clones keep their original physical request identity.
+    pub(crate) fn preflight(&self) -> Self {
+        Self {
+            lease: self.lease.clone(),
+            handle: moli_page_types::SubresourceNetworkRequestHandle::allocate(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod worker_request_tests {
+    use super::*;
+
+    #[test]
+    fn admitted_preflight_keeps_retired_source_until_last_descendant_finishes() {
+        let reporter =
+            RendererNetworkReporter::new(RendererBrowserContextRuntimeId::new_for_testing(1));
+        let closed = Arc::new(Mutex::new(Vec::new()));
+        let observed = closed.clone();
+        reporter.install_handler(move |input| {
+            if let RendererNetworkInput::SourceClosed { source, .. } = input {
+                observed.lock().push(source);
+            }
+        });
+        let identity =
+            RendererWorkerIdentity::Shared(moli_shared_worker::SharedWorkerInstanceId::from_u64(1));
+        let source = RendererWorkerNetworkReporter::new(reporter, identity.clone());
+        let parent = source.start_request().unwrap();
+        source.close_source();
+        assert!(
+            source.start_request().is_none(),
+            "retirement rejects new top-level requests"
+        );
+        let preflight = parent.preflight();
+        assert_ne!(preflight.handle(), parent.handle());
+        assert_eq!(preflight.clone().handle(), preflight.handle());
+        drop(parent);
+        assert!(
+            closed.lock().is_empty(),
+            "admitted preflight still owns its source permission"
+        );
+        let redirected_preflight = preflight.preflight();
+        assert_ne!(redirected_preflight.handle(), preflight.handle());
+        drop(preflight);
+        source.close_source();
+        assert!(
+            closed.lock().is_empty(),
+            "a redirect cannot lose the original source lease"
+        );
+        drop(redirected_preflight);
+        assert_eq!(
+            *closed.lock(),
+            [RendererNetworkSourceIdentity::Worker(identity)]
+        );
     }
 }
 
@@ -454,6 +525,7 @@ impl RendererWorkerNetworkReporter {
                 policy_document,
                 pause,
             },
+            None,
         )
     }
 
@@ -477,12 +549,14 @@ impl RendererWorkerNetworkReporter {
         *count = count
             .checked_add(1)
             .expect("Worker request count exhausted");
-        Some(RendererWorkerNetworkRequest(Arc::new(
-            WorkerNetworkRequestInner {
+        let handle = moli_page_types::SubresourceNetworkRequestHandle::allocate();
+        Some(RendererWorkerNetworkRequest {
+            lease: Arc::new(WorkerNetworkRequestInner {
                 source: self.clone(),
-                handle: moli_page_types::SubresourceNetworkRequestHandle::allocate(),
-            },
-        )))
+                admitted_handle: handle,
+            }),
+            handle,
+        })
     }
 
     pub(crate) fn report(
@@ -499,8 +573,11 @@ impl RendererWorkerNetworkReporter {
     }
 
     pub(crate) fn report_item(&self, item: ScriptNetworkOutputItem) -> RendererNetworkObservation {
-        self.reporter
-            .report_source(RendererNetworkSource::Worker(self.source.clone()), item)
+        self.reporter.report_source(
+            RendererNetworkSource::Worker(self.source.clone()),
+            item,
+            None,
+        )
     }
 
     pub(crate) fn close_source(&self) {
@@ -585,13 +662,15 @@ impl RendererNetworkReporter {
                 document,
             },
             item,
+            None,
         )
     }
 
-    pub(crate) fn report_source(
+    fn report_source(
         &self,
         source: RendererNetworkSource,
         item: impl Into<RendererNetworkOutputItem>,
+        parent_request: Option<moli_page_types::SubresourceNetworkRequestHandle>,
     ) -> RendererNetworkObservation {
         let occurrence = Arc::new(RendererNetworkOccurrence {
             runtime: self.runtime,
@@ -601,6 +680,7 @@ impl RendererNetworkReporter {
         let (committed, observation) = watch::channel(None);
         let input = RendererNetworkInput::Observation(RendererNetworkCommit {
             occurrence: occurrence.clone(),
+            parent_request,
             committed,
         });
         if let Some(handler) = self.handler.lock().as_ref() {

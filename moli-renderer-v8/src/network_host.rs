@@ -28,11 +28,11 @@ use moli_webapi_declare::WebApiObject;
 use crate::network::ResourceRequestClient;
 
 pub(crate) use self::async_fetch::{
-    fetch_browser_subresource_raw_stream_with_preflight_headers_and_network_metadata,
+    fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer,
     fetch_browser_subresource_with_preflight_and_network_metadata,
     fetch_browser_subresource_with_preflight_headers,
-    fetch_browser_subresource_with_preflight_headers_and_network_metadata,
-    spawn_async_subresource_fetch, spawn_async_subresource_fetch_with_redirect_chain,
+    fetch_browser_subresource_with_preflight_headers_and_observer, spawn_async_subresource_fetch,
+    spawn_async_subresource_fetch_with_redirect_chain,
 };
 pub(crate) use self::beacon::{navigator_send_beacon_callback, send_link_audit_ping};
 pub(super) use self::bindings::install_window_network_bindings;
@@ -119,7 +119,7 @@ pub(crate) use self::media::{
     MediaElementResourceFetchStart, media_response_status_is_successful,
     start_media_element_resource_fetch,
 };
-pub(in crate::network_host) use self::preflight_events::CorsPreflightNetworkObserver;
+pub(crate) use self::preflight_events::CorsPreflightNetworkObserver;
 pub(in crate::network_host) use self::request::normalize_request_method;
 pub(crate) use self::request::request_constructor_callback;
 pub(crate) use self::request::{

@@ -38,15 +38,53 @@ impl WorkerResourceTransfer {
         request: impl FnOnce(&RendererWorkerNetworkRequest) -> SubresourceRequestStarted,
     ) -> Option<Arc<Self>> {
         let network = source.start_request()?;
+        Some(Self::from_request(network, observer, request))
+    }
+
+    fn from_request(
+        network: RendererWorkerNetworkRequest,
+        observer: WorkerNetworkObserver,
+        request: impl FnOnce(&RendererWorkerNetworkRequest) -> SubresourceRequestStarted,
+    ) -> Arc<Self> {
         publish_worker_network_item(
             &observer,
             &network,
             ScriptNetworkOutputItem::SubresourceRequestStarted(Arc::new(request(&network))),
         );
-        Some(Arc::new(Self {
+        Arc::new(Self {
             state: Mutex::new(WorkerResourceTransferState::Requested(network)),
             observer,
-        }))
+        })
+    }
+
+    pub(crate) fn preflight(
+        parent: &RendererWorkerNetworkRequest,
+        observer: WorkerNetworkObserver,
+        request: &moli_fetch::Request,
+        keepalive: bool,
+    ) -> Arc<Self> {
+        let resource_type = match request.browser_request_metadata() {
+            Some(moli_fetch::BrowserRequestMetadata::Xhr) => {
+                moli_page_types::SubresourceResourceType::Xhr
+            }
+            _ => moli_page_types::SubresourceResourceType::Fetch,
+        };
+        Self::from_request(parent.preflight(), observer, |network| {
+            super::global_scope::worker_request_started(
+                network,
+                request
+                    .cookie_context
+                    .initiator_url
+                    .as_ref()
+                    .expect("a CORS preflight has an initiator"),
+                &request.url,
+                &request.method,
+                &request.request_headers,
+                &None,
+                resource_type,
+            )
+            .with_keepalive(keepalive)
+        })
     }
 
     pub(super) fn handle(&self) -> SubresourceNetworkRequestHandle {
