@@ -103,7 +103,7 @@ impl SharedWorkerRuntimeService {
         descriptor: SharedWorkerDescriptor,
         params: &SharedWorkerLaunchParams,
     ) -> SharedWorkerConnectAction<SharedRendererSharedWorkerHost> {
-        self.connect_matching(params.key.clone(), descriptor, params.client_owner_id)
+        self.connect_matching(params.key.clone(), descriptor)
     }
 
     fn loading_host_for_connect(
@@ -167,7 +167,7 @@ fn shared_worker_compatibility_error_message(error: &SharedWorkerCompatibilityEr
 
 #[cfg(test)]
 mod tests {
-    use moli_shared_worker::{SharedWorkerClientOwnerId, SharedWorkerDescriptor, SharedWorkerKey};
+    use moli_shared_worker::{SharedWorkerDescriptor, SharedWorkerKey};
     use url::Url;
 
     use crate::{
@@ -212,7 +212,6 @@ mod tests {
     fn test_launch_params(
         browser_context_runtime: &RendererBrowserContextRuntimeOwner,
         key: SharedWorkerKey,
-        owner_id: SharedWorkerClientOwnerId,
         message_port_registry: &SharedMessagePortRegistry,
         message_port_owner: &test_support::SharedWorkerPageClientHarness,
         worker_context_runtime: RendererWorkerContextRuntime,
@@ -225,7 +224,6 @@ mod tests {
             launch_context: test_launch_context(browser_context_runtime, worker_context_runtime),
             client_port_id,
             worker_port_id,
-            client_owner_id: owner_id,
             client_event_realm: message_port_owner.shared_worker_client_event_realm(),
             worker_host_bridge_sender: message_port_owner.worker_host_bridge_sender(),
             parent_service_worker_client_id: None,
@@ -234,7 +232,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_connect_and_remove_update_registry_owners() {
+    async fn runtime_connect_and_remove_update_registry_clients() {
         let service = test_support::runtime_service();
         let message_port_owner = test_support::SharedWorkerPageClientHarness::new();
         let message_port_registry = crate::message_port_runtime::new_message_port_registry();
@@ -245,11 +243,9 @@ mod tests {
             crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let key = test_support::shared_worker_key();
-        let owner_id = service.next_client_owner_id();
         let params = test_launch_params(
             &browser_context_runtime,
             key,
-            owner_id,
             &message_port_registry,
             &message_port_owner,
             browser_context_runtime.worker_context_runtime(),
@@ -258,8 +254,8 @@ mod tests {
         let client_id = service.connect(SharedWorkerDescriptor::default(), params);
         let instance_id = SharedWorkerInstanceId::from_u64(1);
         assert_eq!(
-            test_support::active_owner_ids_for_instance(&service, instance_id),
-            vec![owner_id]
+            test_support::matching_clients_for_instance(&service, instance_id),
+            vec![client_id]
         );
 
         service.remove_client(client_id);
@@ -269,7 +265,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_membership_groups_multiple_clients_from_same_owner() {
+    async fn registry_keeps_peer_client_until_its_own_removal() {
         let service = test_support::runtime_service();
         let message_port_owner = test_support::SharedWorkerPageClientHarness::new();
         let message_port_registry = crate::message_port_runtime::new_message_port_registry();
@@ -280,11 +276,9 @@ mod tests {
             crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let key = test_support::shared_worker_key();
-        let owner_id = service.next_client_owner_id();
         let first = test_launch_params(
             &browser_context_runtime,
             key.clone(),
-            owner_id,
             &message_port_registry,
             &message_port_owner,
             browser_context_runtime.worker_context_runtime(),
@@ -292,7 +286,6 @@ mod tests {
         let second = test_launch_params(
             &browser_context_runtime,
             key,
-            owner_id,
             &message_port_registry,
             &message_port_owner,
             browser_context_runtime.worker_context_runtime(),
@@ -302,15 +295,15 @@ mod tests {
         let second_client_id = service.connect(SharedWorkerDescriptor::default(), second);
         let instance_id = SharedWorkerInstanceId::from_u64(1);
         assert_eq!(
-            test_support::active_owner_ids_for_instance(&service, instance_id),
-            vec![owner_id]
+            test_support::matching_clients_for_instance(&service, instance_id),
+            vec![first_client_id, second_client_id]
         );
 
         service.remove_client(first_client_id);
         assert_eq!(
-            test_support::active_owner_ids_for_instance(&service, instance_id),
-            vec![owner_id],
-            "removing one of two clients must preserve its owner membership"
+            test_support::matching_clients_for_instance(&service, instance_id),
+            vec![second_client_id],
+            "removing one of two clients must preserve the other connection"
         );
 
         service.remove_client(second_client_id);

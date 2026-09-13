@@ -1215,7 +1215,6 @@ mod tests {
             false
         );
 
-        let _ = runtime.next_shared_worker_client_owner_id();
         let document_url = url::Url::parse("https://deferred-client.test/").unwrap();
         let client_queue = crate::page_task_queue::RendererPageServiceWorkerTestHarness::new();
         runtime.register_service_worker_client(

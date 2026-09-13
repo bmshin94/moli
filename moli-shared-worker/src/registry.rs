@@ -3,15 +3,9 @@ use std::collections::HashMap;
 use parking_lot::Mutex;
 
 use crate::{
-    SharedWorkerClientId, SharedWorkerClientOwnerId, SharedWorkerCompatibilityError,
-    SharedWorkerDescriptor, SharedWorkerInstanceId, SharedWorkerKey,
+    SharedWorkerClientId, SharedWorkerCompatibilityError, SharedWorkerDescriptor,
+    SharedWorkerInstanceId, SharedWorkerKey,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SharedWorkerClientRecord {
-    client_id: SharedWorkerClientId,
-    owner_id: SharedWorkerClientOwnerId,
-}
 
 #[derive(Debug)]
 enum SharedWorkerEntryState<I> {
@@ -23,7 +17,7 @@ enum SharedWorkerEntryState<I> {
 struct SharedWorkerEntry<I> {
     instance_id: SharedWorkerInstanceId,
     descriptor: SharedWorkerDescriptor,
-    clients: Vec<SharedWorkerClientRecord>,
+    clients: Vec<SharedWorkerClientId>,
     state: SharedWorkerEntryState<I>,
 }
 
@@ -35,28 +29,9 @@ impl<I> SharedWorkerEntry<I> {
         self.descriptor.ensure_compatible_with(requested)
     }
 
-    fn add_client(&mut self, client: SharedWorkerClientRecord) {
-        self.clients.push(client);
-    }
-
     fn remove_client(&mut self, client_id: SharedWorkerClientId) -> bool {
-        self.clients
-            .retain(|current| current.client_id != client_id);
+        self.clients.retain(|current| *current != client_id);
         self.clients.is_empty()
-    }
-
-    fn client_ids(&self) -> Vec<SharedWorkerClientId> {
-        self.clients.iter().map(|client| client.client_id).collect()
-    }
-
-    fn client_owner_ids(&self) -> Vec<SharedWorkerClientOwnerId> {
-        let mut owners = Vec::new();
-        for client in &self.clients {
-            if !owners.contains(&client.owner_id) {
-                owners.push(client.owner_id);
-            }
-        }
-        owners
     }
 }
 
@@ -226,40 +201,13 @@ where
     ) -> SharedWorkerConnectAction<I> {
         let mut state = self.state.lock();
         let client_id = state.next_client_id();
-        let owner_id = SharedWorkerClientOwnerId::unique_for_client(client_id);
-        Self::connect_locked(&mut state, key, descriptor, client_id, owner_id)
-    }
-
-    /// Connect a new client owned by an embedder browsing context/frame.
-    pub fn connect_with_owner(
-        &self,
-        key: SharedWorkerKey,
-        descriptor: SharedWorkerDescriptor,
-        client_owner_id: SharedWorkerClientOwnerId,
-    ) -> SharedWorkerConnectAction<I> {
-        let mut state = self.state.lock();
-        let client_id = state.next_client_id();
-        Self::connect_locked(&mut state, key, descriptor, client_id, client_owner_id)
-    }
-
-    fn connect_locked(
-        state: &mut SharedWorkerRegistryState<I>,
-        key: SharedWorkerKey,
-        descriptor: SharedWorkerDescriptor,
-        client_id: SharedWorkerClientId,
-        client_owner_id: SharedWorkerClientOwnerId,
-    ) -> SharedWorkerConnectAction<I> {
         let instance_id = state.next_instance_id();
-        let client = SharedWorkerClientRecord {
-            client_id,
-            owner_id: client_owner_id,
-        };
         if let Some(entry) = state.entries.get_mut(&key) {
             if let Err(error) = entry.ensure_compatible_with(&descriptor) {
                 return SharedWorkerConnectAction::RejectClient { client_id, error };
             }
             let instance_id = entry.instance_id;
-            entry.add_client(client);
+            entry.clients.push(client_id);
             let action = match &entry.state {
                 SharedWorkerEntryState::Loading => SharedWorkerConnectAction::QueueWhileLoading {
                     instance_id,
@@ -282,7 +230,7 @@ where
             SharedWorkerEntry {
                 instance_id,
                 descriptor,
-                clients: vec![client],
+                clients: vec![client_id],
                 state: SharedWorkerEntryState::Loading,
             },
         );
@@ -315,7 +263,7 @@ where
         };
         SharedWorkerLoadReady::Running {
             instance_id,
-            clients: entry.client_ids(),
+            clients: entry.clients.clone(),
             instance,
         }
     }
@@ -336,7 +284,7 @@ where
             return SharedWorkerLoadFailure::Stale;
         }
         let entry = state.entries.remove(key).expect("entry checked above");
-        let clients = entry.client_ids();
+        let clients = entry.clients.clone();
         for client_id in &clients {
             state.client_keys.remove(client_id);
         }
@@ -392,7 +340,7 @@ where
             .entries
             .values()
             .find(|entry| entry.instance_id == instance_id)
-            .map(SharedWorkerEntry::client_ids)
+            .map(|entry| entry.clients.clone())
             .unwrap_or_default()
     }
 
@@ -409,42 +357,7 @@ where
                 entry.instance_id == instance_id
                     && matches!(entry.state, SharedWorkerEntryState::Loading)
             })
-            .map(SharedWorkerEntry::client_ids)
-            .unwrap_or_default()
-    }
-
-    /// Return distinct owner ids currently attached to an instance.
-    pub fn client_owner_ids_for_instance(
-        &self,
-        instance_id: SharedWorkerInstanceId,
-    ) -> Vec<SharedWorkerClientOwnerId> {
-        let state = self.state.lock();
-        state
-            .entries
-            .values()
-            .find(|entry| entry.instance_id == instance_id)
-            .map(SharedWorkerEntry::client_owner_ids)
-            .unwrap_or_default()
-    }
-
-    /// Return the number of port-level clients for one owner on an instance.
-    pub fn client_count_for_owner(
-        &self,
-        instance_id: SharedWorkerInstanceId,
-        owner_id: SharedWorkerClientOwnerId,
-    ) -> usize {
-        let state = self.state.lock();
-        state
-            .entries
-            .values()
-            .find(|entry| entry.instance_id == instance_id)
-            .map(|entry| {
-                entry
-                    .clients
-                    .iter()
-                    .filter(|client| client.owner_id == owner_id)
-                    .count()
-            })
+            .map(|entry| entry.clients.clone())
             .unwrap_or_default()
     }
 
@@ -475,7 +388,7 @@ where
             return SharedWorkerInstanceRemoval::Missing;
         };
         let entry = state.entries.remove(&key).expect("entry checked above");
-        let clients = entry.client_ids();
+        let clients = entry.clients.clone();
         for client_id in &clients {
             state.client_keys.remove(client_id);
         }
@@ -499,7 +412,7 @@ where
         entries
             .into_iter()
             .map(|(key, entry)| {
-                let clients = entry.client_ids();
+                let clients = entry.clients.clone();
                 let instance_id = entry.instance_id;
                 let instance = match entry.state {
                     SharedWorkerEntryState::Loading => None,
@@ -556,10 +469,6 @@ mod tests {
             None,
             moli_storage_key::StoragePartitionRelation::ThirdParty,
         )
-    }
-
-    fn owner(id: u64) -> SharedWorkerClientOwnerId {
-        SharedWorkerClientOwnerId::from_u64(id)
     }
 
     #[test]
@@ -1067,12 +976,11 @@ mod tests {
     }
 
     #[test]
-    fn same_owner_clients_remain_separate_but_owner_count_is_aggregated() {
+    fn clients_remain_separate_while_sharing_an_instance() {
         let registry = SharedWorkerRegistry::<u64>::default();
-        let key = key("same-owner");
+        let key = key("separate-clients");
         let descriptor = SharedWorkerDescriptor::default();
-        let owner_id = owner(10);
-        let first = registry.connect_with_owner(key.clone(), descriptor.clone(), owner_id);
+        let first = registry.connect(key.clone(), descriptor.clone());
         let (instance_id, first_client) = match first {
             SharedWorkerConnectAction::StartLoading {
                 instance_id,
@@ -1080,27 +988,21 @@ mod tests {
             } => (instance_id, client_id),
             other => panic!("expected StartLoading, got {other:?}"),
         };
-        let second_client =
-            match registry.connect_with_owner(key.clone(), descriptor.clone(), owner_id) {
-                SharedWorkerConnectAction::QueueWhileLoading {
-                    instance_id: queued_id,
-                    client_id,
-                } => {
-                    assert_eq!(queued_id, instance_id);
-                    client_id
-                }
-                other => panic!("expected QueueWhileLoading, got {other:?}"),
-            };
+        let second_client = match registry.connect(key.clone(), descriptor.clone()) {
+            SharedWorkerConnectAction::QueueWhileLoading {
+                instance_id: queued_id,
+                client_id,
+            } => {
+                assert_eq!(queued_id, instance_id);
+                client_id
+            }
+            other => panic!("expected QueueWhileLoading, got {other:?}"),
+        };
 
         assert_eq!(
             registry.clients_for_instance(instance_id),
             vec![first_client, second_client]
         );
-        assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_id]
-        );
-        assert_eq!(registry.client_count_for_owner(instance_id, owner_id), 2);
 
         assert_eq!(
             registry.remove_client(first_client),
@@ -1110,70 +1012,60 @@ mod tests {
             registry.clients_for_instance(instance_id),
             vec![second_client]
         );
-        assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_id]
-        );
-        assert_eq!(registry.client_count_for_owner(instance_id, owner_id), 1);
     }
 
     #[test]
-    fn removing_last_client_for_one_owner_keeps_other_owner_attached() {
+    fn removing_clients_keeps_the_surviving_connection_attached() {
         let registry = SharedWorkerRegistry::<u64>::default();
-        let key = key("two-owners");
+        let key = key("three-clients");
         let descriptor = SharedWorkerDescriptor::default();
-        let owner_a = owner(11);
-        let owner_b = owner(12);
-        let first = registry.connect_with_owner(key.clone(), descriptor.clone(), owner_a);
-        let (instance_id, owner_a_first) = match first {
+        let first = registry.connect(key.clone(), descriptor.clone());
+        let (instance_id, first_client) = match first {
             SharedWorkerConnectAction::StartLoading {
                 instance_id,
                 client_id,
             } => (instance_id, client_id),
             other => panic!("expected StartLoading, got {other:?}"),
         };
-        let owner_a_second =
-            match registry.connect_with_owner(key.clone(), descriptor.clone(), owner_a) {
-                SharedWorkerConnectAction::QueueWhileLoading { client_id, .. } => client_id,
-                other => panic!("expected QueueWhileLoading, got {other:?}"),
-            };
-        let owner_b_client = match registry.connect_with_owner(key.clone(), descriptor, owner_b) {
+        let second_client = match registry.connect(key.clone(), descriptor.clone()) {
             SharedWorkerConnectAction::QueueWhileLoading { client_id, .. } => client_id,
             other => panic!("expected QueueWhileLoading, got {other:?}"),
         };
-
+        let third_client = match registry.connect(key.clone(), descriptor) {
+            SharedWorkerConnectAction::QueueWhileLoading { client_id, .. } => client_id,
+            other => panic!("expected QueueWhileLoading, got {other:?}"),
+        };
         assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_a, owner_b]
+            registry.clients_for_instance(instance_id),
+            vec![first_client, second_client, third_client]
         );
 
         assert_eq!(
-            registry.remove_client(owner_a_first),
+            registry.remove_client(first_client),
             SharedWorkerClientRemoval::RemovedFromLoading { instance_id }
-        );
-        assert_eq!(registry.client_count_for_owner(instance_id, owner_a), 1);
-
-        assert_eq!(
-            registry.remove_client(owner_a_second),
-            SharedWorkerClientRemoval::RemovedFromLoading { instance_id }
-        );
-        assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_b]
         );
         assert_eq!(
             registry.clients_for_instance(instance_id),
-            vec![owner_b_client]
+            vec![second_client, third_client]
+        );
+
+        assert_eq!(
+            registry.remove_client(second_client),
+            SharedWorkerClientRemoval::RemovedFromLoading { instance_id }
+        );
+
+        assert_eq!(
+            registry.clients_for_instance(instance_id),
+            vec![third_client]
         );
     }
 
     #[test]
-    fn owner_membership_survives_until_its_last_client_is_removed() {
+    fn loading_instance_survives_until_its_last_client_is_removed() {
         let registry = SharedWorkerRegistry::<u64>::default();
-        let key = key("owner-membership");
+        let key = key("client-membership");
         let descriptor = SharedWorkerDescriptor::default();
-        let owner_id = owner(30);
-        let first = registry.connect_with_owner(key.clone(), descriptor.clone(), owner_id);
+        let first = registry.connect(key.clone(), descriptor.clone());
         let (instance_id, first_client) = match first {
             SharedWorkerConnectAction::StartLoading {
                 instance_id,
@@ -1182,59 +1074,49 @@ mod tests {
             other => panic!("expected StartLoading, got {other:?}"),
         };
         assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_id]
+            registry.clients_for_instance(instance_id),
+            vec![first_client]
         );
-        let second_client = match registry.connect_with_owner(key, descriptor, owner_id) {
+        let second_client = match registry.connect(key, descriptor) {
             SharedWorkerConnectAction::QueueWhileLoading { client_id, .. } => client_id,
             other => panic!("expected QueueWhileLoading, got {other:?}"),
         };
         assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_id]
+            registry.clients_for_instance(instance_id),
+            vec![first_client, second_client]
         );
         assert_eq!(
             registry.remove_client(first_client),
             SharedWorkerClientRemoval::RemovedFromLoading { instance_id }
         );
         assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_id]
+            registry.clients_for_instance(instance_id),
+            vec![second_client]
         );
         assert!(matches!(
             registry.remove_client(second_client),
             SharedWorkerClientRemoval::CancelLoading { .. }
         ));
-        assert!(
-            registry
-                .client_owner_ids_for_instance(instance_id)
-                .is_empty()
-        );
+        assert!(registry.clients_for_instance(instance_id).is_empty());
         assert!(registry.is_empty());
     }
 
     #[test]
-    fn instance_removal_releases_clients_from_every_owner() {
+    fn instance_removal_releases_every_client() {
         let registry = SharedWorkerRegistry::<u64>::default();
-        let key = key("owner-remove-instance");
+        let key = key("remove-instance-clients");
         let descriptor = SharedWorkerDescriptor::default();
-        let owner_a = owner(40);
-        let owner_b = owner(41);
-        let instance_id =
-            match registry.connect_with_owner(key.clone(), descriptor.clone(), owner_a) {
-                SharedWorkerConnectAction::StartLoading { instance_id, .. } => instance_id,
-                other => panic!("expected StartLoading, got {other:?}"),
-            };
-        for owner in [owner_a, owner_b] {
+        let instance_id = match registry.connect(key.clone(), descriptor.clone()) {
+            SharedWorkerConnectAction::StartLoading { instance_id, .. } => instance_id,
+            other => panic!("expected StartLoading, got {other:?}"),
+        };
+        for _ in 0..2 {
             assert!(matches!(
-                registry.connect_with_owner(key.clone(), descriptor.clone(), owner),
+                registry.connect(key.clone(), descriptor.clone()),
                 SharedWorkerConnectAction::QueueWhileLoading { .. }
             ));
         }
-        assert_eq!(
-            registry.client_owner_ids_for_instance(instance_id),
-            vec![owner_a, owner_b]
-        );
+
         let clients = registry.clients_for_instance(instance_id);
         assert_eq!(clients.len(), 3);
         let SharedWorkerInstanceRemoval::Removed {
@@ -1244,11 +1126,7 @@ mod tests {
             panic!("instance must be removed")
         };
         assert_eq!(removed, clients);
-        assert!(
-            registry
-                .client_owner_ids_for_instance(instance_id)
-                .is_empty()
-        );
+        assert!(registry.clients_for_instance(instance_id).is_empty());
         assert!(registry.is_empty());
         for client in clients {
             assert_eq!(

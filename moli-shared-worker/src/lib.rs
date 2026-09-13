@@ -11,7 +11,7 @@ mod key;
 mod options;
 mod registry;
 
-pub use client::{SharedWorkerClientId, SharedWorkerClientOwnerId, SharedWorkerInstanceId};
+pub use client::{SharedWorkerClientId, SharedWorkerInstanceId};
 pub use key::SharedWorkerKey;
 pub use options::{
     SharedWorkerCompatibilityError, SharedWorkerCreationContextType, SharedWorkerCredentialsMode,
