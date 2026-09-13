@@ -7,6 +7,9 @@ pub(super) fn build_window_lazy_surface<'s>(
     surface: WindowLazySurface,
 ) -> Result<v8::Local<'s, v8::Value>> {
     let value: v8::Local<'s, v8::Value> = match surface {
+        WindowLazySurface::External => {
+            super::super::window_runtime::build_window_external(scope)?.into()
+        }
         WindowLazySurface::Navigator => {
             super::super::navigator_runtime::build_window_navigator_for_receiver(scope, window)?
                 .into()

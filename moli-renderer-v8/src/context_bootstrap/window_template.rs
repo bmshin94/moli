@@ -269,6 +269,9 @@ struct WindowPostRuntimeAccessorsDeclaration {
     #[webapi(accessor_property, getter = window_navigator_getter)]
     navigator: (),
 
+    #[webapi(accessor_property, getter = window_external_getter)]
+    external: (),
+
     #[webapi(accessor_property, getter = window_history_getter)]
     history: (),
 

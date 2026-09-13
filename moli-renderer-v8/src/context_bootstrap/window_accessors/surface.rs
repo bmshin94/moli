@@ -199,6 +199,14 @@ pub(in crate::context_bootstrap) fn window_navigator_getter<'s>(
     set_receiver_slot_or_undefined(scope, &args, WINDOW_NAVIGATOR_SLOT, rv);
 }
 
+pub(in crate::context_bootstrap) fn window_external_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    set_receiver_slot_or_undefined(scope, &args, WINDOW_EXTERNAL_SLOT, rv);
+}
+
 pub(in crate::context_bootstrap) fn window_screen_getter<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,

@@ -140,6 +140,7 @@ interfaces! {
     EventTarget;
     ExtendableEvent: Event;
     ExtendableMessageEvent: ExtendableEvent;
+    External;
     FetchEvent: ExtendableEvent;
     File: Blob;
     FileList;

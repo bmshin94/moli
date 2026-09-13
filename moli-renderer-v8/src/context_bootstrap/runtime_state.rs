@@ -151,6 +151,7 @@ struct WindowPublicSurfaceAccessorsDeclaration<'scope> {
     history_slot: v8::Local<'scope, v8::Value>,
     navigation_slot: v8::Local<'scope, v8::Value>,
     navigator_slot: v8::Local<'scope, v8::Value>,
+    external_slot: v8::Local<'scope, v8::Value>,
     screen_slot: v8::Local<'scope, v8::Value>,
     speech_synthesis_slot: v8::Local<'scope, v8::Value>,
     custom_elements_slot: v8::Local<'scope, v8::Value>,
@@ -159,6 +160,7 @@ struct WindowPublicSurfaceAccessorsDeclaration<'scope> {
     visual_viewport_slot: v8::Local<'scope, v8::Value>,
     indexed_db_slot: v8::Local<'scope, v8::Value>,
     navigation_name: v8::Local<'scope, v8::Value>,
+    external_name: v8::Local<'scope, v8::Value>,
     screen_name: v8::Local<'scope, v8::Value>,
     performance_name: v8::Local<'scope, v8::Value>,
     visual_viewport_name: v8::Local<'scope, v8::Value>,
@@ -186,6 +188,15 @@ struct WindowPublicSurfaceAccessorsDeclaration<'scope> {
         data = self.navigator_slot
     )]
     navigator: (),
+    #[webapi(
+        accessor_property,
+        enumerable,
+        getter = window_surface_slot_getter,
+        setter = window_surface_replaceable_setter,
+        data = self.external_slot,
+        setter_data = self.external_name
+    )]
+    external: (),
     #[webapi(
         accessor_property,
         enumerable,
@@ -889,6 +900,7 @@ fn install_public_window_surface_accessors<'s>(
     let history_slot = window_surface_callback_data(scope, global, WINDOW_HISTORY_SLOT);
     let navigation_slot = window_surface_callback_data(scope, global, WINDOW_NAVIGATION_SLOT);
     let navigator_slot = window_surface_callback_data(scope, global, WINDOW_NAVIGATOR_SLOT);
+    let external_slot = window_surface_callback_data(scope, global, WINDOW_EXTERNAL_SLOT);
     let screen_slot = window_surface_callback_data(scope, global, WINDOW_SCREEN_SLOT);
     let speech_synthesis_slot =
         window_surface_callback_data(scope, global, WINDOW_SPEECH_SYNTHESIS_SLOT);
@@ -913,6 +925,7 @@ fn install_public_window_surface_accessors<'s>(
             performance_slot,
             visual_viewport_slot,
             indexed_db_slot,
+            external_slot,
         ],
     );
     set_private_value(
@@ -924,6 +937,10 @@ fn install_public_window_surface_accessors<'s>(
     let navigation_name = callback_data_index_value(
         scope,
         window_surface_replaceable_name_index("navigation").unwrap(),
+    );
+    let external_name = callback_data_index_value(
+        scope,
+        window_surface_replaceable_name_index("external").unwrap(),
     );
     let screen_name = callback_data_index_value(
         scope,
@@ -982,6 +999,7 @@ fn install_public_window_surface_accessors<'s>(
         history_slot,
         navigation_slot,
         navigator_slot,
+        external_slot,
         screen_slot,
         speech_synthesis_slot,
         custom_elements_slot,
@@ -990,12 +1008,14 @@ fn install_public_window_surface_accessors<'s>(
         visual_viewport_slot,
         indexed_db_slot,
         navigation_name,
+        external_name,
         screen_name,
         performance_name,
         visual_viewport_name,
         history: (),
         navigation: (),
         navigator: (),
+        external: (),
         screen: (),
         speech_synthesis: (),
         custom_elements: (),
@@ -1088,11 +1108,13 @@ const WINDOW_SURFACE_SLOTS: &[&str] = &[
     WINDOW_PERFORMANCE_SLOT,
     WINDOW_VISUAL_VIEWPORT_SLOT,
     WINDOW_INDEXED_DB_SURFACE_SLOT,
+    WINDOW_EXTERNAL_SLOT,
 ];
 
 const WINDOW_SURFACE_CALLBACK_DATA_REGISTRY_SLOT: &str = "__moliWindowSurfaceCallbackDataRegistry";
 
 const WINDOW_SURFACE_REPLACEABLE_NAMES: &[&str] = &[
+    "external",
     "navigation",
     "screen",
     "performance",

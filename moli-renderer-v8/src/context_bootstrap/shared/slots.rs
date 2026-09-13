@@ -11,6 +11,7 @@ pub(in crate::context_bootstrap) const WINDOW_ONUNHANDLEDREJECTION_SLOT: &str =
 pub(in crate::context_bootstrap) const WINDOW_ONREJECTIONHANDLED_SLOT: &str =
     "__moliWindowOnRejectionHandled";
 pub(in crate::context_bootstrap) const WINDOW_NAVIGATOR_SLOT: &str = "__moliWindowNavigator";
+pub(in crate::context_bootstrap) const WINDOW_EXTERNAL_SLOT: &str = "__moliWindowExternal";
 pub(in crate::context_bootstrap) const NAVIGATOR_RUNTIME_DATA_SLOT: &str =
     "__moliNavigatorRuntimeData";
 pub(in crate::context_bootstrap) const WINDOW_HISTORY_SLOT: &str = "__moliWindowHistory";

@@ -55,6 +55,7 @@ use super::super::{
     web_audio_runtime::install_web_audio_template_bindings,
     webrtc::install_webrtc_template_bindings,
     websocket::{install_websocket_bindings, install_websocket_stream_bindings},
+    window_runtime::install_external_template_bindings,
     window_runtime::storage_bucket_caches_getter_callback,
     window_runtime::storage_bucket_durability_callback,
     window_runtime::storage_bucket_estimate_callback,
@@ -511,6 +512,7 @@ pub(super) fn install_constructor_template_bindings<'s>(
     install_performance_template_bindings(scope, template, spec.interface.name());
     install_crypto_template_bindings(scope, template, spec.interface.name());
     install_navigator_template_bindings(scope, template, spec.interface.name());
+    install_external_template_bindings(scope, template, spec.interface.name());
     install_screen_template_bindings(scope, template, spec.interface.name());
     install_visual_viewport_template_bindings(scope, template, spec.interface.name());
     install_speech_synthesis_template_bindings(scope, template, spec.interface.name());

@@ -1,5 +1,5 @@
 use super::super::{
-    WINDOW_CRYPTO_SLOT, WINDOW_CUSTOM_ELEMENTS_SLOT, WINDOW_NAVIGATOR_SLOT,
+    WINDOW_CRYPTO_SLOT, WINDOW_CUSTOM_ELEMENTS_SLOT, WINDOW_EXTERNAL_SLOT, WINDOW_NAVIGATOR_SLOT,
     WINDOW_PERFORMANCE_SLOT, WINDOW_SCREEN_SLOT, WINDOW_SPEECH_SYNTHESIS_SLOT,
     WINDOW_VISUAL_VIEWPORT_SLOT,
 };
@@ -7,6 +7,7 @@ use super::super::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowLazySurface {
     Navigator,
+    External,
     Performance,
     CustomElements,
     Screen,
@@ -19,6 +20,7 @@ impl WindowLazySurface {
     pub(super) fn from_slot(slot: &str) -> Option<Self> {
         match slot {
             WINDOW_NAVIGATOR_SLOT => Some(Self::Navigator),
+            WINDOW_EXTERNAL_SLOT => Some(Self::External),
             WINDOW_PERFORMANCE_SLOT => Some(Self::Performance),
             WINDOW_CUSTOM_ELEMENTS_SLOT => Some(Self::CustomElements),
             WINDOW_SCREEN_SLOT => Some(Self::Screen),
@@ -32,6 +34,7 @@ impl WindowLazySurface {
     pub(crate) const fn slot(self) -> &'static str {
         match self {
             Self::Navigator => WINDOW_NAVIGATOR_SLOT,
+            Self::External => WINDOW_EXTERNAL_SLOT,
             Self::Performance => WINDOW_PERFORMANCE_SLOT,
             Self::CustomElements => WINDOW_CUSTOM_ELEMENTS_SLOT,
             Self::Screen => WINDOW_SCREEN_SLOT,
@@ -44,6 +47,7 @@ impl WindowLazySurface {
     pub(super) const fn materializing_slot(self) -> &'static str {
         match self {
             Self::Navigator => "__moliWindowNavigatorMaterializing",
+            Self::External => "__moliWindowExternalMaterializing",
             Self::Performance => "__moliWindowPerformanceMaterializing",
             Self::CustomElements => "__moliWindowCustomElementsMaterializing",
             Self::Screen => "__moliWindowScreenMaterializing",
@@ -56,6 +60,7 @@ impl WindowLazySurface {
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Navigator => "Navigator",
+            Self::External => "External",
             Self::Performance => "Performance",
             Self::CustomElements => "CustomElementRegistry",
             Self::Screen => "Screen",
