@@ -1828,7 +1828,7 @@ async fn native_dedicated_worker_membership_and_document_retirement_need_no_devt
         .expect("main-script completion must be native too");
         assert!(matches!(
             script.outcome,
-            crate::page::RendererDedicatedWorkerMainScriptOutcome::Loaded(_)
+            crate::page::RendererDedicatedWorkerMainScriptOutcome::Loaded
         ));
         let snapshot = browser.subscribe().unwrap().0;
         let crate::browser::WorkerSnapshot::Dedicated { worker, .. } = &snapshot.workers[0] else {

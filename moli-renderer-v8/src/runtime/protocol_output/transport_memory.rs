@@ -192,18 +192,10 @@ fn observation_transport_charge_bytes(observation: &RendererProtocolObservation)
                     script,
                     ..
                 } => string_charge(&script.script_url).saturating_add(match &script.outcome {
-                    crate::runtime::RendererDedicatedWorkerMainScriptOutcome::Loaded(response) => {
-                        navigation_response_transport_charge_bytes(response)
-                    }
+                    crate::runtime::RendererDedicatedWorkerMainScriptOutcome::Loaded => 0,
                     crate::runtime::RendererDedicatedWorkerMainScriptOutcome::Failed {
                         error_message,
-                        response,
-                    } => string_charge(error_message).saturating_add(
-                        response
-                            .as_deref()
-                            .map(navigation_response_transport_charge_bytes)
-                            .unwrap_or(0),
-                    ),
+                    } => string_charge(error_message),
                 }),
             }
         }
@@ -457,20 +449,6 @@ fn dedicated_worker_event_transport_charge_bytes(
             },
         ),
     }
-}
-
-fn navigation_response_transport_charge_bytes(
-    response: &crate::protocol_types::NavigationResponse,
-) -> usize {
-    string_charge(response.final_url.as_str())
-        .saturating_add(headers_charge(&response.headers))
-        .saturating_add(response.body_bytes().len())
-        .saturating_add(
-            response
-                .network_request_headers()
-                .map(headers_charge)
-                .unwrap_or(0),
-        )
 }
 
 fn service_worker_lifecycle_payload_bytes(

@@ -309,10 +309,14 @@ async fn worker_network_snapshot_and_late_fifo_preserve_source_and_body_visibili
     let mut snapshot = browser.subscribe().unwrap().0;
     let requests = std::mem::take(&mut snapshot.network_requests);
     assert_eq!(
-        requests.len(),
+        requests.iter().filter(|entry| matches!(&entry.state,
+            moli_core::browser::NetworkRequestState::Completed { request, .. } if request.url().as_str() == URL)).count(),
         2,
         "equal URLs in separate physical Workers must not share a ledger entry"
     );
+    assert_eq!(requests.iter().filter(|entry| matches!(&entry.state,
+        moli_core::browser::NetworkRequestState::Completed { request, .. } if request.is_worker_main_script())).count(),
+        if dedicated { 2 } else { 0 }, "each Dedicated main script has its own native request");
     let mut conn = fixture.connection();
     conn.project_browser_snapshot(snapshot).await;
     let context_id = conn

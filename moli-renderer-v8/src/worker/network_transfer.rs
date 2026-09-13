@@ -20,7 +20,7 @@ use crate::{
 /// One resource consumer's publication and completion permission. Work retains
 /// this request, never its VM or parent pump. The last consumer settles the
 /// request; its Context load or shared cache owns transport cancellation.
-pub(super) struct WorkerResourceTransfer {
+pub(crate) struct WorkerResourceTransfer {
     state: Mutex<WorkerResourceTransferState>,
     observer: WorkerNetworkObserver,
 }
@@ -73,32 +73,43 @@ impl WorkerResourceTransfer {
         }
     }
 
-    pub(super) fn complete(&self, result: &ResourceResponseResult) {
+    pub(crate) fn complete(&self, result: &ResourceResponseResult) {
         match result {
             Ok(response) => self.response_completed(response),
             Err(error) => self.failed(error),
         }
     }
 
-    pub(super) fn response_completed(&self, response: &moli_fetch::Response) {
+    pub(crate) fn response_completed(&self, response: &moli_fetch::Response) {
+        self.body_completed(
+            ResourceResponseHead {
+                head: response.head(),
+                network_request_headers: response
+                    .network_request_extra_info()
+                    .map(|info| info.headers.clone()),
+            },
+            SubresourceResponseBody::from_fetch_response(response),
+        );
+    }
+
+    pub(crate) fn body_completed(&self, head: ResourceResponseHead, body: SubresourceResponseBody) {
         let previous = std::mem::replace(
             &mut *self.state.lock(),
             WorkerResourceTransferState::Finished,
         );
         let (network, body) = match previous {
             WorkerResourceTransferState::Requested(network) => {
-                record_worker_fetch_response(&self.observer, &network, response.head(), None);
-                let body = SubresourceBodyFinished::ready(
-                    network.handle(),
-                    SubresourceResponseBody::from_fetch_response(response),
+                record_worker_fetch_response(
+                    &self.observer,
+                    &network,
+                    head.head,
+                    head.network_request_headers,
                 );
+                let body = SubresourceBodyFinished::ready(network.handle(), body);
                 (network, body)
             }
             WorkerResourceTransferState::Responding(network) => {
-                let body = SubresourceBodyFinished::ready_after_streaming(
-                    network.handle(),
-                    SubresourceResponseBody::from_fetch_response(response),
-                );
+                let body = SubresourceBodyFinished::ready_after_streaming(network.handle(), body);
                 (network, body)
             }
             WorkerResourceTransferState::Finished => return,
@@ -110,7 +121,7 @@ impl WorkerResourceTransfer {
         );
     }
 
-    pub(super) fn failed(&self, error: &ResourceResponseFailure) {
+    pub(crate) fn failed(&self, error: &ResourceResponseFailure) {
         let previous = std::mem::replace(
             &mut *self.state.lock(),
             WorkerResourceTransferState::Finished,

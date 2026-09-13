@@ -613,6 +613,17 @@ impl ResourceRequestClient {
         });
     }
 
+    pub(crate) async fn fetch_observed_script_text_with_cancel(
+        &self,
+        request: Request,
+        cancel: FetchCancelHandle,
+        observer: &dyn ResourceResponseObserver,
+    ) -> ResourceResponseResult {
+        let request = self.apply_network_policy(request)?;
+        self.fetch_observed_script_text_after_policy(request, cancel, Some(observer))
+            .await
+    }
+
     async fn fetch_observed_script_text_after_policy(
         &self,
         request: Request,
@@ -876,13 +887,6 @@ impl ResourceRequestClient {
             FetchCancelHandle::new(),
             callback,
         )
-    }
-
-    pub(crate) fn fetch_text_for_worker_blocking_boundary(
-        &self,
-        request: Request,
-    ) -> Result<Response> {
-        self.fetch_text_for_worker_blocking_boundary_with_cancel(request, FetchCancelHandle::new())
     }
 
     pub(crate) fn fetch_text_for_worker_blocking_boundary_with_cancel(

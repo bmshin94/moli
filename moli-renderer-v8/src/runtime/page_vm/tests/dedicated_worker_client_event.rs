@@ -601,17 +601,6 @@ async fn successful_script_loaded_worker_event_transitions_through_selected_disp
                 script_source: crate::worker::WorkerScriptSource::text(
                     "self.onmessage = () => {};".to_owned(),
                 ),
-                network_response: Box::new(
-                    crate::protocol_types::NavigationResponse::from_text_body(
-                        Url::parse("https://example.com/worker.js").unwrap(),
-                        200,
-                        vec![(
-                            "Content-Type".to_owned(),
-                            "application/javascript".to_owned(),
-                        )],
-                        "self.onmessage = () => {};".to_owned(),
-                    ),
-                ),
                 script_kind: crate::worker::WorkerScriptKind::Classic,
                 secure_context: true,
                 response_referrer_policy: None,
@@ -692,7 +681,6 @@ fn dedicated_worker_client_event_rejects_a_real_page_vm_replacement_identity_col
                         .send(RendererDedicatedWorkerClientEvent::ScriptLoadFailed {
                             script_url: "https://example.test/retired-worker.js".to_owned(),
                             error_message: "retired worker load failed".to_owned(),
-                            network_response: None,
                         })
                         .expect("retired Worker event should enter the stable Page source");
 
@@ -742,7 +730,6 @@ fn dedicated_worker_client_event_rejects_a_real_page_vm_replacement_identity_col
                         .send(RendererDedicatedWorkerClientEvent::ScriptLoadFailed {
                             script_url: "https://example.test/current-worker.js".to_owned(),
                             error_message: "current worker load failed".to_owned(),
-                            network_response: None,
                         })
                         .expect("replacement Worker event should enter the same stable Page source");
 

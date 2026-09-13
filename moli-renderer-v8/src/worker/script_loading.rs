@@ -1,6 +1,59 @@
 use moli_fetch::RedirectInfo;
 use url::Url;
 
+impl crate::runtime::RendererDedicatedWorkerHost {
+    pub(crate) fn start_main_script_request(
+        &self,
+        script_url: &Url,
+        initiator_url: &Url,
+    ) -> Option<std::sync::Arc<super::WorkerResourceTransfer>> {
+        let mut url = script_url.clone();
+        url.set_fragment(None);
+        super::WorkerResourceTransfer::start(
+            self.network(),
+            super::WorkerNetworkObserver::Dedicated(self.network_observer()),
+            |request| {
+                moli_page_types::SubresourceRequestStarted::new(
+                    request.handle(),
+                    None,
+                    initiator_url.clone(),
+                    url,
+                    "GET".into(),
+                    Vec::new(),
+                    None,
+                    moli_page_types::SubresourceResourceType::Script,
+                    moli_page_types::SubresourceRequestInitiatorType::Other,
+                    None,
+                )
+                .with_worker_main_script()
+            },
+        )
+    }
+}
+
+impl super::WorkerResourceTransfer {
+    pub(crate) fn main_script_response<T>(
+        &self,
+        response: &crate::protocol_types::NavigationResponse,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        let body = moli_page_types::SubresourceResponseBody::from_navigation_response(response);
+        let head = crate::network::ResourceResponseHead {
+            head: response.head(),
+            network_request_headers: response.network_request_headers().map(<[_]>::to_vec),
+        };
+        match &result {
+            Ok(_) => self.body_completed(head, body),
+            Err(message) => self.failed(&crate::network::ResourceResponseFailure::PartialBody {
+                message: message.clone(),
+                response: std::sync::Arc::new(head),
+                body,
+            }),
+        }
+        result
+    }
+}
+
 pub(crate) fn ensure_worker_script_redirect_chain_same_origin(
     initiator_url: &Url,
     redirect_chain: &[RedirectInfo],

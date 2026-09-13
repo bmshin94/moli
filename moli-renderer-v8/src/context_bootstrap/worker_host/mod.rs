@@ -31,7 +31,7 @@ mod methods;
 
 pub(in crate::context_bootstrap) use constructor::{
     document_query_encoding_override, is_cross_origin_http_worker_script,
-    materialize_worker_script_source, resolve_worker_script_url, throw_worker_dom_exception,
+    materialize_worker_script_response, resolve_worker_script_url, throw_worker_dom_exception,
     trusted_worker_script_url_string_or_throw, worker_constructor_base_url,
     worker_script_resource_url, worker_script_scheme_can_load,
 };

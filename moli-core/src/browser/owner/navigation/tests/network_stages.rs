@@ -25,6 +25,8 @@ enum RequestKind {
     ImportScript,
     StaticModule,
     DynamicModule,
+    MainScript,
+    MainModule,
     CspReport,
     ModuleCspReport,
 }
@@ -44,7 +46,11 @@ impl RequestKind {
     fn is_script(self) -> bool {
         matches!(
             self,
-            Self::ImportScript | Self::StaticModule | Self::DynamicModule
+            Self::ImportScript
+                | Self::StaticModule
+                | Self::DynamicModule
+                | Self::MainScript
+                | Self::MainModule
         )
     }
 }
@@ -251,6 +257,13 @@ macro_rules! worker_stage_tests {
 }
 
 worker_stage_tests! {
+    native_worker_main_stages_dedicated: Dedicated, MainScript, Complete;
+    native_worker_main_stages_dedicated_module: Dedicated, MainModule, Complete;
+    native_worker_main_stages_nested: Nested, MainScript, Complete;
+    native_worker_main_stages_partial_body: Dedicated, MainScript, PartialFailure;
+    native_worker_main_stages_nested_partial_body: Nested, MainScript, PartialFailure;
+    native_worker_main_stages_retirement: Dedicated, MainScript, RetiredCancellation;
+    native_worker_main_stages_nested_retirement: Nested, MainScript, RetiredCancellation;
     native_worker_filtered_stages_no_cors: Dedicated, NoCorsFetch, Complete;
     native_worker_filtered_stages_shared_no_cors: Shared, NoCorsFetch, Complete;
     native_worker_filtered_stages_service_no_cors: Service, NoCorsFetch, Complete;
@@ -377,16 +390,27 @@ async fn worker_network_stages_with_request(
             RequestKind::ImportScript => "try{importScripts('/probe')}catch(_){}".into(),
             RequestKind::StaticModule => "import '/probe';".into(),
             RequestKind::DynamicModule => "import('/probe').catch(()=>{})".into(),
+            RequestKind::MainScript | RequestKind::MainModule => String::new(),
             RequestKind::CspReport => "fetch('/blocked').catch(()=>{})".into(),
             RequestKind::ModuleCspReport => "import('/blocked').catch(()=>{})".into(),
         };
-        let options = if matches!(request_kind, RequestKind::StaticModule) {
+        let options = if matches!(
+            request_kind,
+            RequestKind::StaticModule | RequestKind::MainModule
+        ) {
             "{type:'module'}"
         } else {
             "{}"
         };
+        let main_script = matches!(
+            request_kind,
+            RequestKind::MainScript | RequestKind::MainModule
+        );
         let worker_script = match kind {
             WorkerKind::Dedicated => request_script.clone(),
+            WorkerKind::Nested if main_script => {
+                format!("globalThis.child = new Worker('/probe',{options})")
+            }
             WorkerKind::Nested => format!("globalThis.child = new Worker('/nested.js',{options})"),
             WorkerKind::Shared if request_kind.is_script() => {
                 format!("{request_script};onconnect=()=>{{}}")
@@ -409,6 +433,9 @@ async fn worker_network_stages_with_request(
             }
         };
         let bootstrap = match kind {
+            WorkerKind::Dedicated if main_script => {
+                format!("globalThis.worker = new Worker('/probe',{options})")
+            }
             WorkerKind::Dedicated => {
                 format!("globalThis.worker = new Worker('/worker.js',{options})")
             }
@@ -579,6 +606,13 @@ async fn worker_network_stages_with_request(
                     && request.url().as_str() == url
                 {
                     assert_eq!(
+                        request.is_worker_main_script(),
+                        matches!(
+                            request_kind,
+                            RequestKind::MainScript | RequestKind::MainModule
+                        )
+                    );
+                    assert_eq!(
                         request.keepalive(),
                         finish.keepalive() || request_kind.is_report()
                     );
@@ -599,7 +633,9 @@ async fn worker_network_stages_with_request(
                                 crate::page::SubresourceResourceType::Xhr,
                             RequestKind::ImportScript
                             | RequestKind::StaticModule
-                            | RequestKind::DynamicModule =>
+                            | RequestKind::DynamicModule
+                            | RequestKind::MainScript
+                            | RequestKind::MainModule =>
                                 crate::page::SubresourceResourceType::Script,
                         }
                     );
