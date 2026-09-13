@@ -235,6 +235,59 @@ fn worker_network_result_parts<R>(
     )
 }
 
+async fn collect_worker_resource_response(
+    observed: moli_fetch::NetworkFetchResult<moli_fetch::StreamingRawResponse>,
+    network: &crate::runtime::RendererWorkerNetworkRequest,
+    observer: &crate::worker::WorkerNetworkObserver,
+    observe_response: bool,
+    error_prefix: &str,
+) -> (
+    Result<WorkerResourceResponse, WorkerRequestError>,
+    Option<Vec<(String, String)>>,
+) {
+    let (mut response, network_request_headers) = worker_network_result_parts(observed);
+    let head = response.head();
+    if observe_response {
+        record_worker_fetch_response(
+            observer,
+            network,
+            head.clone(),
+            network_request_headers.clone(),
+        );
+    }
+    let mut body_writer = SubresourceResponseBodyWriter::default();
+    while let Some(chunk) = response.next_chunk().await {
+        body_writer.append(&chunk);
+        if observe_response {
+            publish_worker_network_item(
+                observer,
+                network,
+                ScriptNetworkOutputItem::SubresourceDataReceived(SubresourceDataReceived::new(
+                    network.handle(),
+                    chunk.len(),
+                    chunk.len(),
+                )),
+            );
+        }
+    }
+    let result = match response.finish().await {
+        Ok(()) => {
+            let head = Box::new(head);
+            let body = body_writer.finish();
+            Ok(if observe_response {
+                WorkerResourceResponse::Streamed { head, body }
+            } else {
+                WorkerResourceResponse::Buffered { head, body }
+            })
+        }
+        Err(error) => Err(WorkerRequestError::PartialBody {
+            message: format!("{error_prefix}: {error}"),
+            body: body_writer.finish(),
+        }),
+    };
+    (result, network_request_headers)
+}
+
 pub(in crate::worker) fn spawn_worker_fetch_network(
     load: ResourceLoadLease,
     network: crate::runtime::RendererWorkerNetworkRequest,
@@ -265,7 +318,7 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
             (
                 local_url_response(&resolved_url)
                     .map(|response| WorkerResourceResponse::Materialized(Box::new(response)))
-                    .ok_or_else(|| format!("fetch: local url `{resolved_url}` is unavailable")),
+                    .ok_or_else(|| WorkerRequestError::from(format!("fetch: local url `{resolved_url}` is unavailable"))),
                 None,
             )
         } else {
@@ -297,14 +350,7 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                     if let Some(auth) = auth {
                         request = request.with_auth(auth.into());
                     }
-                    if request.auth_requires_buffered_transport()
-                        || request.request_mode == RequestMode::NoCors
-                        || !request.follow_redirects
-                        || browser_request_needs_manual_preflight_redirects(
-                            &request,
-                            &cors_preflight_request_headers,
-                        )
-                    {
+                    if request.auth_requires_buffered_transport() {
                         match fetch_browser_subresource_with_preflight_headers_and_network_metadata(
                             loader.clone(),
                             request,
@@ -321,12 +367,14 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                                     network_request_headers,
                                 )
                             }
-                            Err(error) => (Err(format!("fetch: {error}")), None),
+                            Err(error) => (Err(WorkerRequestError::from(format!("fetch: {error}"))), None),
                         }
-                    } else if !allow_headers_first {
-                        // Worker fetch still resolves after the full response, but ordinary
-                        // transfers can keep their body in the same chunked/spooled carrier that
-                        // CDP Network capture uses instead of forcing a single buffered Response.
+                    } else if !allow_headers_first
+                        || request.request_mode == RequestMode::NoCors
+                        || !request.follow_redirects
+                    {
+                        // Body security checks and filtered JS responses still wait for
+                        // completion. Native observation follows the physical transfer.
                         match fetch_browser_subresource_raw_stream_with_preflight_headers_and_network_metadata(
                             &loader,
                             request,
@@ -335,24 +383,10 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                         )
                         .await
                         {
-                            Ok(observed) => {
-                                let (mut response, network_request_headers) =
-                                    worker_network_result_parts(observed);
-                                let head = response.head();
-                                let mut body_writer = SubresourceResponseBodyWriter::default();
-                                while let Some(chunk) = response.next_chunk().await {
-                                    body_writer.append(&chunk);
-                                }
-                                let result = match response.finish().await {
-                                    Ok(()) => Ok(WorkerResourceResponse::Buffered {
-                                        head: Box::new(head),
-                                        body: body_writer.finish(),
-                                    }),
-                                    Err(error) => Err(format!("fetch: {error}")),
-                                };
-                                (result, network_request_headers)
-                            }
-                            Err(error) => (Err(format!("fetch: {error}")), None),
+                            Ok(observed) => collect_worker_resource_response(
+                                observed, &network, &observer, allow_headers_first, "fetch",
+                            ).await,
+                            Err(error) => (Err(WorkerRequestError::from(format!("fetch: {error}"))), None),
                         }
                     } else {
                         match fetch_browser_subresource_raw_stream_with_preflight_headers_and_network_metadata(
@@ -406,12 +440,12 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                                 ));
                                 return;
                             }
-                            Err(error) => (Err(format!("fetch: {error}")), None),
+                            Err(error) => (Err(WorkerRequestError::from(format!("fetch: {error}"))), None),
                         }
                     }
                 }
                 Err(error) => (
-                    Err(format!("fetch: failed to build request: {error}")),
+                    Err(WorkerRequestError::from(format!("fetch: failed to build request: {error}"))),
                     None,
                 ),
             }
@@ -421,7 +455,7 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
             WorkerRequestCompletion {
                 id: fetch_id,
                 network_request_headers,
-                result: result.map_err(Into::into),
+                result,
             },
         );
     });
@@ -604,12 +638,7 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
             .map(|request| request.request_headers.clone()).unwrap_or_default();
 
         let (result, network_request_headers) = match request {
-            Ok(request)
-                if request.auth_requires_buffered_transport()
-                    || browser_request_needs_manual_preflight_redirects(
-                        &request,
-                        &cors_preflight_request_headers,
-                    ) =>
+            Ok(request) if request.auth_requires_buffered_transport() =>
             {
                 match fetch_browser_subresource_with_preflight_headers_and_network_metadata(
                     loader.clone(),
@@ -641,38 +670,9 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
                 )
                 .await
                 {
-                    Ok(observed) => {
-                        let (mut response, network_request_headers) =
-                            worker_network_result_parts(observed);
-                        let head = response.head();
-                        if observe_response {
-                            record_worker_fetch_response(&observer, &network, head.clone(), network_request_headers.clone());
-                        }
-                        let mut body_writer = SubresourceResponseBodyWriter::default();
-                        while let Some(chunk) = response.next_chunk().await {
-                            body_writer.append(&chunk);
-                            if observe_response {
-                                publish_worker_network_item(&observer, &network,
-                                    ScriptNetworkOutputItem::SubresourceDataReceived(SubresourceDataReceived::new(network.handle(), chunk.len(), chunk.len())));
-                            }
-                        }
-                        let result = match response.finish().await {
-                            Ok(()) => {
-                                let head = Box::new(head);
-                                let body = body_writer.finish();
-                                Ok(if observe_response {
-                                    WorkerResourceResponse::Streamed { head, body }
-                                } else {
-                                    WorkerResourceResponse::Buffered { head, body }
-                                })
-                            }
-                            Err(error) => Err(WorkerRequestError::PartialBody {
-                                message: format!("xhr: {error}"),
-                                body: body_writer.finish(),
-                            }),
-                        };
-                        (result, network_request_headers)
-                    }
+                    Ok(observed) => collect_worker_resource_response(
+                        observed, &network, &observer, observe_response, "xhr",
+                    ).await,
                     Err(error) => (Err(WorkerRequestError::from(format!("xhr: {error}"))), None),
                 }
             }
@@ -2661,8 +2661,7 @@ pub(in crate::worker) fn finish_worker_streaming_fetch(
 fn record_worker_fetch_success(
     state: &WorkerGlobalState,
     pending: &PendingWorkerFetch,
-    head: ResponseHead,
-    body: SubresourceResponseBody,
+    response: &WorkerResourceResponse,
     network_request_headers: Option<Vec<(String, String)>>,
 ) {
     let network_request_headers = pending
@@ -2670,19 +2669,20 @@ fn record_worker_fetch_success(
         .as_ref()
         .and_then(|record| record.initial_network_request_headers.clone())
         .or(network_request_headers);
-    record_worker_fetch_response(
-        &state.parent_tx.network_observer(),
-        &pending.network,
-        head,
-        network_request_headers,
-    );
+    if let Some(head) = response.native_head() {
+        record_worker_fetch_response(
+            &state.parent_tx.network_observer(),
+            &pending.network,
+            head,
+            network_request_headers,
+        );
+    }
     publish_worker_network_item(
         &state.parent_tx.network_observer(),
         &pending.network,
-        ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(SubresourceBodyFinished::ready(
-            pending.network.handle(),
-            body,
-        ))),
+        ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(
+            response.native_body(pending.network.handle()),
+        )),
     );
 }
 
@@ -2958,8 +2958,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
                 record_worker_fetch_success(
                     &state.borrow(),
                     &pending,
-                    response_head.clone(),
-                    response.subresource_response_body(),
+                    &response,
                     completion.network_request_headers,
                 );
             }

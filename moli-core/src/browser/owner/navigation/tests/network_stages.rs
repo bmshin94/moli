@@ -15,8 +15,13 @@ enum WorkerKind {
 #[derive(Clone, Copy, Debug)]
 enum RequestKind {
     Fetch,
+    NoCorsFetch,
+    ManualFetch,
+    PreflightFetch,
     Xhr,
     SyncXhr,
+    PreflightXhr,
+    PreflightSyncXhr,
     ImportScript,
     StaticModule,
     DynamicModule,
@@ -25,6 +30,13 @@ enum RequestKind {
 }
 
 impl RequestKind {
+    fn needs_preflight(self) -> bool {
+        matches!(
+            self,
+            Self::PreflightFetch | Self::PreflightXhr | Self::PreflightSyncXhr
+        )
+    }
+
     fn is_report(self) -> bool {
         matches!(self, Self::CspReport | Self::ModuleCspReport)
     }
@@ -40,6 +52,7 @@ impl RequestKind {
 #[derive(Clone, Copy, Debug)]
 enum Finish {
     Complete,
+    FollowedRedirect,
     UnfollowedRedirect,
     PartialFailure,
     DetachedKeepalive,
@@ -238,6 +251,24 @@ macro_rules! worker_stage_tests {
 }
 
 worker_stage_tests! {
+    native_worker_filtered_stages_no_cors: Dedicated, NoCorsFetch, Complete;
+    native_worker_filtered_stages_shared_no_cors: Shared, NoCorsFetch, Complete;
+    native_worker_filtered_stages_service_no_cors: Service, NoCorsFetch, Complete;
+    native_worker_filtered_stages_no_cors_partial: Dedicated, NoCorsFetch, PartialFailure;
+    native_worker_filtered_stages_no_cors_detached: Dedicated, NoCorsFetch, DetachedKeepalive;
+    native_worker_filtered_stages_manual: Dedicated, ManualFetch, UnfollowedRedirect;
+    native_worker_filtered_stages_manual_partial: Dedicated, ManualFetch, PartialFailure;
+    native_worker_filtered_stages_preflight_fetch: Dedicated, PreflightFetch, Complete;
+    native_worker_filtered_stages_preflight_redirect: Dedicated, PreflightFetch, FollowedRedirect;
+    native_worker_filtered_stages_preflight_manual: Dedicated, PreflightFetch, UnfollowedRedirect;
+    native_worker_filtered_stages_preflight_detached: Dedicated, PreflightFetch, DetachedKeepalive;
+    native_worker_filtered_stages_shared_preflight_fetch: Shared, PreflightFetch, Complete;
+    native_worker_filtered_stages_preflight_fetch_partial: Dedicated, PreflightFetch, PartialFailure;
+    native_worker_filtered_stages_preflight_xhr: Dedicated, PreflightXhr, Complete;
+    native_worker_filtered_stages_preflight_xhr_redirect: Dedicated, PreflightXhr, FollowedRedirect;
+    native_worker_filtered_stages_preflight_sync_xhr: Dedicated, PreflightSyncXhr, Complete;
+    native_worker_filtered_stages_preflight_xhr_partial: Dedicated, PreflightXhr, PartialFailure;
+    native_worker_filtered_stages_preflight_sync_xhr_retired: Dedicated, PreflightSyncXhr, RetiredCancellation;
     native_worker_csp_stages_redirect_body: Dedicated, CspReport, UnfollowedRedirect;
     native_worker_csp_stages_dynamic_module: Dedicated, ModuleCspReport, Complete;
     native_worker_csp_stages_shared_dynamic_module: Shared, ModuleCspReport, Complete;
@@ -287,7 +318,23 @@ async fn worker_network_stages_with_request(
 ) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let url = format!("{origin}/probe");
+    let cross_origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let request_path = if matches!(finish, Finish::FollowedRedirect) {
+        "/redirect"
+    } else {
+        "/probe"
+    };
+    let url = if request_kind.needs_preflight() || matches!(request_kind, RequestKind::NoCorsFetch)
+    {
+        format!(
+            "http://{}{request_path}",
+            cross_origin_listener.local_addr().unwrap()
+        )
+    } else {
+        format!("{origin}{request_path}")
+    };
+    let request_url = url.clone();
+    let page_origin = origin.clone();
     let response_body = if request_kind.is_script() {
         "//ok"
     } else {
@@ -303,9 +350,29 @@ async fn worker_network_stages_with_request(
                 "fetch('/probe',{{keepalive:{}}}).then(r=>r.text()).catch(()=>{{}})",
                 finish.keepalive()
             ),
+            RequestKind::NoCorsFetch => format!(
+                "fetch({request_url:?},{{mode:'no-cors',keepalive:{}}}).then(r=>r.text()).catch(()=>{{}})",
+                finish.keepalive()
+            ),
+            RequestKind::ManualFetch => format!(
+                "fetch({request_url:?},{{redirect:'manual'}}).then(r=>r.text()).catch(()=>{{}})"
+            ),
+            RequestKind::PreflightFetch => format!(
+                "fetch({request_url:?},{{method:'PUT',headers:{{'x-native-probe':'yes'}},keepalive:{},redirect:'{}'}}).then(r=>r.text()).catch(()=>{{}})",
+                finish.keepalive(),
+                if matches!(finish, Finish::UnfollowedRedirect) {
+                    "manual"
+                } else {
+                    "follow"
+                }
+            ),
             RequestKind::Xhr | RequestKind::SyncXhr => format!(
                 "try{{const xhr=new XMLHttpRequest();xhr.open('GET','/probe',{});xhr.send();}}catch(_){{}}",
                 matches!(request_kind, RequestKind::Xhr)
+            ),
+            RequestKind::PreflightXhr | RequestKind::PreflightSyncXhr => format!(
+                "try{{const xhr=new XMLHttpRequest();xhr.open('PUT',{request_url:?},{});xhr.setRequestHeader('x-native-probe','yes');xhr.send();}}catch(_){{}}",
+                matches!(request_kind, RequestKind::PreflightXhr)
             ),
             RequestKind::ImportScript => "try{importScripts('/probe')}catch(_){}".into(),
             RequestKind::StaticModule => "import '/probe';".into(),
@@ -336,7 +403,7 @@ async fn worker_network_stages_with_request(
             WorkerKind::Service => {
                 assert!(matches!(
                     request_kind,
-                    RequestKind::Fetch | RequestKind::CspReport
+                    RequestKind::Fetch | RequestKind::NoCorsFetch | RequestKind::CspReport
                 ));
                 format!("addEventListener('install',event=>event.waitUntil({request_script}))")
             }
@@ -356,8 +423,13 @@ async fn worker_network_stages_with_request(
             }
         };
         let html = format!("<!doctype html><script>{bootstrap}</script>");
+        let mut preflight_count = 0;
         loop {
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut stream, _) = tokio::select! {
+                accepted = listener.accept() => accepted,
+                accepted = cross_origin_listener.accept() => accepted,
+            }
+            .unwrap();
             let mut request = Vec::new();
             let mut byte = [0];
             while !request.ends_with(b"\r\n\r\n") {
@@ -366,7 +438,44 @@ async fn worker_network_stages_with_request(
             }
             let request = String::from_utf8(request).unwrap();
             let path = request.split_whitespace().nth(1).unwrap();
+            if request.starts_with("OPTIONS ") {
+                assert!(request_kind.needs_preflight());
+                assert!(path == "/probe" || path == "/redirect");
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("access-control-request-method: put\r\n")
+                );
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("access-control-request-headers: x-native-probe\r\n")
+                );
+                preflight_count += 1;
+                stream.write_all(format!("HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {page_origin}\r\nAccess-Control-Allow-Methods: PUT\r\nAccess-Control-Allow-Headers: x-native-probe\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                continue;
+            }
+            if path == "/redirect" {
+                assert!(matches!(finish, Finish::FollowedRedirect));
+                assert_eq!(preflight_count, 1);
+                assert!(request.starts_with("PUT /redirect HTTP/1.1"));
+                stream.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: /probe\r\nAccess-Control-Allow-Origin: {page_origin}\r\nContent-Length: 8\r\nConnection: close\r\n\r\nredirect").as_bytes()).await.unwrap();
+                continue;
+            }
             if path == "/probe" {
+                assert_eq!(
+                    preflight_count,
+                    usize::from(request_kind.needs_preflight())
+                        + usize::from(matches!(finish, Finish::FollowedRedirect))
+                );
+                if request_kind.needs_preflight() {
+                    assert!(request.starts_with("PUT /probe HTTP/1.1"));
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("x-native-probe: yes\r\n")
+                    );
+                }
                 if request_kind.is_report() {
                     assert!(request.starts_with("POST /probe HTTP/1.1"));
                     let length = request
@@ -405,6 +514,8 @@ async fn worker_network_stages_with_request(
                 }
                 let mime = if request_kind.is_script() {
                     "text/javascript"
+                } else if matches!(request_kind, RequestKind::NoCorsFetch) {
+                    "image/png"
                 } else {
                     "text/plain"
                 };
@@ -413,7 +524,7 @@ async fn worker_network_stages_with_request(
                 } else {
                     "200 OK"
                 };
-                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nAccess-Control-Allow-Origin: {page_origin}\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
                 release_chunk.await.unwrap();
                 stream
                     .write_all(&response_body.as_bytes()[..2])
@@ -474,10 +585,17 @@ async fn worker_network_stages_with_request(
                     assert_eq!(
                         request.resource_type(),
                         match request_kind {
-                            RequestKind::Fetch => crate::page::SubresourceResourceType::Fetch,
+                            RequestKind::Fetch
+                            | RequestKind::NoCorsFetch
+                            | RequestKind::ManualFetch
+                            | RequestKind::PreflightFetch =>
+                                crate::page::SubresourceResourceType::Fetch,
                             RequestKind::CspReport | RequestKind::ModuleCspReport =>
                                 crate::page::SubresourceResourceType::CspReport,
-                            RequestKind::Xhr | RequestKind::SyncXhr =>
+                            RequestKind::Xhr
+                            | RequestKind::SyncXhr
+                            | RequestKind::PreflightXhr
+                            | RequestKind::PreflightSyncXhr =>
                                 crate::page::SubresourceResourceType::Xhr,
                             RequestKind::ImportScript
                             | RequestKind::StaticModule
@@ -624,7 +742,10 @@ async fn worker_network_stages_with_request(
                         SubresourceBodyFinishedResult::Failed(error),
                     ) => assert!(!error.is_empty()),
                     (
-                        Finish::Complete | Finish::UnfollowedRedirect | Finish::DetachedKeepalive,
+                        Finish::Complete
+                        | Finish::FollowedRedirect
+                        | Finish::UnfollowedRedirect
+                        | Finish::DetachedKeepalive,
                         SubresourceBodyFinishedResult::Ready(body),
                     ) => assert_eq!(body.clone_body_bytes(), response_body.as_bytes()),
                     (
