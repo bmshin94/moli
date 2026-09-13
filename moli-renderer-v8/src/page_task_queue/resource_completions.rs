@@ -6,8 +6,9 @@ use crate::page_resource_completion::{
     RendererPageResourceCompletionSender, RendererResourceCompletionRouteClosed,
 };
 use crate::runtime::{
-    RendererDocumentLifecycleIdentity, RendererDocumentToken, RendererOwnerRuntimeActivitySource,
-    RendererPageToken, RendererRuntimeInspectorResponsePublication,
+    RendererDocumentLifecycleIdentity, RendererDocumentNetworkReporter, RendererDocumentToken,
+    RendererOwnerRuntimeActivitySource, RendererPageToken,
+    RendererRuntimeInspectorResponsePublication,
 };
 use crate::types::{
     AsyncSubresourceFetchCompletion, AsyncSubresourceFetchEvent,
@@ -327,6 +328,7 @@ impl RendererOwnerWakeSender {
 #[derive(Debug, Clone)]
 pub(crate) struct RendererResourceCompletionSender {
     page_completion_route: Option<RendererPageResourceCompletionRoute>,
+    network_reporter: Option<Box<RendererDocumentNetworkReporter>>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +347,7 @@ impl RendererResourceCompletionSender {
                 sender: page_completion_sender,
                 root_document,
             }),
+            network_reporter: None,
         }
     }
 
@@ -356,6 +359,7 @@ impl RendererResourceCompletionSender {
     pub(crate) fn direct_completion_only() -> Self {
         Self {
             page_completion_route: None,
+            network_reporter: None,
         }
     }
 
@@ -375,7 +379,20 @@ impl RendererResourceCompletionSender {
                 sender: page_completion_sender,
                 root_document,
             }),
+            network_reporter: None,
         }
+    }
+
+    pub(crate) fn with_network_reporter(
+        mut self,
+        network_reporter: Option<RendererDocumentNetworkReporter>,
+    ) -> Self {
+        self.network_reporter = network_reporter.map(Box::new);
+        self
+    }
+
+    pub(crate) fn network_reporter(&self) -> Option<RendererDocumentNetworkReporter> {
+        self.network_reporter.as_deref().cloned()
     }
 
     fn send_page_completion(

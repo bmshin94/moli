@@ -35,6 +35,177 @@ csp_stage_tests! {
     native_document_csp_stages_child_opened: true, DocumentOpened;
 }
 
+#[tokio::test]
+async fn native_document_preflight_emits_native_stages() {
+    let page_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_origin = format!("http://{}", page_listener.local_addr().unwrap());
+    let target_origin = format!("http://{}", target_listener.local_addr().unwrap());
+    let page_origin_for_server = page_origin.clone();
+    let (options_arrived_tx, options_arrived_rx) = tokio::sync::oneshot::channel();
+    let (options_release_tx, options_release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut page, _) = page_listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            page.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        let html = format!(
+            "<!doctype html><script>fetch('{target_origin}/preflight',{{method:'PUT',headers:{{'X-Test':'1'}},body:'payload'}}).catch(()=>{{}})</script>"
+        );
+        page.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}",
+                html.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+        let (mut options, _) = target_listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            options.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        let request = String::from_utf8(request).unwrap();
+        assert!(request.starts_with("OPTIONS /preflight HTTP/1.1"));
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Access-Control-Request-Method: PUT"))
+        );
+        options_arrived_tx.send(()).unwrap();
+        options_release_rx.await.unwrap();
+        options
+            .write_all(
+                format!(
+                    "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {page_origin_for_server}\r\nAccess-Control-Allow-Methods: PUT\r\nAccess-Control-Allow-Headers: X-Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let (mut put, _) = target_listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            put.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        assert!(
+            String::from_utf8(request)
+                .unwrap()
+                .starts_with("PUT /preflight HTTP/1.1")
+        );
+        put.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {page_origin_for_server}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let service = BrowserService::start().unwrap();
+    let browser = service.handle();
+    let (context, contents) = context_with_contents(&service);
+    let (_, mut events) = browser.subscribe().unwrap();
+    let document = navigate(&context, contents, &format!("{page_origin}/page")).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), options_arrived_rx)
+        .await
+        .expect("the physical CORS preflight must reach the server")
+        .unwrap();
+
+    let (source, handle) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if let BrowserEvent::NetworkRequestStarted(occurrence) = event.event
+                && occurrence.owner == NetworkOwner::Document(document)
+                && let RendererNetworkOutputItem::Resource(item) = &occurrence.renderer.item
+                && let ScriptNetworkOutputItem::SubresourceRequestStarted(request) = item.as_ref()
+                && request.method() == "OPTIONS"
+            {
+                return (occurrence.renderer.source.clone(), request.handle());
+            }
+        }
+    })
+    .await
+    .expect("native preflight admission must precede the held response");
+
+    options_release_tx.send(()).unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            let occurrence = match event.event {
+                BrowserEvent::NetworkActivity(occurrence)
+                | BrowserEvent::NetworkRequestCompleted(occurrence)
+                    if occurrence.owner == NetworkOwner::Document(document) =>
+                {
+                    occurrence
+                }
+                _ => continue,
+            };
+            if occurrence.renderer.source != source {
+                continue;
+            }
+            let RendererNetworkOutputItem::Resource(item) = &occurrence.renderer.item else {
+                continue;
+            };
+            if let ScriptNetworkOutputItem::SubresourceResponseStarted(head) = item.as_ref()
+                && head.handle() == handle
+            {
+                return head.status();
+            }
+        }
+    })
+    .await
+    .expect("native preflight response head must follow the admission");
+    assert_eq!(response, 204);
+
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            let occurrence = match event.event {
+                BrowserEvent::NetworkRequestCompleted(occurrence)
+                    if occurrence.owner == NetworkOwner::Document(document) =>
+                {
+                    occurrence
+                }
+                _ => continue,
+            };
+            if occurrence.renderer.source != source {
+                continue;
+            }
+            let RendererNetworkOutputItem::Resource(item) = &occurrence.renderer.item else {
+                continue;
+            };
+            if let ScriptNetworkOutputItem::SubresourceBodyFinished(body) = item.as_ref()
+                && body.handle() == handle
+            {
+                return body.result().clone();
+            }
+        }
+    })
+    .await
+    .expect("native preflight terminal must be published");
+    assert!(
+        matches!(terminal, SubresourceBodyFinishedResult::Ready(body) if body.clone_body_bytes().is_empty())
+    );
+
+    server.await.unwrap();
+    context
+        .close_web_contents(contents)
+        .unwrap()
+        .close_async()
+        .await;
+    service.shutdown();
+}
+
 async fn document_csp_stages(child: bool, finish: Finish) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
