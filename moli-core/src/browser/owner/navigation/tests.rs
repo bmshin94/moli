@@ -1795,18 +1795,44 @@ async fn native_worker_local_script_static_module_completes_before_close_without
         "import 'data:text/javascript,globalThis.nativeStatic=1';close()",
         &[("data:text/javascript,globalThis.nativeStatic=1", true)],
         "module",
+        None,
     )
     .await;
 }
 
+#[tokio::test]
+async fn native_worker_rejected_fetch_preserves_binary_body_before_close() {
+    dedicated_worker_network_before_close_with_kind(
+        "fetch('http://127.0.0.1:1/rejected',{method:'POST',body:new Uint8Array([0,255,65])}).catch(()=>close())",
+        &[("http://127.0.0.1:1/rejected", false)], "classic", Some(&[0,255,65]),
+    ).await;
+}
+
+#[tokio::test]
+async fn native_worker_rejected_xhr_preserves_binary_body_before_close() {
+    dedicated_worker_network_before_close_with_kind(
+        "const x=new XMLHttpRequest();x.open('POST','http://127.0.0.1:1/rejected');x.onerror=()=>close();x.send(new Uint8Array([0,255,65]))",
+        &[("http://127.0.0.1:1/rejected", false)], "classic", Some(&[0,255,65]),
+    ).await;
+}
+
+#[tokio::test]
+async fn native_worker_rejected_sync_xhr_preserves_binary_body_before_close() {
+    dedicated_worker_network_before_close_with_kind(
+        "const x=new XMLHttpRequest();x.open('POST','http://127.0.0.1:1/rejected',false);try{x.send(new Uint8Array([0,255,65]))}catch(_){close()}",
+        &[("http://127.0.0.1:1/rejected", false)], "classic", Some(&[0,255,65]),
+    ).await;
+}
+
 async fn dedicated_worker_network_before_close(script: &str, urls: &[(&str, bool)]) {
-    dedicated_worker_network_before_close_with_kind(script, urls, "classic").await;
+    dedicated_worker_network_before_close_with_kind(script, urls, "classic", None).await;
 }
 
 async fn dedicated_worker_network_before_close_with_kind(
     script: &str,
     urls: &[(&str, bool)],
     kind: &str,
+    expected_body: Option<&[u8]>,
 ) {
     use crate::browser::{NetworkOwner, WorkerHandle, WorkerSnapshot};
     let service = BrowserService::start().unwrap();
@@ -1818,13 +1844,45 @@ async fn dedicated_worker_network_before_close_with_kind(
     let mut root = None;
     let mut created = Vec::new();
     let mut completed = Vec::new();
+    let mut started = std::collections::HashMap::new();
     let mut network = NativeWorkerNetworkRecords::default();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let record = events.recv().await.unwrap();
+            if let BrowserEvent::NetworkRequestStarted(occurrence) = &record.event
+                && let crate::page::RendererNetworkOutputItem::Resource(item) =
+                    &occurrence.renderer.item
+                && let crate::page::ScriptNetworkOutputItem::SubresourceRequestStarted(request) =
+                    item.as_ref()
+                && urls.iter().any(|(url, _)| *url == request.url().as_str())
+            {
+                if let Some(body) = expected_body {
+                    assert_eq!(request.request_body_bytes(), Some(body));
+                }
+                assert!(
+                    started
+                        .insert(
+                            request.handle(),
+                            (occurrence.owner, occurrence.renderer.source.clone())
+                        )
+                        .is_none()
+                );
+            }
             if let Some((occurrence, result)) = network.observe(&record.event)
                 && urls.iter().any(|(url, _)| *url == result.url().as_str())
             {
+                if let Some(body) = expected_body {
+                    assert_eq!(
+                        result.request_body_bytes(),
+                        Some(body),
+                        "failed requests retain exact body bytes"
+                    );
+                }
+                assert_eq!(
+                    started.remove(&result.request_handle().expect("native request identity")),
+                    Some((occurrence.owner, occurrence.renderer.source.clone())),
+                    "one native Started must precede terminal with the original owner and source",
+                );
                 completed.push((occurrence, result));
             }
             match record.event {

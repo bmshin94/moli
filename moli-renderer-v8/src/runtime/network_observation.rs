@@ -252,17 +252,6 @@ impl RendererCommittedNetworkObservation {
 }
 
 impl RendererNetworkObservation {
-    #[cfg(test)]
-    pub(crate) fn worker_record_for_test(&self) -> &moli_page_types::SubresourceNetworkRecord {
-        let RendererNetworkOutputItem::Resource(item) = &self.occurrence.item else {
-            panic!("expected a Worker resource")
-        };
-        let ScriptNetworkOutputItem::SubresourceNetworkRecord(record) = item.as_ref() else {
-            panic!("expected a complete Worker record")
-        };
-        record
-    }
-
     pub async fn committed(mut self) -> Option<RendererCommittedNetworkObservation> {
         loop {
             if let Some((browser_sequence, source)) = self.committed.borrow_and_update().clone() {
@@ -557,27 +546,6 @@ impl RendererWorkerNetworkReporter {
             }),
             handle,
         })
-    }
-
-    pub(crate) fn report(
-        &self,
-        mut record: moli_page_types::SubresourceNetworkRecord,
-    ) -> RendererNetworkObservation {
-        if record.request_handle().is_none() {
-            record = record
-                .with_request_handle(moli_page_types::SubresourceNetworkRequestHandle::allocate());
-        }
-        self.report_item(ScriptNetworkOutputItem::SubresourceNetworkRecord(Box::new(
-            record,
-        )))
-    }
-
-    pub(crate) fn report_item(&self, item: ScriptNetworkOutputItem) -> RendererNetworkObservation {
-        self.reporter.report_source(
-            RendererNetworkSource::Worker(self.source.clone()),
-            item,
-            None,
-        )
     }
 
     pub(crate) fn close_source(&self) {

@@ -201,13 +201,6 @@ impl WorkerGlobalKind {
             Self::UnobservedDedicated { network, .. } => network,
         }
     }
-
-    pub(in crate::worker) fn network_message(
-        &self,
-        record: moli_page_types::SubresourceNetworkRecord,
-    ) -> WorkerToParentMessage {
-        WorkerToParentMessage::Network(self.network().report(record))
-    }
 }
 
 pub(crate) struct WorkerSpawnOptions {

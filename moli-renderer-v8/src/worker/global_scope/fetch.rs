@@ -178,51 +178,30 @@ pub(in crate::worker) fn record_worker_subresource_failure(
     url: Url,
     method: String,
     request_headers: Vec<(String, String)>,
-    request_body: Option<String>,
-    resource_type: SubresourceResourceType,
-    error_text: String,
-) {
-    record_worker_subresource_failure_with_handle(
-        state,
-        None,
-        document_url,
-        url,
-        method,
-        request_headers,
-        request_body.map(String::into_bytes),
-        resource_type,
-        error_text,
-    );
-}
-
-pub(in crate::worker) fn record_worker_subresource_failure_with_handle(
-    state: &WorkerGlobalState,
-    request_handle: Option<SubresourceNetworkRequestHandle>,
-    document_url: Url,
-    url: Url,
-    method: String,
-    request_headers: Vec<(String, String)>,
     request_body: Option<Vec<u8>>,
     resource_type: SubresourceResourceType,
     error_text: String,
 ) {
-    let mut record = SubresourceNetworkRecord::failure(
-        None,
-        document_url,
-        url,
-        method,
-        request_headers,
-        request_body_text(&request_body),
-        resource_type,
+    let Some(transfer) = crate::worker::WorkerResourceTransfer::start(
+        state.global_kind.network(),
+        state.parent_tx.network_observer(),
+        |network| {
+            worker_request_started(
+                network,
+                &document_url,
+                &url,
+                &method,
+                &request_headers,
+                &request_body,
+                resource_type,
+            )
+        },
+    ) else {
+        return;
+    };
+    transfer.failed(&crate::network::ResourceResponseFailure::Request(
         error_text,
-    )
-    .with_request_body_bytes(request_body);
-    if let Some(handle) = request_handle {
-        record = record.with_request_handle(handle);
-    }
-    let _ = state
-        .parent_tx
-        .send(state.global_kind.network_message(record));
+    ));
 }
 
 fn worker_network_result_parts<R>(
@@ -2133,7 +2112,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
             resolved_url,
             method,
             headers,
-            request_body_text(&body),
+            body,
             SubresourceResourceType::Fetch,
             message.clone(),
         );
@@ -2149,7 +2128,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
             resolved_url,
             method,
             headers,
-            request_body_text(&body),
+            body,
             SubresourceResourceType::Fetch,
             message.clone(),
         );
@@ -2165,7 +2144,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
             resolved_url,
             method,
             headers,
-            request_body_text(&body),
+            body,
             SubresourceResourceType::Fetch,
             message.clone(),
         );
@@ -2181,7 +2160,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
             resolved_url,
             method,
             headers,
-            request_body_text(&body),
+            body,
             SubresourceResourceType::Fetch,
             message.clone(),
         );
@@ -2285,7 +2264,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
             resolved_url,
             method,
             headers,
-            request_body_text(&body),
+            body,
             SubresourceResourceType::Fetch,
             message.clone(),
         );
