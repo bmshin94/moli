@@ -127,7 +127,7 @@ pub(super) fn execute_devtools_get_service_worker_logs_command(
         };
         let cursor_id =
             devtools_service_worker_classic_log_cursor_id(&command_session_id, &target_id);
-        let messages = target.pending_classic_log_messages(&cursor_id).to_vec();
+        let messages = target.pending_classic_log_messages(&cursor_id);
         let console_end = target.console_message_count();
         target.mark_classic_log_emitted(cursor_id, console_end);
         for message in messages {

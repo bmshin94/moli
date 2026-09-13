@@ -10049,7 +10049,7 @@ fn append_shared_worker_runtime_console_messages(
         return;
     };
     let has_runtime_context = target.real_runtime_execution_context_id().is_some();
-    let runtime_messages = target.pending_runtime_console_messages(session_id).to_vec();
+    let runtime_messages = target.pending_runtime_console_messages(session_id);
     let console_end = target.console_message_count();
     if has_runtime_context {
         target.mark_runtime_console_emitted(session_id, console_end);
@@ -10074,7 +10074,7 @@ fn append_service_worker_runtime_console_messages(
         return;
     };
     let has_runtime_context = target.real_runtime_execution_context_id().is_some();
-    let runtime_messages = target.pending_runtime_console_messages(session_id).to_vec();
+    let runtime_messages = target.pending_runtime_console_messages(session_id);
     let console_end = target.console_message_count();
     if has_runtime_context {
         target.mark_runtime_console_emitted(session_id, console_end);
@@ -10099,9 +10099,7 @@ fn append_service_worker_runtime_exception_messages(
         return;
     };
     let has_runtime_context = target.real_runtime_execution_context_id().is_some();
-    let exception_messages = target
-        .pending_runtime_exception_messages(session_id)
-        .to_vec();
+    let exception_messages = target.pending_runtime_exception_messages(session_id);
     let exception_start = target
         .exception_message_count()
         .saturating_sub(exception_messages.len());
@@ -10134,7 +10132,7 @@ fn shared_worker_runtime_enable_command_output_plan_for_session(
         .cloned()
         .map(RuntimeContextProtocolEvent::Created);
     let has_runtime_context = target.real_runtime_execution_context_id().is_some();
-    let runtime_messages = target.pending_runtime_console_messages(session_id).to_vec();
+    let runtime_messages = target.pending_runtime_console_messages(session_id);
     let console_end = target.console_message_count();
     if has_runtime_context {
         target.mark_runtime_console_emitted(session_id, console_end);
@@ -10173,14 +10171,12 @@ fn service_worker_runtime_enable_command_output_plan_for_session(
         .cloned()
         .map(RuntimeContextProtocolEvent::Created);
     let has_runtime_context = target.real_runtime_execution_context_id().is_some();
-    let runtime_messages = target.pending_runtime_console_messages(session_id).to_vec();
+    let runtime_messages = target.pending_runtime_console_messages(session_id);
     let console_end = target.console_message_count();
     if has_runtime_context {
         target.mark_runtime_console_emitted(session_id, console_end);
     }
-    let exception_messages = target
-        .pending_runtime_exception_messages(session_id)
-        .to_vec();
+    let exception_messages = target.pending_runtime_exception_messages(session_id);
     let exception_start = target
         .exception_message_count()
         .saturating_sub(exception_messages.len());

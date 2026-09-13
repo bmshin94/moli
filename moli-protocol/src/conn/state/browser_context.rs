@@ -507,6 +507,23 @@ impl BrowserContext {
     }
 
     pub(crate) fn moli_memory_diagnostics(&self) -> Value {
+        let (worker_history_entries, worker_history_bytes) = self
+            .shared_worker_targets
+            .values()
+            .map(|target| target.retained_output_stats())
+            .chain(
+                self.dedicated_worker_targets
+                    .values()
+                    .map(|target| target.retained_output_stats()),
+            )
+            .chain(
+                self.service_worker_targets
+                    .values()
+                    .map(|target| target.retained_output_stats()),
+            )
+            .fold((0, 0), |(count, bytes), (next_count, next_bytes)| {
+                (count + next_count, bytes + next_bytes)
+            });
         let target_infos = self.devtools_target_infos();
         let loaded_document_page_count = self.loaded_document_page_count();
         let pending_document_page_build_count = self.pending_document_page_build_count();
@@ -623,6 +640,8 @@ impl BrowserContext {
                 .map_or(0, |target| target.dom_remote_object_node_cache.len()),
             "sharedWorkerTargetCount": self.shared_worker_targets.len(),
             "serviceWorkerTargetCount": self.service_worker_targets.len(),
+            "retainedWorkerOutputMessageCount": worker_history_entries,
+            "retainedWorkerOutputEstimatedBytes": worker_history_bytes,
             "pendingInspectorAwaitCount": page_target_pending_inspector_await_count
                 + shared_worker_target_pending_inspector_await_count
                 + service_worker_target_pending_inspector_await_count,

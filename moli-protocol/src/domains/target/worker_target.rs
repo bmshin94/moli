@@ -1822,10 +1822,8 @@ fn record_dedicated_worker_target_console_message(
         else {
             continue;
         };
-        let console_messages = target.pending_console_domain_messages(&session_id).to_vec();
-        let runtime_messages = target
-            .pending_runtime_console_messages(&session_id)
-            .to_vec();
+        let console_messages = target.pending_console_domain_messages(&session_id);
+        let runtime_messages = target.pending_runtime_console_messages(&session_id);
         if console_messages.is_empty() && runtime_messages.is_empty() {
             continue;
         }
@@ -2933,7 +2931,7 @@ fn record_shared_worker_target_console_message(
         let attachment = target
             .protocol_attachment_identity(browser_context_id, &session_id)
             .expect("shared-worker output session must retain its exact attachment identity");
-        let console_messages = target.pending_console_domain_messages(&session_id).to_vec();
+        let console_messages = target.pending_console_domain_messages(&session_id);
         if !console_messages.is_empty() {
             outputs.push(WorkerTargetLifecycleOutput::SharedWorkerConsoleMessages {
                 attachment: attachment.clone(),
@@ -2941,9 +2939,7 @@ fn record_shared_worker_target_console_message(
                 console_end: target.console_message_count(),
             });
         }
-        let runtime_messages = target
-            .pending_runtime_console_messages(&session_id)
-            .to_vec();
+        let runtime_messages = target.pending_runtime_console_messages(&session_id);
         if !runtime_messages.is_empty() {
             outputs.push(
                 WorkerTargetLifecycleOutput::SharedWorkerRuntimeConsoleMessages {
@@ -3032,7 +3028,7 @@ fn record_service_worker_target_console_message(
             continue;
         };
         let runtime = TargetServiceWorkerRuntimeAttachmentIdentity::new(attachment, run.clone());
-        let console_messages = target.pending_console_domain_messages(&session_id).to_vec();
+        let console_messages = target.pending_console_domain_messages(&session_id);
         if !console_messages.is_empty() {
             let console_end = target.console_message_count();
             target.mark_console_domain_emitted(&session_id, console_end);
@@ -3042,9 +3038,7 @@ fn record_service_worker_target_console_message(
                 console_end,
             });
         }
-        let runtime_messages = target
-            .pending_runtime_console_messages(&session_id)
-            .to_vec();
+        let runtime_messages = target.pending_runtime_console_messages(&session_id);
         if !runtime_messages.is_empty() {
             let console_end = target.console_message_count();
             target.mark_runtime_console_emitted(&session_id, console_end);
@@ -3094,12 +3088,10 @@ fn record_service_worker_target_exception_message(
         else {
             continue;
         };
+        let exception_messages = target.pending_runtime_exception_messages(&session_id);
         let exception_start = target
             .exception_message_count()
-            .saturating_sub(target.pending_runtime_exception_messages(&session_id).len());
-        let exception_messages = target
-            .pending_runtime_exception_messages(&session_id)
-            .to_vec();
+            .saturating_sub(exception_messages.len());
         if !exception_messages.is_empty() {
             let exception_end = target.exception_message_count();
             target.mark_runtime_exception_emitted(&session_id, exception_end);
@@ -3148,7 +3140,7 @@ fn record_service_worker_target_fetch_diagnostic(
         else {
             continue;
         };
-        let diagnostics = target.pending_fetch_diagnostics(&session_id).to_vec();
+        let diagnostics = target.pending_fetch_diagnostics(&session_id);
         if !diagnostics.is_empty() {
             let diagnostic_end = target.fetch_diagnostic_count();
             let diagnostic_start = diagnostic_end.saturating_sub(diagnostics.len());
@@ -3226,20 +3218,16 @@ fn record_service_worker_target_runtime_inspector_messages(
         let mut pending_runtime_console = None;
         let mut pending_runtime_exceptions = None;
         if let Some(target) = exact_service_worker_runtime_target_mut(conn, &runtime) {
-            let pending_console = target
-                .pending_runtime_console_messages(&session_id)
-                .to_vec();
+            let pending_console = target.pending_runtime_console_messages(&session_id);
             if !pending_console.is_empty() {
                 let console_end = target.console_message_count();
                 target.mark_runtime_console_emitted(&session_id, console_end);
                 pending_runtime_console = Some((pending_console, console_end));
             }
+            let pending_exceptions = target.pending_runtime_exception_messages(&session_id);
             let exception_start = target
                 .exception_message_count()
-                .saturating_sub(target.pending_runtime_exception_messages(&session_id).len());
-            let pending_exceptions = target
-                .pending_runtime_exception_messages(&session_id)
-                .to_vec();
+                .saturating_sub(pending_exceptions.len());
             if !pending_exceptions.is_empty() {
                 let exception_end = target.exception_message_count();
                 target.mark_runtime_exception_emitted(&session_id, exception_end);
@@ -3729,17 +3717,19 @@ async fn emit_target_lifecycle_events(
                 replay_shared_worker_runtime_bindings_for_session_async(conn, Some(session_id))
                     .await;
                 side_effects.extend_background_events(response_events);
-                if let Some(target) = exact_dedicated_worker_target_mut(conn, &attachment)
-                    && !target
-                        .pending_runtime_console_messages(session_id)
-                        .is_empty()
-                {
-                    side_effects.extend_background_events(runtime_console_api_called_events(
-                        session_id,
-                        attachment.target_id(),
-                        target.pending_runtime_console_messages(session_id),
-                    ));
-                    target.mark_runtime_console_emitted(session_id, target.console_message_count());
+                if let Some(target) = exact_dedicated_worker_target_mut(conn, &attachment) {
+                    let messages = target.pending_runtime_console_messages(session_id);
+                    if !messages.is_empty() {
+                        side_effects.extend_background_events(runtime_console_api_called_events(
+                            session_id,
+                            attachment.target_id(),
+                            &messages,
+                        ));
+                        target.mark_runtime_console_emitted(
+                            session_id,
+                            target.console_message_count(),
+                        );
+                    }
                 }
             }
         }
@@ -4089,9 +4079,7 @@ fn exact_shared_worker_pending_runtime_console(
     attachment: &TargetSharedWorkerProtocolAttachmentIdentity,
 ) -> Option<(Vec<RuntimeConsoleMessageSnapshot>, usize)> {
     let target = exact_shared_worker_target(conn, attachment)?;
-    let messages = target
-        .pending_runtime_console_messages(attachment.session_id())
-        .to_vec();
+    let messages = target.pending_runtime_console_messages(attachment.session_id());
     (!messages.is_empty()).then(|| (messages, target.console_message_count()))
 }
 
@@ -7520,6 +7508,107 @@ mod tests {
                 .into_iter()
                 .all(|info| info["type"] != json!("shared_worker")),
             "late shared worker output must not recreate target state after destroy"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_worker_history_eviction_keeps_oversized_prepared_output_and_the_live_tail() {
+        let mut conn = crate::test_support::connection();
+        conn.browser_context = Some(conn.new_browser_context_fixture_for_test("BID-1"));
+        let instance = SharedWorkerInstanceId::from_u64(17);
+        let mut target = SharedWorkerTargetState::new(
+            instance,
+            "TID-shared-worker".into(),
+            None,
+            "https://example.test/shared-worker.js".into(),
+            "worker".into(),
+        );
+        target.attach_session("SID-worker".into());
+        target.set_console_enabled("SID-worker", true);
+        target.set_runtime_frontend_enabled("SID-worker", true);
+        target.record_runtime_execution_context_created_event(&worker_context_created_event(
+            90017, "worker",
+        ));
+        conn.browser_context
+            .as_mut()
+            .unwrap()
+            .insert_shared_worker_target(target);
+        let payload_len = 12 * 1024 * 1024;
+        let oversized = record_shared_worker_target_console_message(
+            &mut conn,
+            "BID-1",
+            instance,
+            RendererSharedWorkerConsoleMessage {
+                message: "log: oversized".into(),
+                args: vec![json!({"type": "string", "value": "x".repeat(payload_len)})],
+                stack: None,
+            },
+        );
+        let tail = record_shared_worker_target_console_message(
+            &mut conn,
+            "BID-1",
+            instance,
+            RendererSharedWorkerConsoleMessage {
+                message: "log: tail".into(),
+                args: Vec::new(),
+                stack: None,
+            },
+        );
+        let target = conn
+            .browser_context
+            .as_ref()
+            .unwrap()
+            .shared_worker_target("TID-shared-worker")
+            .unwrap();
+        assert_eq!(
+            target.retained_output_stats().0,
+            1,
+            "the history released the oversized record"
+        );
+        assert_eq!(target.console_message_count(), 2);
+        let events = drain_target_lifecycle_events_for_test(&mut conn, oversized).await;
+        let messages = events
+            .into_iter()
+            .map(BackgroundProtocolEvent::into_protocol_message)
+            .collect::<Vec<_>>();
+        let runtime = messages
+            .iter()
+            .find(|message| message["method"] == "Runtime.consoleAPICalled")
+            .unwrap();
+        assert_eq!(
+            runtime["params"]["args"][0]["value"]
+                .as_str()
+                .unwrap()
+                .len(),
+            payload_len
+        );
+        assert_eq!(runtime["params"]["executionContextId"], 90017);
+        assert_eq!(
+            messages.len(),
+            2,
+            "Console and Runtime each deliver the frozen message once"
+        );
+        let events = drain_target_lifecycle_events_for_test(&mut conn, tail).await;
+        assert_eq!(
+            events.len(),
+            2,
+            "eviction must not swallow the later live message"
+        );
+        let target = conn
+            .browser_context
+            .as_ref()
+            .unwrap()
+            .shared_worker_target("TID-shared-worker")
+            .unwrap();
+        assert!(
+            target
+                .pending_runtime_console_messages("SID-worker")
+                .is_empty()
+        );
+        assert!(
+            target
+                .pending_console_domain_messages("SID-worker")
+                .is_empty()
         );
     }
 
