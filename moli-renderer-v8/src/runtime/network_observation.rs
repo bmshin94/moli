@@ -445,6 +445,20 @@ impl RendererNetworkRequest {
         source: RendererNetworkSource,
         requests: Arc<Mutex<NetworkSourceState>>,
     ) -> Option<Self> {
+        Self::start_with_handle(
+            reporter,
+            source,
+            requests,
+            moli_page_types::SubresourceNetworkRequestHandle::allocate(),
+        )
+    }
+
+    fn start_with_handle(
+        reporter: RendererNetworkReporter,
+        source: RendererNetworkSource,
+        requests: Arc<Mutex<NetworkSourceState>>,
+        handle: moli_page_types::SubresourceNetworkRequestHandle,
+    ) -> Option<Self> {
         {
             let mut state = requests.lock();
             let NetworkSourceState::Active(count) = &mut *state else {
@@ -454,7 +468,6 @@ impl RendererNetworkRequest {
                 .checked_add(1)
                 .expect("network request count exhausted");
         }
-        let handle = moli_page_types::SubresourceNetworkRequestHandle::allocate();
         Some(Self {
             lease: Arc::new(NetworkRequestInner {
                 reporter,
@@ -635,6 +648,18 @@ impl RendererDocumentNetworkReporter {
             self.reporter.clone(),
             self.source.clone(),
             self.requests.clone(),
+        )
+    }
+
+    pub(crate) fn start_request_with_handle(
+        &self,
+        handle: moli_page_types::SubresourceNetworkRequestHandle,
+    ) -> Option<RendererNetworkRequest> {
+        RendererNetworkRequest::start_with_handle(
+            self.reporter.clone(),
+            self.source.clone(),
+            self.requests.clone(),
+            handle,
         )
     }
 }

@@ -237,6 +237,7 @@ pub(crate) fn start_stylesheet_subresource_fetch(
             resource_task_runner: resource_loader.task_runner(),
             cancel_handle,
             direct_completion_tx: None,
+            network_transfer: None,
         };
         if !host.dispatch_service_worker_fetch(dispatch) {
             let _ = host.resource_completion_sender().send_async_subresource(

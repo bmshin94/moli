@@ -22,12 +22,12 @@ use crate::types::{
     AsyncSubresourceFetchResponseFilter, ChildBlockingStylesheetLoadCompletion,
     ChildClassicScriptLoadCompletion, ChildDocumentLoadCompletion,
     ChildModuleDependencyFetchCompletion, ChildModulepreloadFetchCompletion,
-    ChildParserModuleRootFetchCompletion, NetworkBodySourceId, PendingSubresourceAuthInfo,
-    PendingSubresourceAuthState, PendingSubresourceContinuation, PendingSubresourceContinueEvent,
-    PendingSubresourceContinueOutcome, PendingSubresourceFetchInfo, PendingSubresourceFetchState,
-    PendingSubresourceResponseInfo, PendingSubresourceResponseState,
-    PopupClassicScriptLoadCompletion, PopupDocumentLoadCompletion, RunningSubresourceFetchState,
-    StreamingSubresourceFetchState, SubresourceNetworkRequestHandle,
+    ChildParserModuleRootFetchCompletion, CspReportNetworkPublication, NetworkBodySourceId,
+    PendingSubresourceAuthInfo, PendingSubresourceAuthState, PendingSubresourceContinuation,
+    PendingSubresourceContinueEvent, PendingSubresourceContinueOutcome,
+    PendingSubresourceFetchInfo, PendingSubresourceFetchState, PendingSubresourceResponseInfo,
+    PendingSubresourceResponseState, PopupClassicScriptLoadCompletion, PopupDocumentLoadCompletion,
+    RunningSubresourceFetchState, StreamingSubresourceFetchState, SubresourceNetworkRequestHandle,
     SubresourceRequestInitiatorType, SubresourceResourceType, SubresourceResponseBody,
     SubresourceResponseBodyWriter,
 };
@@ -542,7 +542,10 @@ impl ScriptVm {
                     PendingSubresourceContinueOutcome::Started,
                 ));
             }
-            PendingSubresourceContinuation::CspReport { client_id } => {
+            PendingSubresourceContinuation::CspReport {
+                client_id,
+                publication,
+            } => {
                 let request_url = url.unwrap_or_else(|| info.url.clone());
                 let request_method = method.unwrap_or_else(|| info.method.clone());
                 let request_body_bytes = match &body {
@@ -560,7 +563,10 @@ impl ScriptVm {
                     request_mode,
                     network_partition_key,
                     policy_context,
-                    continuation: PendingSubresourceContinuation::CspReport { client_id },
+                    continuation: PendingSubresourceContinuation::CspReport {
+                        client_id,
+                        publication,
+                    },
                     deferred_request_started,
                 };
                 if !self._context_host.borrow().network_offline() {
@@ -731,7 +737,7 @@ impl ScriptVm {
 
     fn continue_csp_report_via_service_worker(
         &mut self,
-        pending: PendingSubresourceFetchState,
+        mut pending: PendingSubresourceFetchState,
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
         request_url: Url,
         request_method: String,
@@ -767,6 +773,50 @@ impl ScriptVm {
         .with_subframe_context(pending.info.frame_id.is_some());
         request.priority_hints.fetch_priority = None;
 
+        let completion_tx = self._context_host.borrow().resource_completion_sender();
+        let network = completion_tx
+            .network_reporter()
+            .and_then(|network_reporter| {
+                let request_handle = pending.info.network_request_handle?;
+                let request_network = network_reporter.start_request_with_handle(request_handle)?;
+                let start_info = pending.info.clone();
+                Some(crate::network::ResourceTransfer::from_request(
+                    request_network,
+                    {
+                        let completion_tx = completion_tx.clone();
+                        move |observation| {
+                            let _ = completion_tx.send_async_subresource_event(
+                                crate::types::AsyncSubresourceFetchEvent::NativeNetwork(
+                                    observation,
+                                ),
+                            );
+                        }
+                    },
+                    move |network| {
+                        moli_page_types::SubresourceRequestStarted::new(
+                            network.handle(),
+                            start_info.frame_id,
+                            start_info.document_url,
+                            start_info.url,
+                            start_info.method,
+                            start_info.request_headers,
+                            start_info.request_body,
+                            start_info.resource_type,
+                            moli_page_types::SubresourceRequestInitiatorType::Script,
+                            start_info.request_cookie_report,
+                        )
+                        .with_request_body_bytes(start_info.request_body_bytes)
+                        .with_keepalive(true)
+                    },
+                ))
+            });
+        if network.is_some()
+            && let PendingSubresourceContinuation::CspReport { publication, .. } =
+                &mut pending.continuation
+        {
+            *publication = CspReportNetworkPublication::NativeTransfer;
+        }
+
         let cancel_handle = moli_fetch::FetchCancelHandle::new();
         pending.load.attach_cancel_handle(cancel_handle.clone());
         let internal_id = pending.info.internal_id;
@@ -774,7 +824,6 @@ impl ScriptVm {
         let request_cookie_report = pending.info.request_cookie_report.clone();
         let document_url = pending.info.document_url.clone();
         let frame_id = pending.info.frame_id.clone();
-        let completion_tx = self._context_host.borrow().resource_completion_sender();
         let request_client = pending.load.request_client();
         let resource_task_runner = pending.load.task_runner();
         let dispatch = crate::service_worker_runtime::ServiceWorkerFetchDispatch {
@@ -806,6 +855,7 @@ impl ScriptVm {
             resource_task_runner,
             cancel_handle,
             direct_completion_tx: None,
+            network_transfer: network.clone(),
         };
 
         self._context_host
@@ -817,6 +867,12 @@ impl ScriptVm {
             .dispatch_service_worker_fetch(dispatch)
         {
             return Ok(None);
+        }
+
+        if let Some(network) = network {
+            network.failed(&crate::network::ResourceResponseFailure::Request(
+                "service worker csp report fetch dispatch failed".to_owned(),
+            ));
         }
 
         let _ = self
@@ -1829,6 +1885,7 @@ impl ScriptVm {
             trace_fields,
             trace_started,
         );
+        let uses_native_transfer = pending.continuation.uses_native_transfer();
         if pending.continuation.is_detached_window_fetch()
             || pending.execution_context.is_window_network_only()
         {
@@ -2012,9 +2069,11 @@ impl ScriptVm {
                     if let Some(handle) = pending.info.network_request_handle {
                         network_record = network_record.with_request_handle(handle);
                     }
-                    context_host
-                        .borrow_mut()
-                        .record_subresource_network(network_record);
+                    if !uses_native_transfer {
+                        context_host
+                            .borrow_mut()
+                            .record_subresource_network(network_record);
+                    }
                     trace_async_subresource_stage(
                         "async_subresource_network_recorded",
                         trace_fields,
@@ -2191,9 +2250,11 @@ impl ScriptVm {
                     if let Some(handle) = pending.info.network_request_handle {
                         network_record = network_record.with_request_handle(handle);
                     }
-                    context_host
-                        .borrow_mut()
-                        .record_subresource_network(network_record);
+                    if !uses_native_transfer {
+                        context_host
+                            .borrow_mut()
+                            .record_subresource_network(network_record);
+                    }
                     trace_async_subresource_stage(
                         "async_subresource_network_recorded",
                         trace_fields,

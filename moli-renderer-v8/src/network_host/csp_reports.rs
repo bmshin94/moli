@@ -8,6 +8,7 @@ use crate::service_worker_runtime::{
     ServiceWorkerFetchDispatch, ServiceWorkerRequestDestination,
     service_worker_fetch_request_metadata,
 };
+use crate::types::CspReportNetworkPublication;
 use moli_fetch::{
     FetchCancelHandle, Request, RequestCredentialsMode, should_request_be_blocked_due_to_bad_port,
 };
@@ -273,7 +274,7 @@ fn send_content_security_policy_report_request(
 fn dispatch_service_worker_content_security_policy_report(
     host: &mut JsContextHost,
     request_context: &WindowCspReportRequestContext,
-    info: PendingSubresourceFetchInfo,
+    mut info: PendingSubresourceFetchInfo,
     request: Request,
 ) -> bool {
     if host
@@ -287,6 +288,39 @@ fn dispatch_service_worker_content_security_policy_report(
         return false;
     }
 
+    let Some(request_network) = request_context.network.start_request() else {
+        return false;
+    };
+    let completion_tx = request_context.completion_tx.clone();
+    let start_info = info.clone();
+    let network = crate::network::ResourceTransfer::from_request(
+        request_network,
+        {
+            let completion_tx = completion_tx.clone();
+            move |observation| {
+                let _ = completion_tx.send_async_subresource_event(
+                    crate::types::AsyncSubresourceFetchEvent::NativeNetwork(observation),
+                );
+            }
+        },
+        move |network| {
+            moli_page_types::SubresourceRequestStarted::new(
+                network.handle(),
+                start_info.frame_id,
+                start_info.document_url,
+                start_info.url,
+                start_info.method,
+                start_info.request_headers,
+                start_info.request_body,
+                start_info.resource_type,
+                moli_page_types::SubresourceRequestInitiatorType::Script,
+                start_info.request_cookie_report,
+            )
+            .with_request_body_bytes(start_info.request_body_bytes)
+            .with_keepalive(true)
+        },
+    );
+    info.network_request_handle = Some(network.handle());
     let cancel_handle = FetchCancelHandle::new();
     let load = request_context.register_report_load(Some(cancel_handle.clone()));
     let internal_id = host.record_async_subresource_csp_report(
@@ -295,6 +329,7 @@ fn dispatch_service_worker_content_security_policy_report(
         load,
         request_context.network_partition_key.clone(),
         request_context.policy_context,
+        CspReportNetworkPublication::NativeTransfer,
         info.clone(),
     );
     let request_body_text = report_request_body_text(&request);
@@ -327,10 +362,15 @@ fn dispatch_service_worker_content_security_policy_report(
         resource_task_runner: request_context.resource_loader.task_runner(),
         cancel_handle,
         direct_completion_tx: None,
+        network_transfer: Some(network.clone()),
     };
     if host.dispatch_service_worker_fetch(dispatch) {
         return true;
     }
+
+    network.failed(&crate::network::ResourceResponseFailure::Request(
+        "service worker csp report fetch dispatch failed".to_owned(),
+    ));
 
     let _ =
         host.resource_completion_sender()

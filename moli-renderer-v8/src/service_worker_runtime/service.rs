@@ -952,6 +952,7 @@ mod tests {
             navigation_preload_cancel_handle: None,
             streaming_body_source_id: None,
             direct_completion_tx: None,
+            network_transfer: None,
         }
     }
 
@@ -4349,6 +4350,7 @@ mod tests {
                         navigation_preload_cancel_handle: None,
                         streaming_body_source_id: None,
                         direct_completion_tx: None,
+                        network_transfer: None,
                     },
                 );
             }
@@ -4816,6 +4818,7 @@ self.addEventListener("message", event => {
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
                     direct_completion_tx: None,
+                    network_transfer: None,
                 },
             );
             state.versions.insert(
@@ -7501,6 +7504,7 @@ self.addEventListener("message", event => {
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
                 direct_completion_tx: Some(direct_completion_tx),
+                network_transfer: None,
             })
         );
 
@@ -8755,6 +8759,7 @@ self.addEventListener("message", event => {
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
                     direct_completion_tx: None,
+                    network_transfer: None,
                 },
             );
             state.versions.insert(
@@ -9543,6 +9548,7 @@ self.addEventListener("message", event => {
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
                 direct_completion_tx: Some(direct_completion_tx),
+                network_transfer: None,
             })
         );
 
@@ -9636,6 +9642,7 @@ self.addEventListener("message", event => {
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
                 direct_completion_tx: Some(direct_completion_tx),
+                network_transfer: None,
             })
         );
 
@@ -9808,6 +9815,7 @@ self.addEventListener("message", event => {
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
                 direct_completion_tx: Some(direct_completion_tx),
+                network_transfer: None,
             }),
             "controlled worker client fetch should dispatch to the active worker"
         );
@@ -9917,6 +9925,7 @@ self.addEventListener("message", event => {
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
                 direct_completion_tx: Some(direct_completion_tx),
+                network_transfer: None,
             })
         );
 
@@ -10020,6 +10029,7 @@ self.addEventListener("message", event => {
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
                     direct_completion_tx: Some(direct_completion_tx),
+                    network_transfer: None,
                 },
             );
             let version = state.versions.get_mut(&version_id).unwrap();
@@ -10151,6 +10161,7 @@ self.addEventListener("message", event => {
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
                     direct_completion_tx: None,
+                    network_transfer: None,
                 },
             );
             state.versions.insert(
@@ -10688,6 +10699,7 @@ self.addEventListener("message", event => {
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
                     direct_completion_tx: None,
+                    network_transfer: None,
                 },
             );
             state.versions.insert(
@@ -12305,6 +12317,7 @@ self.addEventListener("message", event => {
                         navigation_preload_cancel_handle: None,
                         streaming_body_source_id: None,
                         direct_completion_tx: None,
+                        network_transfer: None,
                     },
                 );
             }

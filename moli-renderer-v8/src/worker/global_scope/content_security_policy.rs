@@ -291,6 +291,7 @@ impl WorkerCspReport {
             resource_task_runner: self.load.task_runner(),
             cancel_handle,
             direct_completion_tx: Some(direct_completion_tx),
+            network_transfer: None,
         };
         if !runtime.dispatch_controlled_fetch(dispatch) {
             self.fail("service worker csp report fetch dispatch failed".into());

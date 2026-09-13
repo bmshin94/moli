@@ -565,6 +565,7 @@ fn spawn_worker_fetch_service_worker(
         resource_task_runner: load.task_runner(),
         cancel_handle: cancel_handle.clone(),
         direct_completion_tx: Some(direct_completion_tx),
+        network_transfer: None,
     };
 
     if !runtime.dispatch_controlled_fetch(dispatch) {

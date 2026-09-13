@@ -262,6 +262,7 @@ impl ServiceWorkerRuntimeService {
             resource_task_runner,
             cancel_handle,
             direct_completion_tx: Some(direct_completion_tx),
+            network_transfer: None,
         };
 
         if !self.dispatch_controlled_fetch(dispatch) {
@@ -301,6 +302,10 @@ impl ServiceWorkerRuntimeService {
                 return;
             }
         };
+        if let Some(network_transfer) = job.network_transfer.take() {
+            self.dispatch_network_fallback_with_transfer(job, request, network_transfer);
+            return;
+        }
         crate::network_host::spawn_async_subresource_fetch_with_redirect_chain(
             job.resource_task_runner.clone(),
             job.completion_tx,
@@ -316,6 +321,48 @@ impl ServiceWorkerRuntimeService {
             job.request_headers,
             job.request_body,
         );
+    }
+
+    fn dispatch_network_fallback_with_transfer(
+        &self,
+        job: ServiceWorkerFetchJob,
+        request: moli_fetch::Request,
+        network_transfer: std::sync::Arc<crate::network::ResourceTransfer>,
+    ) {
+        let completion_tx = job.completion_tx.clone();
+        let internal_id = job.internal_id;
+        let request_url = job.request_url.clone();
+        let request_method = job.request_method.clone();
+        let request_headers = job.request_headers.clone();
+        let request_body = job.request_body.clone();
+        job.resource_task_runner.spawn(async move {
+            let result = job
+                .request_client
+                .fetch_observed_script_text_with_cancel(
+                    request,
+                    job.cancel_handle,
+                    network_transfer.as_ref(),
+                )
+                .await;
+            network_transfer.complete(&result);
+            let result = result
+                .map(crate::protocol_types::NavigationResponse::from)
+                .map_err(|error| error.to_string());
+            let _ = completion_tx.send_async_subresource(
+                crate::types::AsyncSubresourceFetchCompletion {
+                    internal_id,
+                    request_url,
+                    request_method,
+                    request_headers,
+                    request_body,
+                    response_status_text: None,
+                    skip_fetch_security_validation: true,
+                    response_filter: None,
+                    network_error_text: None,
+                    result,
+                },
+            );
+        });
     }
 
     fn dispatch_direct_fetch_network_fallback(
@@ -639,6 +686,19 @@ impl ServiceWorkerRuntimeService {
             String::from_utf8_lossy(&response.body).into_owned(),
             response.body,
         );
+        if let Some(network_transfer) = job.network_transfer.take() {
+            network_transfer.body_completed(
+                crate::network::ResourceResponseHead {
+                    head: navigation_response.head(),
+                    network_request_headers: navigation_response
+                        .network_request_headers()
+                        .map(|headers| headers.to_vec()),
+                },
+                crate::types::SubresourceResponseBody::from_navigation_response(
+                    &navigation_response,
+                ),
+            );
+        }
         if let Some(completion_tx) = job.direct_completion_tx.take() {
             let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Response(
                 ServiceWorkerDirectFetchResponse {
@@ -696,6 +756,11 @@ impl ServiceWorkerRuntimeService {
         job.cancel_pending_navigation_preload();
         if network_error_text.is_none() {
             network_error_text = service_worker_fetch_failure_network_error_text(&message);
+        }
+        if let Some(network_transfer) = job.network_transfer.take() {
+            network_transfer.failed(&crate::network::ResourceResponseFailure::Request(
+                message.clone(),
+            ));
         }
         if let Some(completion_tx) = job.direct_completion_tx.take() {
             let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Failure(message));
@@ -1184,6 +1249,7 @@ mod tests {
                 navigation_preload_cancel_handle: None,
                 streaming_body_source_id: None,
                 direct_completion_tx: None,
+                network_transfer: None,
             },
         );
         request_url
@@ -1926,6 +1992,7 @@ mod tests {
             navigation_preload_cancel_handle: None,
             streaming_body_source_id: None,
             direct_completion_tx: None,
+            network_transfer: None,
         };
         let response = ServiceWorkerFetchResponse {
             final_url: Some(request_url.clone()),

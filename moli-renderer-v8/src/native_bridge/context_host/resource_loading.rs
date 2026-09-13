@@ -8,14 +8,15 @@ use crate::{
     page_task_queue::RendererResourceCompletionSender,
     renderer_resource_scheduler::RendererResourceScheduler,
     types::{
-        NetworkBodySourceId, PendingSubresourceAuthState, PendingSubresourceContinuation,
-        PendingSubresourceContinueEvent, PendingSubresourceExecutionContext,
-        PendingSubresourceFetchInfo, PendingSubresourceFetchState, PendingSubresourceResponseState,
-        PendingWebSocketConnection, PendingWebSocketResponseState, RunningSubresourceFetchState,
-        ScriptNetworkOutput, ScriptNetworkOutputItem, StreamingSubresourceFetchState,
-        SubresourceBodyFinished, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
-        SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResourceType,
-        SubresourceResponseBody, SubresourceResponseStarted,
+        CspReportNetworkPublication, NetworkBodySourceId, PendingSubresourceAuthState,
+        PendingSubresourceContinuation, PendingSubresourceContinueEvent,
+        PendingSubresourceExecutionContext, PendingSubresourceFetchInfo,
+        PendingSubresourceFetchState, PendingSubresourceResponseState, PendingWebSocketConnection,
+        PendingWebSocketResponseState, RunningSubresourceFetchState, ScriptNetworkOutput,
+        ScriptNetworkOutputItem, StreamingSubresourceFetchState, SubresourceBodyFinished,
+        SubresourceNetworkRecord, SubresourceNetworkRequestHandle, SubresourceRequestInitiatorType,
+        SubresourceRequestStarted, SubresourceResourceType, SubresourceResponseBody,
+        SubresourceResponseStarted,
     },
 };
 
@@ -1081,6 +1082,7 @@ impl JsContextHost {
         load: ResourceLoadLease,
         network_partition_key: Option<String>,
         policy_context: crate::types::SubresourcePolicyContext,
+        publication: CspReportNetworkPublication,
         mut info: PendingSubresourceFetchInfo,
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
@@ -1090,7 +1092,9 @@ impl JsContextHost {
             crate::network::loads::ResourceLoadKind::CspReport
         );
         debug_assert_eq!(load.disposition(), ResourceLoadDisposition::Keepalive);
-        self.record_pending_subresource_request_started(&info, load.disposition());
+        if !publication.uses_native_transfer() {
+            self.record_pending_subresource_request_started(&info, load.disposition());
+        }
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
@@ -1103,7 +1107,10 @@ impl JsContextHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context,
-                continuation: PendingSubresourceContinuation::CspReport { client_id },
+                continuation: PendingSubresourceContinuation::CspReport {
+                    client_id,
+                    publication,
+                },
                 deferred_request_started: false,
             },
         );
@@ -1175,7 +1182,10 @@ impl JsContextHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context,
-                continuation: PendingSubresourceContinuation::CspReport { client_id },
+                continuation: PendingSubresourceContinuation::CspReport {
+                    client_id,
+                    publication: CspReportNetworkPublication::Generic,
+                },
                 deferred_request_started: false,
             },
         );

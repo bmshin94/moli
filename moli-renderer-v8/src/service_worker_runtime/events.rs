@@ -730,4 +730,5 @@ pub(crate) struct ServiceWorkerFetchDispatch {
     pub(crate) cancel_handle: moli_fetch::FetchCancelHandle,
     pub(crate) direct_completion_tx:
         Option<tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>>,
+    pub(crate) network_transfer: Option<std::sync::Arc<crate::network::ResourceTransfer>>,
 }

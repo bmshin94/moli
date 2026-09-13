@@ -234,6 +234,7 @@ impl RendererBrowserContextRuntime {
             resource_task_runner,
             cancel_handle: FetchCancelHandle::new(),
             direct_completion_tx: Some(direct_completion_tx),
+            network_transfer: None,
         };
 
         if !self.dispatch_service_worker_fetch(dispatch) {
@@ -331,6 +332,7 @@ impl RendererBrowserContextRuntime {
             resource_task_runner,
             cancel_handle: FetchCancelHandle::new(),
             direct_completion_tx: Some(direct_completion_tx),
+            network_transfer: None,
         };
 
         if !self.dispatch_service_worker_fetch(dispatch) {
