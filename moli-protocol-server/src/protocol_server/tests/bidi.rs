@@ -1,5 +1,6 @@
 use super::*;
 
+mod shared_page_creation;
 mod shared_page_retirement;
 
 #[tokio::test]
