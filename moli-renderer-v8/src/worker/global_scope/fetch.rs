@@ -1,4 +1,5 @@
 use super::*;
+use crate::network::ResourceTransfer;
 use crate::service_worker_runtime::{
     ServiceWorkerClientId, ServiceWorkerDirectFetchResult, ServiceWorkerFetchDispatch,
     ServiceWorkerFetchRequest, ServiceWorkerFetchRequestMetadata, ServiceWorkerRequestDestination,
@@ -38,25 +39,15 @@ impl Drop for WorkerRequestDelivery {
         let Some(completion) = self.completion.take() else {
             return;
         };
-        let body = match completion.result {
-            Ok(response) => {
-                if let Some(head) = response.native_head() {
-                    record_worker_fetch_response(
-                        &self.observer,
-                        &self.network,
-                        head,
-                        completion.network_request_headers,
-                    );
-                }
-                response.native_body(self.network.handle())
-            }
-            Err(error) => error.into_native_body(self.network.handle()),
-        };
-        publish_worker_network_item(
-            &self.observer,
-            &self.network,
-            ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(body)),
-        );
+        match completion.result {
+            Ok(response) => complete_worker_resource_response(
+                &self.network,
+                &self.observer,
+                &response,
+                completion.network_request_headers,
+            ),
+            Err(error) => publish_worker_request_failure(&self.observer, &self.network, error),
+        }
     }
 }
 
@@ -212,6 +203,34 @@ fn worker_network_result_parts<R>(
         response,
         request_observation.map(|observation| observation.into_headers()),
     )
+}
+
+fn complete_worker_resource_response(
+    network: &crate::runtime::RendererNetworkRequest,
+    observer: &crate::worker::WorkerNetworkObserver,
+    response: &WorkerResourceResponse,
+    network_request_headers: Option<Vec<(String, String)>>,
+) {
+    let transfer = ResourceTransfer::from_existing_worker(network.clone(), observer.clone());
+    match response {
+        WorkerResourceResponse::Materialized(response) => transfer.body_completed(
+            crate::network::ResourceResponseHead {
+                head: response.head(),
+                network_request_headers,
+            },
+            SubresourceResponseBody::from_fetch_response(response),
+        ),
+        WorkerResourceResponse::Buffered { head, body } => transfer.body_completed(
+            crate::network::ResourceResponseHead {
+                head: head.as_ref().clone(),
+                network_request_headers,
+            },
+            body.clone(),
+        ),
+        WorkerResourceResponse::Streamed { .. } => {
+            transfer.finish_with_body(response.native_body(network.handle()));
+        }
+    }
 }
 
 async fn collect_worker_resource_response(
@@ -2671,20 +2690,11 @@ fn record_worker_fetch_success(
         .as_ref()
         .and_then(|record| record.initial_network_request_headers.clone())
         .or(network_request_headers);
-    if let Some(head) = response.native_head() {
-        record_worker_fetch_response(
-            &state.parent_tx.network_observer(),
-            &pending.network,
-            head,
-            network_request_headers,
-        );
-    }
-    publish_worker_network_item(
-        &state.parent_tx.network_observer(),
+    complete_worker_resource_response(
         &pending.network,
-        ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(
-            response.native_body(pending.network.handle()),
-        )),
+        &state.parent_tx.network_observer(),
+        response,
+        network_request_headers,
     );
 }
 
@@ -2710,13 +2720,8 @@ pub(super) fn publish_worker_request_failure(
     } else {
         error
     };
-    publish_worker_network_item(
-        observer,
-        network,
-        ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(
-            error.into_native_body(network.handle()),
-        )),
-    );
+    let transfer = ResourceTransfer::from_existing_worker(network.clone(), observer.clone());
+    transfer.finish_with_body(error.into_native_body(network.handle()));
 }
 
 pub(in crate::worker) fn drain_worker_fetch_completion_result(

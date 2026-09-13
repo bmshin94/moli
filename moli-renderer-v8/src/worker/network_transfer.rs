@@ -7,6 +7,13 @@ use moli_page_types::SubresourceRequestStarted;
 use std::sync::Arc;
 
 impl ResourceTransfer {
+    pub(crate) fn from_existing_worker(
+        network: RendererNetworkRequest,
+        observer: WorkerNetworkObserver,
+    ) -> Arc<Self> {
+        Self::from_existing(network, move |event| observer.publish(event))
+    }
+
     pub(crate) fn start(
         source: &RendererWorkerNetworkReporter,
         observer: WorkerNetworkObserver,

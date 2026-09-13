@@ -28,6 +28,16 @@ enum ResourceTransferState {
 }
 
 impl ResourceTransfer {
+    pub(crate) fn from_existing(
+        network: RendererNetworkRequest,
+        observer: impl Fn(crate::runtime::RendererNetworkObservation) + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ResourceTransferState::Requested(network)),
+            observer: Box::new(observer),
+        })
+    }
+
     pub(crate) fn from_request(
         network: RendererNetworkRequest,
         observer: impl Fn(crate::runtime::RendererNetworkObservation) + Send + Sync + 'static,
@@ -126,6 +136,19 @@ impl ResourceTransfer {
                 let body = SubresourceBodyFinished::ready_after_streaming(network.handle(), body);
                 (network, body)
             }
+            ResourceTransferState::Finished => return,
+        };
+        self.publish(
+            &network,
+            ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(body)),
+        );
+    }
+
+    pub(crate) fn finish_with_body(&self, body: SubresourceBodyFinished) {
+        let previous = std::mem::replace(&mut *self.state.lock(), ResourceTransferState::Finished);
+        let network = match previous {
+            ResourceTransferState::Requested(network)
+            | ResourceTransferState::Responding(network) => network,
             ResourceTransferState::Finished => return,
         };
         self.publish(

@@ -1,8 +1,8 @@
 use super::fetch::{
-    publish_worker_network_item, publish_worker_request_failure, record_worker_fetch_response,
-    worker_request_started,
+    publish_worker_network_item, publish_worker_request_failure, worker_request_started,
 };
 use super::*;
+use crate::network::{ResourceResponseObserver, ResourceTransfer};
 use crossbeam_channel::{after, bounded, never, select};
 use moli_page_types::{ScriptNetworkOutputItem, SubresourceBodyFinished};
 use moli_webapi_declare::WebApiObject;
@@ -99,14 +99,14 @@ fn record_worker_xhr_response(
     network_request_headers: Option<Vec<(String, String)>>,
 ) {
     let observer = state.parent_tx.network_observer();
+    let transfer = ResourceTransfer::from_existing_worker(network.clone(), observer.clone());
     if let Some(head) = head {
-        record_worker_fetch_response(&observer, network, head, network_request_headers);
+        transfer.response_started(std::sync::Arc::new(crate::network::ResourceResponseHead {
+            head,
+            network_request_headers,
+        }));
     }
-    publish_worker_network_item(
-        &observer,
-        network,
-        ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(body)),
-    );
+    transfer.finish_with_body(body);
 }
 
 pub(in crate::worker) enum WorkerXhrSendPrepareError {
