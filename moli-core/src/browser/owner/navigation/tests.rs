@@ -71,7 +71,7 @@ fn context_with_contents(service: &BrowserService) -> (BrowserContextHandle, Web
             None,
         )
         .unwrap();
-    context.bind_page_navigation_engines(Default::default(), None);
+    context.bind_page_navigation_engines(Default::default());
     let (contents, _) = context
         .create_web_contents(WebContentsCreation::default())
         .unwrap();
@@ -2412,7 +2412,7 @@ async fn native_initial_url_failed_admission_does_not_change_the_next_history_en
             .attempt
             .is_none()
     );
-    context.bind_page_navigation_engines(Default::default(), None);
+    context.bind_page_navigation_engines(Default::default());
     navigate(&context, contents, "data:text/html,independent").await;
     let (_, history) = context.navigation_history_snapshot(contents).unwrap();
     assert_eq!(history.last().unwrap().transition_type, "typed");

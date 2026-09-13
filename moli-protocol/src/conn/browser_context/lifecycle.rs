@@ -530,7 +530,7 @@ impl CdpConnection {
         browser_context.set_dedicated_worker_pause_on_start(
             self.dedicated_worker_pause_on_start_for_devtools(),
         );
-        browser_context.bind_page_navigation_engines(self.navigation_runtime_config.clone(), None);
+        browser_context.bind_page_navigation_engines(self.navigation_runtime_config.clone());
         if let Some(sender) = self.scheduler_hooks.renderer_publication_sender() {
             browser_context.set_renderer_output_transport_sender(sender);
         }

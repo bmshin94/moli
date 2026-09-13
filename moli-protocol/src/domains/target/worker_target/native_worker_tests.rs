@@ -143,7 +143,7 @@ impl NativeWorkers {
                 None,
             )
             .unwrap();
-        context.bind_page_navigation_engines(Default::default(), None);
+        context.bind_page_navigation_engines(Default::default());
         let (sender, output) = moli_core::renderer_output_transport_channel();
         if bind {
             context

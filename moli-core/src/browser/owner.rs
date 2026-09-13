@@ -898,12 +898,8 @@ impl BrowserContextHandle {
         })
     }
 
-    pub fn bind_page_navigation_engines(
-        &self,
-        config: crate::runtime::NavigationRuntimeConfig,
-        sender: Option<crate::RendererOutputTransportSender>,
-    ) {
-        self.update_live(move |context| context.bind_page_navigation_engines(config, sender));
+    pub fn bind_page_navigation_engines(&self, config: crate::runtime::NavigationRuntimeConfig) {
+        self.update_live(move |context| context.bind_page_navigation_engines(config));
     }
 
     /// First binding returns the native Worker prefix covered by the new

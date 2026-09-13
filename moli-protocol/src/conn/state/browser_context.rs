@@ -239,7 +239,7 @@ impl BrowserContext {
         target_id: impl Into<String>,
     ) -> Self {
         let mut context = Self::new(id.into());
-        context.bind_page_navigation_engines(Default::default(), None);
+        context.bind_page_navigation_engines(Default::default());
         context.set_active_target_id(target_id);
         context
     }
@@ -353,13 +353,8 @@ impl BrowserContext {
         self.browser_context.remove()
     }
 
-    pub(crate) fn bind_page_navigation_engines(
-        &mut self,
-        config: NavigationRuntimeConfig,
-        renderer_output_transport_sender: Option<moli_core::RendererOutputTransportSender>,
-    ) {
-        self.browser_context
-            .bind_page_navigation_engines(config, renderer_output_transport_sender);
+    pub(crate) fn bind_page_navigation_engines(&mut self, config: NavigationRuntimeConfig) {
+        self.browser_context.bind_page_navigation_engines(config);
     }
 
     pub(crate) fn set_renderer_output_transport_sender(

@@ -12,15 +12,8 @@ use crate::{
 use super::BrowserContext;
 
 impl BrowserContext {
-    pub fn bind_page_navigation_engines(
-        &mut self,
-        config: NavigationRuntimeConfig,
-        renderer_output_transport_sender: Option<crate::RendererOutputTransportSender>,
-    ) {
+    pub fn bind_page_navigation_engines(&mut self, config: NavigationRuntimeConfig) {
         self.page_navigation_runtime_config = Some(config.clone());
-        if let Some(sender) = renderer_output_transport_sender {
-            self.set_renderer_output_transport_sender(sender);
-        }
 
         let sender = self.renderer_output_transport_sender.clone();
         let runtime = self.renderer_runtime_owner_access();

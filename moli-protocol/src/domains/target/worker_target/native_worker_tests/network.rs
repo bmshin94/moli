@@ -48,7 +48,7 @@ async fn worker_binding_restores_the_unobserved_network_prefix_once(dedicated: b
             None,
         )
         .unwrap();
-    peer.bind_page_navigation_engines(Default::default(), None);
+    peer.bind_page_navigation_engines(Default::default());
     let (contents, _) = peer.create_web_contents(Default::default()).unwrap();
     peer.navigate_document(contents, moli_core::browser::web_contents::NavigationRequestInterception::new(
         "data:text/html,<script>globalThis.worker=new SharedWorker('data:text/javascript,onconnect=()=>{}','peer')</script>".parse().unwrap(),

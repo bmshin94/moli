@@ -349,7 +349,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        context.bind_page_navigation_engines(Default::default(), None);
+        context.bind_page_navigation_engines(Default::default());
         let (sender, mut output) = moli_core::renderer_output_transport_channel();
         if !late_binding {
             context
@@ -638,7 +638,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        context.bind_page_navigation_engines(Default::default(), None);
+        context.bind_page_navigation_engines(Default::default());
         let (sender, mut output) = moli_core::renderer_output_transport_channel();
         context
             .set_renderer_output_transport_sender(sender)
