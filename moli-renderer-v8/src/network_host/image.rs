@@ -104,29 +104,25 @@ pub(crate) fn start_scanned_image_preload(
     let cancel_handle = load.cancel_handle();
     task_runner.spawn(async move {
         let result = match loader
-            .fetch_raw_stream_with_cancel_and_network_metadata(request, cancel_handle)
+            .fetch_image_with_cancel_and_network_metadata(request, cancel_handle)
             .await
         {
             Ok(observed) => {
                 let (response, request_observation) = observed.into_parts();
-                response
-                    .into_materialized_raw_response()
-                    .await
-                    .map(|response| {
-                        let (head, body) = response.into_parts();
-                        let body_bytes = body
-                            .try_into_materialized_bytes()
-                            .expect("materialized raw image response must retain exact bytes");
-                        crate::protocol_types::NavigationResponse::from_head_and_body(
-                            head,
-                            String::new(),
-                            body_bytes,
-                        )
-                        .with_network_request_headers(
-                            request_observation.map(|observation| observation.into_headers()),
-                        )
-                    })
-                    .map_err(|error| format!("scanned image preload body failed: {error:#}"))
+                Ok({
+                    let (head, body) = response.into_parts();
+                    let body_bytes = body
+                        .try_into_materialized_bytes()
+                        .expect("materialized raw image response must retain exact bytes");
+                    crate::protocol_types::NavigationResponse::from_head_and_body(
+                        head,
+                        String::new(),
+                        body_bytes,
+                    )
+                    .with_network_request_headers(
+                        request_observation.map(|observation| observation.into_headers()),
+                    )
+                })
             }
             Err(error) => Err(format!("scanned image preload failed: {error:#}")),
         };

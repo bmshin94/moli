@@ -28,11 +28,14 @@ use super::{
     policy::PageNetworkPolicy,
 };
 
+mod image;
+
 #[derive(Clone)]
 pub struct ResourceRequestClient {
     resource_runtime: BrowserResourceRuntime,
     page_network_policy: PageNetworkPolicy,
     browser_site_context: Option<Arc<BrowserCookieFacadeContext>>,
+    pending_images: Arc<image::PendingImageLoads>,
 }
 
 /// Thread-affine lifetime root for a standalone resource request client.
@@ -69,6 +72,7 @@ impl ResourceRequestClient {
         resource_runtime: BrowserResourceRuntime,
     ) {
         self.resource_runtime = resource_runtime;
+        self.pending_images = Arc::default();
     }
 
     pub fn shares_resource_runtime_with(&self, other: &Self) -> bool {
@@ -104,6 +108,7 @@ impl ResourceRequestClient {
             resource_runtime,
             page_network_policy,
             browser_site_context: None,
+            pending_images: Arc::default(),
         }
     }
 
@@ -136,12 +141,12 @@ impl ResourceRequestClient {
     }
 
     pub(crate) fn frozen_request_client(&self) -> Self {
-        let mut client = Self::from_browser_resource_runtime_with_page_network_policy(
-            self.resource_runtime.clone(),
-            self.page_network_policy.frozen_request_view(),
-        );
-        client.browser_site_context = self.browser_site_context.clone();
-        client
+        Self {
+            resource_runtime: self.resource_runtime.clone(),
+            page_network_policy: self.page_network_policy.frozen_request_view(),
+            browser_site_context: self.browser_site_context.clone(),
+            pending_images: self.pending_images.clone(),
+        }
     }
 
     pub fn shares_page_network_policy_with(&self, other: &Self) -> bool {
@@ -258,6 +263,14 @@ impl ResourceRequestClient {
         cancel_handle: FetchCancelHandle,
     ) -> Result<NetworkFetchResult<Response>> {
         let request = self.apply_network_policy(request)?;
+        if request.resource_type == moli_fetch::RequestResourceType::Image {
+            return self
+                .fetch_image_after_policy(request, cancel_handle)
+                .await
+                .map(|observed| {
+                    observed.map_response(RawResponse::into_lossy_materialized_text_response)
+                });
+        }
         if request.auth_requires_buffered_transport() || !request.follow_redirects {
             return self
                 .resource_runtime

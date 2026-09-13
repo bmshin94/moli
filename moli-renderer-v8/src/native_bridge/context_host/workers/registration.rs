@@ -434,7 +434,7 @@ impl JsContextHost {
                 creator_storage_key: MoliStorageKey,
                 reserved_service_worker_client_id: Option<ServiceWorkerClientId>,
                 module_credentials_mode: moli_fetch::RequestCredentialsMode,
-                request_client: crate::network::ResourceRequestClient,
+                request_client: Box<crate::network::ResourceRequestClient>,
             },
         }
 
@@ -463,7 +463,7 @@ impl JsContextHost {
                             reserved_service_worker_client_id: reserved_service_worker_client_id
                                 .take(),
                             module_credentials_mode: *module_credentials_mode,
-                            request_client: outside_settings_load.request_client(),
+                            request_client: Box::new(outside_settings_load.request_client()),
                         }
                     }
                 }
@@ -500,7 +500,7 @@ impl JsContextHost {
                 creator_storage_key,
                 reserved_service_worker_client_id,
                 module_credentials_mode,
-                request_client,
+                *request_client,
             ),
         };
         let network_policy = WorkerNetworkPolicy {
