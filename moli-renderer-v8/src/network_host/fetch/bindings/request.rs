@@ -52,14 +52,15 @@ pub(super) fn prepare_window_fetch_request<'s>(
     let resource_loader = host
         .document_resource_loader_for_window_owner(document_target.owner())
         .ok_or_else(|| "fetch: Document resource loader is unavailable".to_owned())?;
-    let (frame_id, mut base_url) = subresource_request_scope_for_owner(scope, host, request_scope)
+    let environment = host
+        .subresource_request_environment(&resource_loader, request_scope)
         .ok_or_else(|| "fetch: Window execution context owner is retired".to_owned())?;
-    let context = resource_loader.fetch_context();
-    let document_url = context.document_url().clone();
-    let request_origin = moli_url::WebOrigin::from_serialized(context.origin());
-    if request_scope == crate::native_bridge::OwnerDispatchScope::Top {
-        base_url = host.document_base_url_for_handle(host.document_handle());
-    }
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        base_url,
+        request_origin,
+        frame_id,
+    } = environment;
     let connect_policy = host
         .document_connect_policy_snapshot_for_owner(request_scope)
         .ok_or_else(|| "fetch: document policy context is unavailable".to_owned())?;

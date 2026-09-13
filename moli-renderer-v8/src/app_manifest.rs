@@ -181,6 +181,7 @@ impl RendererAppManifestLoadPublication {
 
 pub struct RendererPreparedAppManifestLoad {
     document_url: Url,
+    request_origin: moli_url::WebOrigin,
     requested_manifest_url: Url,
     link_identity: RendererAppManifestLinkIdentity,
     resource: RendererPreparedNetworkResourceLoad,
@@ -216,6 +217,7 @@ impl RendererAppManifestNetworkObservation {
 impl RendererPreparedAppManifestLoad {
     pub(crate) fn new(
         document_url: Url,
+        request_origin: moli_url::WebOrigin,
         requested_manifest_url: Url,
         link_identity: RendererAppManifestLinkIdentity,
         resource: RendererPreparedNetworkResourceLoad,
@@ -223,6 +225,7 @@ impl RendererPreparedAppManifestLoad {
     ) -> Self {
         Self {
             document_url,
+            request_origin,
             requested_manifest_url,
             link_identity,
             resource,
@@ -233,6 +236,7 @@ impl RendererPreparedAppManifestLoad {
     pub async fn execute(self) -> RendererAppManifestLoadOutcome {
         let Self {
             document_url,
+            request_origin,
             requested_manifest_url,
             link_identity,
             resource,
@@ -267,7 +271,7 @@ impl RendererPreparedAppManifestLoad {
                 let response = *response;
                 let security_error = response.completion_error.clone().or_else(|| {
                     crate::network_host::validate_cors_response_chain(
-                        &document_url,
+                        &request_origin,
                         &response.head(),
                         credentials_mode,
                     )

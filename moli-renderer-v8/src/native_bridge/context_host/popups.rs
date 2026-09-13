@@ -2609,6 +2609,21 @@ impl JsContextHost {
             if self.lightweight_popup_document_handle(popup_id) != Some(document_handle) {
                 self.forget_lightweight_popup_document_handle(popup_id);
             }
+            let inherited_base_url = self
+                .lightweight_popup_document_record(popup_id)
+                .filter(|document| moli_url::is_about_blank(&document.url))
+                .and_then(|document| {
+                    self.document_resource_loader_for_window_owner(
+                        super::WindowDocumentOwner::LightweightPopup(document.owner),
+                    )
+                })
+                .map(|loader| loader.fetch_context().base_url().clone());
+            if let Some(base_url) = inherited_base_url {
+                // Native URL resolution needs the inherited fallback too;
+                // the Document's live <base> element can still override it.
+                self.dom_host_mut()
+                    .set_document_fallback_base_url_for_handle(document_handle, Some(base_url));
+            }
             self.sync_owner_style_sheet_texts_for_document_tree_scopes(document_handle);
             self.dom_host_mut()
                 .mark_subtree_connected_preserving_owner_document(document_handle);

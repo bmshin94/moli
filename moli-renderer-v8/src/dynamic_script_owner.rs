@@ -463,6 +463,7 @@ impl DynamicScriptOwner {
     pub(super) fn enqueue_admission(
         &mut self,
         loader: &ResourceRequestClient,
+        request_origin: moli_url::WebOrigin,
         task_runner: RendererResourceTaskRunner,
         admission: RuntimeScriptAdmission,
         document_character_set: Option<&str>,
@@ -475,6 +476,7 @@ impl DynamicScriptOwner {
                 let queue_kind = DynamicScriptQueueKind::for_mode(script.mode);
                 self.enqueue_script_with_id(
                     loader,
+                    request_origin,
                     task_runner,
                     id,
                     queue_kind,
@@ -1468,6 +1470,7 @@ impl DynamicScriptOwner {
     fn enqueue_script_with_id(
         &mut self,
         loader: &ResourceRequestClient,
+        request_origin: moli_url::WebOrigin,
         task_runner: RendererResourceTaskRunner,
         id: DynamicScriptOwnerId,
         queue_kind: DynamicScriptQueueKind,
@@ -1489,6 +1492,7 @@ impl DynamicScriptOwner {
                     let outcome = if let Some(context) = service_worker_context {
                         load_service_worker_aware_external_script_source_outcome(
                             &script_for_load,
+                            &request_origin,
                             &loader,
                             fetch_task_runner,
                             document_character_set.as_deref(),
@@ -1501,6 +1505,7 @@ impl DynamicScriptOwner {
                     } else {
                         load_prepared_script_source_outcome_with_document_character_set(
                             &script_for_load,
+                            &request_origin,
                             &loader,
                             document_character_set.as_deref(),
                             None,
@@ -3177,6 +3182,7 @@ mod tests {
         // reverting to ambient `tokio::spawn()` would panic here.
         owner.enqueue_script_with_id(
             &request_client,
+            moli_url::WebOrigin::from_url(&script.initiator_url),
             task_runner,
             owner_id(7),
             DynamicScriptQueueKind::Async,

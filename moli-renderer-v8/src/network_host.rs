@@ -135,7 +135,7 @@ pub(crate) use self::request_scope::effective_subresource_policy_context;
 pub(in crate::network_host) use self::request_scope::{
     XHR_CHILD_CONTEXT_HANDLE_SLOT, active_subresource_network_partition_key,
     effective_subresource_referrer_policy, effective_subresource_request_scope,
-    observe_subresource_request_cookie_report, subresource_request_scope_for_owner,
+    observe_subresource_request_cookie_report,
 };
 #[cfg(test)]
 pub(crate) use self::response::materialize_response_object;

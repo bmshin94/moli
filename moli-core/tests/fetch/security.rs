@@ -13,6 +13,7 @@ use url::Url;
 #[derive(Debug)]
 struct IncomingRequest {
     method: String,
+    authority: String,
     path: String,
     origin: Option<String>,
     cookie: Option<String>,
@@ -65,7 +66,9 @@ impl SecurityServers {
                                 let cookie = text.lines().filter_map(|line| line.split_once(':'))
                                     .find(|(key, _)| key.eq_ignore_ascii_case("Cookie"))
                                     .map(|(_, value)| value.trim().to_owned());
-                                let request = IncomingRequest { method, path, origin, cookie };
+                                let authority = text.lines().filter_map(|line| line.split_once(':'))
+                                    .find(|(key, _)| key.eq_ignore_ascii_case("Host")).unwrap().1.trim().to_owned();
+                                let request = IncomingRequest { method, authority, path, origin, cookie };
                                 let (status, headers, body) = fixture_response(&request);
                                 requests.lock().push(request);
                                 let response = format!("HTTP/1.1 {status} Fixture\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
@@ -114,6 +117,82 @@ fn fixture_response(request: &IncomingRequest) -> (u16, String, String) {
                 parent.postMessage({blob, text}, '*'));
         </script>"#
                 .to_owned(),
+        );
+    }
+    if url.path() == "/sandboxed-preload" {
+        return (
+            200,
+            "Content-Type: text/html\r\nContent-Security-Policy: sandbox allow-scripts\r\n".to_owned(),
+            r#"<!doctype html>
+            <script>
+                let scriptDone = false;
+                let preloadDone = false;
+                function complete() {
+                    if (scriptDone && preloadDone)
+                        parent.postMessage('loaded:' + String(globalThis.loadedByOriginFixture === true), '*');
+                }
+            </script>
+            <link rel="modulepreload" crossorigin="anonymous" href="/subresource-origin/opaque/preload-allowed"
+                onload="preloadDone = true; complete()"
+                onerror="parent.postMessage('preload-error', '*')">
+            <script defer crossorigin="anonymous" src="/subresource-origin/opaque/classic-allowed"
+                onload="scriptDone = true; complete()"
+                onerror="parent.postMessage('error', '*')"></script>"#.to_owned(),
+        );
+    }
+    if url.path().starts_with("/xhr-origin/") {
+        let headers = if url.path().ends_with("-allowed") {
+            request
+                .origin
+                .as_ref()
+                .map(|origin| format!("Access-Control-Allow-Origin: {origin}\r\n"))
+                .unwrap_or_default()
+        } else if url.path().ends_with("-wrong") {
+            "Access-Control-Allow-Origin: http://wrong.test\r\n".to_owned()
+        } else {
+            String::new()
+        };
+        return (
+            200,
+            format!("{headers}Content-Type: text/plain\r\nCache-Control: no-store\r\n"),
+            "ok".to_owned(),
+        );
+    }
+    if url.path().starts_with("/subresource-origin/") {
+        let cors = if url.path().ends_with("-allowed") {
+            request
+                .origin
+                .as_ref()
+                .map(|origin| format!("Access-Control-Allow-Origin: {origin}\r\n"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let name = url.path().rsplit('/').next().unwrap();
+        let (mime, body) = if name.starts_with("style-") {
+            ("text/css", "body { color: green; }")
+        } else if name.starts_with("image-") {
+            (
+                "image/svg+xml",
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#,
+            )
+        } else if name.starts_with("track-") {
+            (
+                "text/vtt",
+                "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello\n",
+            )
+        } else if name.starts_with("eventsource-") {
+            ("text/event-stream", "data: load\n\n")
+        } else {
+            (
+                "text/javascript",
+                "globalThis.loadedByOriginFixture = true;",
+            )
+        };
+        return (
+            200,
+            format!("{cors}Content-Type: {mime}\r\nCache-Control: no-store\r\n"),
+            body.to_owned(),
         );
     }
     if url.path() == "/sw.js" {
@@ -540,6 +619,202 @@ async fn srcdoc_fetch_uses_inherited_or_opaque_origin_independently_of_base_url(
                 Some(expected_origin),
                 "{request:?}"
             );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn srcdoc_xhr_uses_committed_origin_for_sync_and_async_cors() -> Result<()> {
+    let server = SecurityServers::spawn().await?;
+    let browser = Browser::new(BrowserConfig::default())?;
+    let mut page = browser.fetch(&format!("{}/page", server.origin)).await?;
+    let expression = format!(
+        "({})({})",
+        include_str!("fixtures/xhr-origin.js"),
+        json!(server.cross)
+    );
+    let observed = results(
+        page.evaluate_runtime_expression_with_await_async(&expression, true)
+            .await?,
+    )?;
+    for kind in ["inherited", "opaque"] {
+        for mode in ["async", "sync"] {
+            for policy in ["denied", "allowed", "wrong", "home"] {
+                let name = format!("{mode}-{policy}");
+                let allowed = policy == "allowed" || (policy == "home" && kind == "inherited");
+                assert_eq!(
+                    observed[kind][&name],
+                    if allowed { "load:ok" } else { "error" },
+                    "{kind}/{name}: {observed}"
+                );
+                let path = format!("/xhr-origin/{kind}/{name}");
+                let requests = server.requests.lock();
+                let request = requests
+                    .iter()
+                    .find(|request| request.path == path)
+                    .expect("XHR must reach its target for a CORS response check");
+                let expected_origin = if kind == "opaque" {
+                    Some("null")
+                } else if policy == "home" {
+                    None
+                } else {
+                    Some(server.origin.as_str())
+                };
+                assert_eq!(request.origin.as_deref(), expected_origin, "{request:?}");
+                let expected_cookie =
+                    (kind == "inherited" && policy == "home").then_some("originSession=present");
+                assert_eq!(request.cookie.as_deref(), expected_cookie, "{request:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn srcdoc_subresources_share_committed_origin_and_track_mode_gate() -> Result<()> {
+    let server = SecurityServers::spawn().await?;
+    let mut config = BrowserConfig::default();
+    for resource in [
+        moli_page_types::SubresourceResourceType::Image,
+        moli_page_types::SubresourceResourceType::TextTrack,
+    ] {
+        config.set_optional_resource_fetch_enabled(resource, true);
+    }
+    let browser = Browser::new(config)?;
+    let mut page = browser.fetch(&format!("{}/page", server.origin)).await?;
+    let expression = format!(
+        "({})({})",
+        include_str!("fixtures/subresource-origin.js"),
+        json!(server.cross)
+    );
+    let observed = results(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            page.evaluate_runtime_expression_with_await_async(&expression, true),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "subresource origin fixture stalled: {:?}",
+                server.requests.lock()
+            )
+        })?,
+    )?;
+    let requests = server.requests.lock();
+    for kind in ["inherited", "opaque"] {
+        for resource in [
+            "classic",
+            "module",
+            "style",
+            "image",
+            "eventsource",
+            "track",
+        ] {
+            for policy in ["denied", "allowed"] {
+                let name = format!("{resource}-{policy}");
+                assert_eq!(
+                    observed[kind][&name],
+                    if policy == "allowed" { "load" } else { "error" },
+                    "{kind}/{name}: {observed}; {requests:?}"
+                );
+                let path = format!(
+                    "/subresource-origin/{}/{name}",
+                    if name == "style-allowed" {
+                        "shared"
+                    } else {
+                        kind
+                    }
+                );
+                let request = requests
+                    .iter()
+                    .find(|request| {
+                        request.path == path
+                            && request.origin.as_deref()
+                                == Some(if kind == "opaque" {
+                                    "null"
+                                } else {
+                                    &server.origin
+                                })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("subresource request from {kind} reached server: {requests:?}")
+                    });
+                assert_eq!(
+                    request.origin.as_deref(),
+                    Some(if kind == "opaque" {
+                        "null"
+                    } else {
+                        &server.origin
+                    }),
+                    "{request:?}"
+                );
+                assert_eq!(
+                    request.authority,
+                    server.cross.trim_start_matches("http://"),
+                    "{request:?}"
+                );
+                assert!(request.cookie.is_none(), "{request:?}");
+            }
+        }
+        assert_eq!(
+            observed[kind]["track-home"],
+            if kind == "inherited" { "load" } else { "error" }
+        );
+        assert_eq!(observed[kind]["track-cross"], "error");
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.path == format!("/subresource-origin/{kind}/track-cross"))
+        );
+    }
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.path == "/subresource-origin/opaque/track-home")
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.path == "/subresource-origin/inherited/track-home")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn csp_sandboxed_child_script_and_modulepreload_preserve_opaque_origin() -> Result<()> {
+    let server = SecurityServers::spawn().await?;
+    let browser = Browser::new(BrowserConfig::default())?;
+    let mut page = browser.fetch(&format!("{}/page", server.origin)).await?;
+    let observed = page
+        .evaluate_runtime_expression_with_await_async(
+            r#"new Promise(resolve => {
+                const frame = document.createElement('iframe');
+                const handler = event => {
+                    if (event.source !== frame.contentWindow) return;
+                    removeEventListener('message', handler);
+                    frame.remove();
+                    resolve(event.data);
+                };
+                addEventListener('message', handler);
+                frame.src = '/sandboxed-preload';
+                document.body.append(frame);
+            })"#,
+            true,
+        )
+        .await?;
+    assert_eq!(observed["value"], "loaded:true", "{observed}");
+    let requests = server.requests.lock();
+    for name in ["classic-allowed", "preload-allowed"] {
+        let path = format!("/subresource-origin/opaque/{name}");
+        let matching = requests
+            .iter()
+            .filter(|request| request.path == path)
+            .collect::<Vec<_>>();
+        assert!(!matching.is_empty(), "missing {name}: {requests:?}");
+        for request in matching {
+            assert_eq!(request.origin.as_deref(), Some("null"), "{request:?}");
+            assert!(request.cookie.is_none(), "{request:?}");
         }
     }
     Ok(())

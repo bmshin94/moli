@@ -171,11 +171,17 @@ impl ScriptVm {
                 document_url: self.document_runtime.document_url().clone(),
             }
         };
+        let request_origin = self
+            .current_main_document_resource_loader()
+            .expect("dynamic script requires its Document authority")
+            .fetch_context()
+            .request_origin();
         self.document_runtime
             .runtime_script_work_mut()
             .dynamic_scripts
             .enqueue_admission(
                 loader,
+                request_origin,
                 task_runner,
                 admission,
                 Some(&document_character_set),

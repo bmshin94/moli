@@ -296,7 +296,7 @@ impl DocumentRuntime {
             {
                 continue;
             }
-            self.spawn_linked_stylesheet_import_graph(fetch, urls);
+            self.spawn_linked_stylesheet_import_graph(fetch, urls, self.stylesheet_fetcher());
         }
     }
 
@@ -384,30 +384,23 @@ impl DocumentRuntime {
             self.bind_linked_stylesheet_import_blocking_operation(&fetch, blocking_operation, urls);
             return;
         }
-        self.spawn_linked_stylesheet_import_graph(fetch, urls);
+        let fetcher = self.stylesheet_fetcher_for_owner(load.owner(), host_ptr);
+        self.spawn_linked_stylesheet_import_graph(fetch, urls, fetcher);
     }
 
     fn spawn_linked_stylesheet_import_graph(
         &mut self,
         fetch: crate::stylesheet_blocking::StylesheetFetch,
         urls: Vec<Url>,
+        stylesheet_fetcher: crate::stylesheet_blocking::RendererStylesheetFetcher,
     ) {
         let task_producer = self
             .stylesheet_lifecycle
             .task_producer
             .clone()
             .expect("linked stylesheet import requires a bound Page task producer");
-        let stylesheet_fetcher = self.stylesheet_fetcher();
-        let document_url = self
-            .dom_host
-            .node(self.dom_host.document_handle())
-            .and_then(Node::as_document)
-            .map(|document| document.url().clone())
-            .expect("live dom host must retain a document url")
-            .clone();
-        let resource_loader = self
-            .current_document_resource_loader()
-            .expect("linked stylesheet import requires its Document authority");
+        let resource_loader = stylesheet_fetcher.resource_loader().clone();
+        let document_url = resource_loader.fetch_context().document_url().clone();
         resource_loader.spawn_resource_task(async move {
             let (graph, network_results) =
                 super::import_graph_projection::fetch_observed_stylesheet_import_graph(

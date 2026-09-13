@@ -250,6 +250,9 @@ pub trait StylesheetBlockingReadView {
     fn text_content(&self, node_id: NativeNodeId) -> Option<String>;
     fn final_url_clone(&self) -> Option<Url>;
     fn document_base_url_clone(&self) -> Option<Url>;
+    fn stylesheet_base_url_clone(&self, _node_id: NativeNodeId) -> Option<Url> {
+        self.document_base_url_clone()
+    }
     fn document_node_id(&self) -> NativeNodeId;
 
     fn document_order_stylesheet_candidate_ids_before(
@@ -321,6 +324,11 @@ impl StylesheetBlockingReadView for DomHost {
             .map(|document| document.base_url().clone())
     }
 
+    fn stylesheet_base_url_clone(&self, node_id: NativeNodeId) -> Option<Url> {
+        let document = self.owner_document_handle(node_id)?;
+        self.document_base_url_for_handle(document)
+    }
+
     fn document_node_id(&self) -> NativeNodeId {
         self.document_handle()
     }
@@ -368,7 +376,10 @@ pub fn stylesheet_preload_link_request(
     if href.is_empty() {
         return None;
     }
-    let url = document.document_base_url_clone()?.join(href).ok()?;
+    let url = document
+        .stylesheet_base_url_clone(native_node_id)?
+        .join(href)
+        .ok()?;
     let options = StylesheetFetchOptions::from_link_attributes(
         element.cross_origin.as_deref(),
         element.referrer_policy.as_deref(),
@@ -401,7 +412,10 @@ fn stylesheet_link_disposition_in_view(
         return None;
     }
 
-    let url = document.document_base_url_clone()?.join(href).ok()?;
+    let url = document
+        .stylesheet_base_url_clone(native_node_id)?
+        .join(href)
+        .ok()?;
     let options = StylesheetFetchOptions::from_link_attributes(
         element.cross_origin.as_deref(),
         element.referrer_policy.as_deref(),
@@ -445,7 +459,10 @@ pub fn connected_preload_like_link_url(
     if href.is_empty() {
         return None;
     }
-    document.document_base_url_clone()?.join(href).ok()
+    document
+        .stylesheet_base_url_clone(native_node_id)?
+        .join(href)
+        .ok()
 }
 
 pub fn preload_like_link_loads_stylesheet(rel: &str, as_attr: Option<&str>, href: &str) -> bool {
@@ -667,7 +684,7 @@ fn parser_created_style_import_urls(
         return None;
     }
     let css_text = document.text_content(native_node_id)?;
-    let base_url = document.document_base_url_clone()?;
+    let base_url = document.stylesheet_base_url_clone(native_node_id)?;
     let urls = extract_css_import_urls(&base_url, &css_text);
     (!urls.is_empty()).then_some(urls)
 }

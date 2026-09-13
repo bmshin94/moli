@@ -2,6 +2,15 @@ use url::Url;
 
 use crate::native_bridge::WindowDocumentOwner;
 
+/// Captured security authority plus the live base used only for URL resolution.
+#[derive(Clone, Debug)]
+pub(crate) struct SubresourceRequestEnvironment {
+    pub(crate) document_url: Url,
+    pub(crate) base_url: Url,
+    pub(crate) request_origin: moli_url::WebOrigin,
+    pub(crate) frame_id: Option<String>,
+}
+
 /// Request settings captured for one exact committed Document.
 #[derive(Clone, Debug)]
 pub(crate) struct DocumentFetchContext {
@@ -40,5 +49,22 @@ impl DocumentFetchContext {
 
     pub(crate) fn origin(&self) -> &str {
         &self.origin
+    }
+
+    pub(crate) fn request_origin(&self) -> moli_url::WebOrigin {
+        moli_url::WebOrigin::from_serialized(&self.origin)
+    }
+
+    pub(crate) fn subresource_environment(
+        &self,
+        base_url: Url,
+        frame_id: Option<String>,
+    ) -> SubresourceRequestEnvironment {
+        SubresourceRequestEnvironment {
+            document_url: self.document_url.clone(),
+            base_url,
+            request_origin: self.request_origin(),
+            frame_id,
+        }
     }
 }

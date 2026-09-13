@@ -831,7 +831,7 @@ impl Request {
     /// Cookie policy uses the environment origin, independently of the URL used
     /// to produce Referer. Adapt tuple origins to the cookie layer's URL-based
     /// initiator API without replacing the request's referrer context.
-    pub(crate) fn network_cookie_context(&self) -> NetworkCookieRequestContext {
+    pub fn network_cookie_context(&self) -> NetworkCookieRequestContext {
         let mut context = self.cookie_context.clone();
         if let Some(WebOrigin::Tuple(origin)) = self.request_origin() {
             let origin_url =

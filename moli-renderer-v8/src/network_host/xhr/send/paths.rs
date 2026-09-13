@@ -18,6 +18,7 @@ pub(super) fn record_intercepted_xhr(
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
         &prepared.document_url,
+        &prepared.request_origin,
         &prepared.resolved_url,
         &prepared.method,
         prepared.credentials_mode,
@@ -64,6 +65,7 @@ pub(super) fn dispatch_service_worker_xhr(
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
         &prepared.document_url,
+        &prepared.request_origin,
         &prepared.resolved_url,
         &prepared.method,
         prepared.credentials_mode,
@@ -71,7 +73,7 @@ pub(super) fn dispatch_service_worker_xhr(
     let cancel_handle = FetchCancelHandle::new();
     let network_context = AsyncSubresourceNetworkContext {
         frame_id: prepared.frame_id.clone(),
-        request_origin: moli_url::WebOrigin::from_url(&prepared.document_url),
+        request_origin: prepared.request_origin.clone(),
         document_url: prepared.document_url.clone(),
         resource_type: SubresourceResourceType::Xhr,
         policy_context: prepared.policy_context,
@@ -303,7 +305,7 @@ pub(super) fn spawn_network_xhr_fetch(
     )
     .expect("xhr request url was already resolved")
     .with_initiator_url(&prepared.document_url)
-    .with_request_origin(moli_url::WebOrigin::from_url(&prepared.document_url))
+    .with_request_origin(prepared.request_origin.clone())
     .with_credentials_mode(prepared.credentials_mode)
     .with_network_partition_key(prepared.network_partition_key.clone())
     .with_browser_request_metadata(BrowserRequestMetadata::Xhr)
@@ -312,13 +314,14 @@ pub(super) fn spawn_network_xhr_fetch(
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
         &prepared.document_url,
+        &prepared.request_origin,
         &prepared.resolved_url,
         &prepared.method,
         prepared.credentials_mode,
     );
     let network_context = AsyncSubresourceNetworkContext {
         frame_id: prepared.frame_id.clone(),
-        request_origin: moli_url::WebOrigin::from_url(&prepared.document_url),
+        request_origin: prepared.request_origin.clone(),
         document_url: prepared.document_url.clone(),
         resource_type: SubresourceResourceType::Xhr,
         policy_context: prepared.policy_context,

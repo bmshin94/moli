@@ -28,7 +28,7 @@ use crate::types::{
 pub struct StylesheetBlockingState {
     owner_fetches: HashMap<NodeId, StylesheetFetchEntry>,
     blocking_entries: HashMap<NodeId, StylesheetBlockingEntry>,
-    url_fetches: HashMap<(Url, StylesheetResourceKey), StylesheetFetch>,
+    url_fetches: HashMap<(u64, Url, StylesheetResourceKey), StylesheetFetch>,
     completion_source: OwnerTaskSource<StylesheetCompletion>,
     ready_network_results: VecDeque<StylesheetFetchNetworkResult>,
     // The stylesheet queue is local to document processing, not the renderer
@@ -222,6 +222,7 @@ impl StylesheetBlockingState {
             options: options.clone(),
         };
         if let Some(entry) = self.owner_fetches.get(&node_id)
+            && entry.resource_cache_scope == fetcher.resource_cache_scope()
             && entry.signature == signature
         {
             return entry.fetch.clone();
@@ -325,14 +326,17 @@ impl StylesheetBlockingState {
             options: options.clone(),
         };
         if let Some(entry) = self.owner_fetches.get(&node_id)
+            && entry.resource_cache_scope == fetcher.resource_cache_scope()
             && entry.signature == signature
         {
             return entry.fetch.clone();
         }
+        let resource_cache_scope = fetcher.resource_cache_scope();
         let fetch = self.ensure_resource(fetcher, document_url, url, options);
         self.owner_fetches.insert(
             node_id,
             StylesheetFetchEntry {
+                resource_cache_scope,
                 signature,
                 fetch: fetch.clone(),
             },
@@ -350,11 +354,13 @@ impl StylesheetBlockingState {
     where
         F: StylesheetFetcher,
     {
+        let resource_cache_scope = fetcher.resource_cache_scope();
         let resource_key = options.resource_key(url.clone());
-        if let Some(url_fetch) = self
-            .url_fetches
-            .get(&(document_url.clone(), resource_key.clone()))
-        {
+        if let Some(url_fetch) = self.url_fetches.get(&(
+            resource_cache_scope,
+            document_url.clone(),
+            resource_key.clone(),
+        )) {
             return url_fetch.clone();
         }
         let start_unix_millis = moli_time::unix_epoch_millis();
@@ -369,8 +375,10 @@ impl StylesheetBlockingState {
         let completion_wake = self.completion_wake.clone();
         let completion_publisher = self.completion_publisher.clone();
         let completion_fetch = fetch.clone();
-        self.url_fetches
-            .insert((document_url.clone(), resource_key), fetch.clone());
+        self.url_fetches.insert(
+            (resource_cache_scope, document_url.clone(), resource_key),
+            fetch.clone(),
+        );
         let task_fetcher = fetcher.clone();
         fetcher.spawn_stylesheet_task(Box::pin(async move {
             let terminal = task_fetcher

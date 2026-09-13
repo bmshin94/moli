@@ -467,9 +467,11 @@ impl JsContextHost {
         resource_type: SubresourceResourceType,
         disposition: ResourceLoadDisposition,
         cancel_handle: Option<moli_fetch::FetchCancelHandle>,
-    ) -> Option<ResourceLoadLease> {
-        self.document_resource_loader_for_window_owner(owner)?
-            .register_load(resource_type.into(), disposition, cancel_handle)
+    ) -> Option<(ResourceLoadLease, moli_url::WebOrigin)> {
+        let loader = self.document_resource_loader_for_window_owner(owner)?;
+        let origin = loader.fetch_context().request_origin();
+        let load = loader.register_load(resource_type.into(), disposition, cancel_handle)?;
+        Some((load, origin))
     }
 
     fn register_document_resource_load_for_dispatch_scope(
@@ -478,7 +480,7 @@ impl JsContextHost {
         resource_type: SubresourceResourceType,
         disposition: ResourceLoadDisposition,
         cancel_handle: Option<moli_fetch::FetchCancelHandle>,
-    ) -> Option<ResourceLoadLease> {
+    ) -> Option<(ResourceLoadLease, moli_url::WebOrigin)> {
         let owner = self
             .current_window_document_task_target_for_dispatch_scope(dispatch_scope)?
             .owner();
@@ -491,7 +493,7 @@ impl JsContextHost {
         resource_type: SubresourceResourceType,
         disposition: ResourceLoadDisposition,
         cancel_handle: Option<moli_fetch::FetchCancelHandle>,
-    ) -> ResourceLoadLease {
+    ) -> (ResourceLoadLease, moli_url::WebOrigin) {
         self.register_document_resource_load_for_dispatch_scope(
             dispatch_scope,
             resource_type,
@@ -575,7 +577,7 @@ impl JsContextHost {
         } else {
             ResourceLoadDisposition::Ordinary
         };
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, _) = self.require_document_resource_load_for_dispatch_scope(
             fetch_context.request_target().dispatch_scope(),
             info.resource_type,
             disposition,
@@ -847,7 +849,7 @@ impl JsContextHost {
         } else {
             ResourceLoadDisposition::Ordinary
         };
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, _) = self.require_document_resource_load_for_dispatch_scope(
             fetch_context.request_target().dispatch_scope(),
             info.resource_type,
             disposition,
@@ -897,6 +899,7 @@ impl JsContextHost {
     ) -> (u64, ResourceLoadLease) {
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
+        let request_origin = resource_loader.fetch_context().request_origin();
         let load = resource_loader
             .register_load(
                 ResourceLoadKind::EventSource,
@@ -912,7 +915,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load: load.clone(),
                 execution_context: PendingSubresourceExecutionContext::window(execution_context),
@@ -951,7 +954,7 @@ impl JsContextHost {
         ) {
             return None;
         }
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             owner,
             info.resource_type,
             ResourceLoadDisposition::Ordinary,
@@ -965,7 +968,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::adapter(owner, context),
@@ -1014,7 +1017,7 @@ impl JsContextHost {
                 Some(cancel_handle.clone())
             }
         };
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             owner,
             info.resource_type,
             ResourceLoadDisposition::Ordinary,
@@ -1035,7 +1038,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::adapter(owner, context),
@@ -1137,7 +1140,7 @@ impl JsContextHost {
         ) {
             return None;
         }
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             owner,
             info.resource_type,
             ResourceLoadDisposition::Ordinary,
@@ -1151,7 +1154,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::adapter(owner, context),
@@ -1190,7 +1193,7 @@ impl JsContextHost {
         }
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
-        let load = self
+        let (load, request_origin) = self
             .register_document_resource_load(
                 crate::native_bridge::WindowDocumentOwner::Frame(binding.owner()),
                 info.resource_type,
@@ -1206,7 +1209,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::adapter(owner, context),
@@ -1235,7 +1238,7 @@ impl JsContextHost {
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             execution_context.dispatch_scope(),
             info.resource_type,
             ResourceLoadDisposition::Keepalive,
@@ -1245,7 +1248,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window_network_only(
@@ -1263,9 +1266,11 @@ impl JsContextHost {
         internal_id
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_async_subresource_csp_report(
         &mut self,
         identity: super::WindowDocumentNetworkRequestIdentity,
+        request_origin: moli_url::WebOrigin,
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
         load: ResourceLoadLease,
         network_partition_key: Option<String>,
@@ -1283,7 +1288,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window_document_network_only(
@@ -1309,7 +1314,7 @@ impl JsContextHost {
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             execution_context.dispatch_scope(),
             info.resource_type,
             ResourceLoadDisposition::Keepalive,
@@ -1319,7 +1324,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window_network_only(
@@ -1337,9 +1342,11 @@ impl JsContextHost {
         internal_id
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_pending_subresource_csp_report(
         &mut self,
         identity: super::WindowDocumentNetworkRequestIdentity,
+        request_origin: moli_url::WebOrigin,
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
         load: ResourceLoadLease,
         network_partition_key: Option<String>,
@@ -1357,7 +1364,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window_document_network_only(
@@ -1386,7 +1393,7 @@ impl JsContextHost {
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             execution_context.dispatch_scope(),
             info.resource_type,
             ResourceLoadDisposition::Ordinary,
@@ -1396,7 +1403,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window(execution_context),
@@ -1421,7 +1428,7 @@ impl JsContextHost {
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             owner,
             info.resource_type,
             ResourceLoadDisposition::Ordinary,
@@ -1431,7 +1438,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             info.internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::adapter(owner, context),
@@ -1459,7 +1466,7 @@ impl JsContextHost {
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
-        let load = self.require_document_resource_load_for_dispatch_scope(
+        let (load, request_origin) = self.require_document_resource_load_for_dispatch_scope(
             execution_context.dispatch_scope(),
             info.resource_type,
             ResourceLoadDisposition::Ordinary,
@@ -1469,7 +1476,7 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+                request_origin,
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window(execution_context),

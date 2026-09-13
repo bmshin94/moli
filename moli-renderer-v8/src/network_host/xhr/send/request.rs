@@ -17,6 +17,7 @@ pub(super) struct PreparedXhrSendRequest {
     pub(super) execution_context: crate::native_bridge::WindowExecutionContextBinding,
     pub(super) resource_loader: crate::network::context::DocumentResourceLoader,
     pub(super) document_url: url::Url,
+    pub(super) request_origin: moli_url::WebOrigin,
     pub(super) network_partition_key: Option<String>,
     pub(super) policy_context: crate::types::SubresourcePolicyContext,
     pub(super) resolved_url: url::Url,
@@ -43,9 +44,11 @@ pub(super) fn xhr_dom_debugger_request_url<'s>(
     }
     let resolved = xhr_execution_context_binding(scope, host, xhr)
         .and_then(|execution_context| {
-            subresource_request_scope_for_owner(scope, host, execution_context.dispatch_scope())
+            let owner = execution_context.dispatch_scope();
+            let loader = host.document_resource_loader_for_dispatch_scope(owner)?;
+            host.subresource_request_environment(&loader, owner)
         })
-        .and_then(|(_, document_url)| resolve_context_url(&document_url, &raw_url, None).ok());
+        .and_then(|environment| resolve_context_url(&environment.base_url, &raw_url, None).ok());
     resolved.map(|url| url.to_string()).unwrap_or(raw_url)
 }
 
@@ -64,12 +67,19 @@ pub(super) fn prepare_xhr_send_request<'s>(
     let resource_loader = host
         .document_resource_loader_for_dispatch_scope(owner)
         .ok_or(XhrSendPrepareError::ExecutionContext)?;
-    let (frame_id, document_url) = subresource_request_scope_for_owner(scope, host, owner)
+    let environment = host
+        .subresource_request_environment(&resource_loader, owner)
         .ok_or(XhrSendPrepareError::ExecutionContext)?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        base_url,
+        request_origin,
+        frame_id,
+    } = environment;
     let policy_context = effective_subresource_policy_context(scope, host, owner);
     let network_partition_key = active_subresource_network_partition_key(host, owner);
     let resolved_url =
-        resolve_context_url(&document_url, &url_str, None).map_err(XhrSendPrepareError::Url)?;
+        resolve_context_url(&base_url, &url_str, None).map_err(XhrSendPrepareError::Url)?;
     let (request_headers, cors_preflight_request_headers) = xhr_request_headers(
         scope,
         host,
@@ -90,6 +100,7 @@ pub(super) fn prepare_xhr_send_request<'s>(
         execution_context,
         resource_loader,
         document_url,
+        request_origin,
         network_partition_key,
         policy_context,
         resolved_url,

@@ -187,6 +187,12 @@ fn spawn_parser_blocking_script_source_load(
     else {
         return crate::planning::SharedScriptSourceLoad::spawn_with_request_resource_type(
             script,
+            page_vm
+                .vm()
+                .current_main_document_resource_loader()
+                .expect("parser script requires its Document authority")
+                .fetch_context()
+                .request_origin(),
             loader,
             resource_task_runner,
             Some(document_character_set),
@@ -197,6 +203,12 @@ fn spawn_parser_blocking_script_source_load(
     let document_url = page_vm.vm().document_runtime.document_url().clone();
     crate::planning::spawn_service_worker_aware_external_script_source_load(
         script,
+        page_vm
+            .vm()
+            .current_main_document_resource_loader()
+            .expect("parser script requires its Document authority")
+            .fetch_context()
+            .request_origin(),
         loader,
         resource_task_runner,
         Some(document_character_set),

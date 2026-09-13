@@ -1283,6 +1283,10 @@ impl super::stylesheet_blocking::StylesheetBlockingReadView for LiveRuntimeDomHo
         )
     }
 
+    fn stylesheet_base_url_clone(&self, node_id: NativeNodeId) -> Option<Url> {
+        <DomHost as super::stylesheet_blocking::StylesheetBlockingReadView>::stylesheet_base_url_clone(self.borrow(), node_id)
+    }
+
     fn document_node_id(&self) -> NativeNodeId {
         self.borrow().document_node_id()
     }

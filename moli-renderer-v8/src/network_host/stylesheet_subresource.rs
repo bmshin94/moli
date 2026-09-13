@@ -41,25 +41,21 @@ pub(crate) fn start_stylesheet_subresource_fetch(
     if !host.stylesheet_subresource_load_delay_is_current(binding) {
         return Err("stylesheet subresource document owner is stale".to_owned());
     }
-    let (owner, frame_id, document_url) = match binding.child_handle() {
-        None => (OwnerDispatchScope::Top, None, host.document_url().clone()),
-        Some(child_handle) => {
-            let task_owner = binding.owner();
-            let snapshot = host
-                .frame_owner_current_child_snapshot(child_handle)
-                .filter(|snapshot| {
-                    snapshot.scheduler_lane_id == task_owner.scheduler_lane_id
-                        && snapshot.local_window_id == task_owner.local_window_id
-                        && snapshot.document_id == task_owner.document_id
-                })
-                .ok_or_else(|| "stylesheet subresource child owner is stale".to_owned())?;
-            (
-                OwnerDispatchScope::Child(child_handle),
-                Some(snapshot.frame_id.0),
-                snapshot.document_url,
-            )
-        }
-    };
+    let owner = binding
+        .child_handle()
+        .map_or(OwnerDispatchScope::Top, OwnerDispatchScope::Child);
+    let resource_loader = host
+        .document_resource_loader_for_owner(binding.owner())
+        .ok_or_else(|| "stylesheet Document resource authority is unavailable".to_owned())?;
+    let environment = host
+        .subresource_request_environment(&resource_loader, owner)
+        .ok_or_else(|| "stylesheet Document request environment is unavailable".to_owned())?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        request_origin,
+        frame_id,
+        ..
+    } = environment;
     let resource_kind = resource.kind();
     if css_image.is_some() && resource_kind != StylesheetLoadBlockingResourceKind::Image {
         return Err("a stylesheet CSS image identity was bound to a non-image resource".to_owned());
@@ -137,13 +133,6 @@ pub(crate) fn start_stylesheet_subresource_fetch(
         return Ok(terminal);
     }
 
-    let Some(resource_loader) = host.document_resource_loader_for_owner(binding.owner()) else {
-        if let Some(identity) = css_image.as_ref() {
-            let _ = host.fail_stylesheet_css_image(identity);
-        }
-        host.settle_stylesheet_subresource_load_delay(binding);
-        return Ok(synchronous_failure_terminal(is_main_web_font, web_font));
-    };
     let loader = resource_loader.request_client().clone();
     if !loader.optional_resource_fetch_enabled(resource_type) {
         if let Some(identity) = css_image.as_ref() {
@@ -157,6 +146,7 @@ pub(crate) fn start_stylesheet_subresource_fetch(
     let request_cookie_report = observe_subresource_request_cookie_report(
         &loader,
         &document_url,
+        &request_origin,
         &request_url,
         "GET",
         credentials_mode,
@@ -164,7 +154,7 @@ pub(crate) fn start_stylesheet_subresource_fetch(
     let request = Request::new("GET", request_url.as_str(), None, Vec::new())
         .map_err(|error| error.to_string())?
         .with_initiator_url(&document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+        .with_request_origin(request_origin.clone())
         .with_resource_type(request_resource_type)
         .with_page_network_policy()
         .with_request_mode(request_mode)
@@ -228,7 +218,7 @@ pub(crate) fn start_stylesheet_subresource_fetch(
             request_cookie_report,
             network_context: AsyncSubresourceNetworkContext {
                 frame_id,
-                request_origin: moli_url::WebOrigin::from_url(&document_url),
+                request_origin: request_origin.clone(),
                 document_url,
                 resource_type,
                 policy_context,
@@ -268,7 +258,7 @@ pub(crate) fn start_stylesheet_subresource_fetch(
         internal_id,
         AsyncSubresourceNetworkContext {
             frame_id,
-            request_origin: moli_url::WebOrigin::from_url(&document_url),
+            request_origin: request_origin.clone(),
             document_url,
             resource_type,
             policy_context,

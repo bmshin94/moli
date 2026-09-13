@@ -885,10 +885,8 @@ impl ScriptVm {
                             document_url,
                             request_url,
                         );
-                    let source_load = source_load_request.start(
-                        document_loader.request_client(),
-                        document_loader.task_runner(),
-                    );
+                    let source_load =
+                        source_load_request.start(document_loader, document_loader.task_runner());
                     let completion_tx = self._context_host.borrow().resource_completion_sender();
                     let (pending_script_id, source_load) = source_load.into_parts();
                     let completed_source_load = source_load.clone();

@@ -4,7 +4,6 @@ use crate::network_host::{
     BLOCKED_BY_CLIENT_ERROR_TEXT, active_subresource_network_partition_key,
     effective_subresource_policy_context, local_url_response, merge_subresource_request_headers,
     observe_subresource_request_cookie_report, resolve_context_url, spawn_async_subresource_fetch,
-    subresource_request_scope_for_owner,
 };
 use crate::service_worker_runtime::{
     ServiceWorkerFetchDispatch, ServiceWorkerFetchRequestMetadata, ServiceWorkerRequestDestination,
@@ -45,6 +44,7 @@ struct PreparedEventSourceRequest {
     owner: crate::native_bridge::OwnerDispatchScope,
     resource_loader: crate::network::context::DocumentResourceLoader,
     document_url: url::Url,
+    request_origin: moli_url::WebOrigin,
     resolved_url: url::Url,
     request_headers: Vec<(String, String)>,
     cors_preflight_request_headers: Vec<(String, String)>,
@@ -90,14 +90,17 @@ pub(crate) fn event_source_constructor_callback<'s>(
         return;
     };
     let owner = execution_context.dispatch_scope();
-    let Some((_, document_url)) = subresource_request_scope_for_owner(scope, host, owner) else {
+    let Some(environment) = host
+        .document_resource_loader_for_dispatch_scope(owner)
+        .and_then(|loader| host.subresource_request_environment(&loader, owner))
+    else {
         throw_type_error(
             scope,
             "Failed to construct 'EventSource': Window execution context owner is retired.",
         );
         return;
     };
-    let resolved_url = match resolve_context_url(&document_url, &parsed.url, None) {
+    let resolved_url = match resolve_context_url(&environment.base_url, &parsed.url, None) {
         Ok(url) => url,
         Err(_) => {
             throw_dom_exception(
@@ -295,7 +298,7 @@ pub(crate) fn start_event_source_request<'s>(
         registered.internal_id,
         crate::types::AsyncSubresourceNetworkContext {
             frame_id: prepared.frame_id,
-            request_origin: moli_url::WebOrigin::from_url(&prepared.document_url),
+            request_origin: prepared.request_origin.clone(),
             document_url: prepared.document_url,
             resource_type: SubresourceResourceType::EventSource,
             policy_context: prepared.policy_context,
@@ -319,8 +322,15 @@ fn prepare_event_source_request<'s>(
     let resource_loader = host
         .document_resource_loader_for_dispatch_scope(owner)
         .ok_or_else(|| "EventSource: Document resource authority is unavailable".to_owned())?;
-    let (frame_id, document_url) = subresource_request_scope_for_owner(scope, host, owner)
+    let environment = host
+        .subresource_request_environment(&resource_loader, owner)
         .ok_or_else(|| "EventSource: Window execution context owner is retired".to_owned())?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        request_origin,
+        frame_id,
+        ..
+    } = environment;
     let resolved_url = event_source_connection_url(scope, event_source)
         .ok_or_else(|| "EventSource: URL state is unavailable".to_owned())
         .and_then(|value| url::Url::parse(&value).map_err(|error| error.to_string()))?;
@@ -342,6 +352,7 @@ fn prepare_event_source_request<'s>(
     let request_cookie_report = observe_subresource_request_cookie_report(
         resource_loader.request_client(),
         &document_url,
+        &request_origin,
         &resolved_url,
         "GET",
         credentials_mode,
@@ -352,6 +363,7 @@ fn prepare_event_source_request<'s>(
         owner,
         resource_loader,
         document_url,
+        request_origin,
         resolved_url,
         request_headers,
         cors_preflight_request_headers: host.extra_http_headers().to_vec(),
@@ -410,7 +422,7 @@ fn dispatch_service_worker_event_source<'s>(
         request_cookie_report: prepared.request_cookie_report.clone(),
         network_context: crate::types::AsyncSubresourceNetworkContext {
             frame_id: prepared.frame_id.clone(),
-            request_origin: moli_url::WebOrigin::from_url(&prepared.document_url),
+            request_origin: prepared.request_origin.clone(),
             document_url: prepared.document_url.clone(),
             resource_type: SubresourceResourceType::EventSource,
             policy_context: prepared.policy_context,
@@ -451,7 +463,7 @@ fn build_event_source_request(prepared: &PreparedEventSourceRequest) -> Result<R
     .map(|request| {
         request
             .with_initiator_url(&prepared.document_url)
-            .with_request_origin(moli_url::WebOrigin::from_url(&prepared.document_url))
+            .with_request_origin(prepared.request_origin.clone())
             .with_request_mode(RequestMode::Cors)
             .with_credentials_mode(prepared.credentials_mode)
             .with_network_partition_key(prepared.network_partition_key.clone())

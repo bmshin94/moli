@@ -52,9 +52,11 @@ pub(crate) fn navigator_send_beacon_callback<'s>(
         resource_loader,
         frame_id,
         document_url,
+        base_url,
+        request_origin,
         network_partition_key,
     } = request_context;
-    let resolved_url = match resolve_context_url(&document_url, &raw_url, None) {
+    let resolved_url = match resolve_context_url(&base_url, &raw_url, None) {
         Ok(url) => url,
         Err(_) => {
             crate::util::throw_type_error(scope, "The URL argument is ill-formed or unsupported.");
@@ -75,6 +77,7 @@ pub(crate) fn navigator_send_beacon_callback<'s>(
     let request_cookie_report = observe_subresource_request_cookie_report(
         resource_loader.request_client(),
         &document_url,
+        &request_origin,
         &resolved_url,
         "POST",
         RequestCredentialsMode::Include,
@@ -130,7 +133,7 @@ pub(crate) fn navigator_send_beacon_callback<'s>(
         match Request::new_bytes("POST", resolved_url.as_str(), body, request_headers.clone()) {
             Ok(request) => request
                 .with_initiator_url(&document_url)
-                .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+                .with_request_origin(request_origin.clone())
                 .with_resource_type(RequestResourceType::Beacon)
                 .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Beacon)
                 .with_request_mode(RequestMode::NoCors)
@@ -146,7 +149,7 @@ pub(crate) fn navigator_send_beacon_callback<'s>(
     let cancel_handle = FetchCancelHandle::new();
     let network_context = AsyncSubresourceNetworkContext {
         frame_id: info.frame_id.clone(),
-        request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+        request_origin: request_origin.clone(),
         document_url: info.document_url.clone(),
         resource_type: info.resource_type,
         policy_context: Default::default(),
@@ -192,6 +195,8 @@ pub(crate) fn send_link_audit_ping(
         resource_loader,
         frame_id,
         document_url,
+        base_url: _,
+        request_origin,
         network_partition_key,
     } = request_context;
     let mut request_headers = vec![
@@ -208,6 +213,7 @@ pub(crate) fn send_link_audit_ping(
     let request_cookie_report = observe_subresource_request_cookie_report(
         resource_loader.request_client(),
         &document_url,
+        &request_origin,
         &ping_url,
         "POST",
         RequestCredentialsMode::Include,
@@ -263,7 +269,7 @@ pub(crate) fn send_link_audit_ping(
     ) {
         Ok(request) => request
             .with_initiator_url(&document_url)
-            .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+            .with_request_origin(request_origin.clone())
             .with_resource_type(RequestResourceType::Ping)
             .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Ping)
             .with_request_mode(RequestMode::NoCors)
@@ -279,7 +285,7 @@ pub(crate) fn send_link_audit_ping(
     let cancel_handle = FetchCancelHandle::new();
     let network_context = AsyncSubresourceNetworkContext {
         frame_id: info.frame_id.clone(),
-        request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+        request_origin: request_origin.clone(),
         document_url: info.document_url.clone(),
         resource_type: info.resource_type,
         policy_context: Default::default(),
@@ -311,6 +317,8 @@ struct WindowPingRequestContext {
     resource_loader: crate::network::context::DocumentResourceLoader,
     frame_id: Option<String>,
     document_url: url::Url,
+    base_url: url::Url,
+    request_origin: moli_url::WebOrigin,
     network_partition_key: Option<String>,
 }
 
@@ -323,12 +331,20 @@ fn window_ping_request_context(
     let resource_loader = host
         .document_resource_loader_for_dispatch_scope(owner)?
         .clone();
-    let (frame_id, document_url) = subresource_request_scope_for_owner(scope, host, owner)?;
+    let environment = host.subresource_request_environment(&resource_loader, owner)?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        base_url,
+        request_origin,
+        frame_id,
+    } = environment;
     Some(WindowPingRequestContext {
         execution_context,
         resource_loader,
         frame_id,
         document_url,
+        base_url,
+        request_origin,
         network_partition_key: active_subresource_network_partition_key(host, owner),
     })
 }

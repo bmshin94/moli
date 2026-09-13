@@ -134,9 +134,35 @@ impl DocumentRuntime {
             .current_document_resource_loader()
             .expect("stylesheet fetch requires its committed Document authority");
         crate::stylesheet_blocking::RendererStylesheetFetcher::new(
-            authority.request_client().clone(),
-            authority.task_runner(),
+            authority,
             self.stylesheet_service_worker_fetch_context(),
+        )
+    }
+
+    pub(super) fn stylesheet_fetcher_for_owner(
+        &self,
+        owner: DomHandle,
+        host_ptr: *mut JsContextHost,
+    ) -> crate::stylesheet_blocking::RendererStylesheetFetcher {
+        if host_ptr.is_null() {
+            return self.stylesheet_fetcher();
+        }
+        let host = unsafe { &*host_ptr };
+        let scope = host
+            .owner_dispatch_scope_for_node(owner)
+            .expect("stylesheet owner must have a Document scope");
+        let loader = host
+            .document_resource_loader_for_dispatch_scope(scope)
+            .expect("stylesheet owner must retain its Document authority");
+        let client_id = host.service_worker_client_id_for_subresource_owner(scope);
+        crate::stylesheet_blocking::RendererStylesheetFetcher::new(
+            loader,
+            Some(
+                crate::stylesheet_blocking::ServiceWorkerStylesheetFetchContext {
+                    browser_context_runtime: host.browser_context_runtime(),
+                    client_id,
+                },
+            ),
         )
     }
 
@@ -149,8 +175,7 @@ impl DocumentRuntime {
             .current_document_resource_loader()
             .expect("stylesheet preload requires its committed Document authority");
         crate::stylesheet_blocking::RendererStylesheetFetcher::for_speculative_preload(
-            authority.request_client().clone(),
-            authority.task_runner(),
+            authority,
             self.stylesheet_service_worker_fetch_context(),
             request_resource_type,
             link_preload,

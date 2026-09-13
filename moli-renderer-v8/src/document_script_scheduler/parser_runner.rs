@@ -82,13 +82,14 @@ impl<Owner: Copy> ParserDeferredClassicSourceLoadRequest<Owner> {
 
     pub(crate) fn start(
         self,
-        loader: &crate::network::ResourceRequestClient,
+        loader: &crate::network::context::DocumentResourceLoader,
         task_runner: crate::network::RendererResourceTaskRunner,
     ) -> ParserDeferredClassicSourceLoad<Owner> {
         let source_load = self.shared_load.unwrap_or_else(|| {
             SharedScriptSourceLoad::spawn_with_request_resource_type(
                 self.script,
-                loader.clone(),
+                loader.fetch_context().request_origin(),
+                loader.request_client().clone(),
                 task_runner,
                 self.document_character_set,
                 None,

@@ -7,6 +7,7 @@ use crate::discovery::DocumentBlockingStylesheetSignature;
 use crate::fetcher::{StylesheetFetch, StylesheetFetchOptions, StylesheetFetchTerminal};
 
 pub(crate) struct StylesheetFetchEntry {
+    pub(crate) resource_cache_scope: u64,
     pub(crate) signature: StylesheetFetchSignature,
     pub(crate) fetch: StylesheetFetch,
 }

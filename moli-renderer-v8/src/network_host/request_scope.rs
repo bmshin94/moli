@@ -6,20 +6,28 @@ pub(in crate::network_host) use crate::context_bootstrap::CHILD_BROWSING_CONTEXT
 pub(in crate::network_host) fn observe_subresource_request_cookie_report(
     loader: &crate::network::ResourceRequestClient,
     document_url: &url::Url,
+    request_origin: &moli_url::WebOrigin,
     request_url: &url::Url,
     method: &str,
     credentials_mode: moli_fetch::RequestCredentialsMode,
 ) -> Option<moli_cookie_jar::StoredCookieQueryReport> {
-    let request = Request::new(method, request_url.as_str(), None, Vec::new())
-        .ok()?
-        .with_initiator_url(document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(document_url))
-        .with_credentials_mode(credentials_mode);
+    let mut request = Request::new_browser(
+        method,
+        request_url.clone(),
+        None,
+        Vec::new(),
+        request_origin.clone(),
+    )
+    .with_initiator_url(document_url)
+    .with_credentials_mode(credentials_mode);
+    if let Some(context) = loader.browser_site_context() {
+        request = request.with_browser_site_context(context.clone());
+    }
     if !request.allows_credentials_for_url(request_url) {
         return None;
     }
     let request_url = request.url.clone();
-    let request_context = request.cookie_context;
+    let request_context = request.network_cookie_context();
     observe_cookie_access_report_for_request(&loader.cookie_store(), &request_url, request_context)
         .ok()
         .flatten()
@@ -133,22 +141,6 @@ pub(in crate::network_host) fn effective_subresource_request_scope(
         host.document_url().clone(),
         crate::native_bridge::OwnerDispatchScope::Top,
     )
-}
-
-pub(in crate::network_host) fn subresource_request_scope_for_owner(
-    scope: &mut v8::PinScope<'_, '_>,
-    host: &JsContextHost,
-    owner: crate::native_bridge::OwnerDispatchScope,
-) -> Option<(Option<String>, url::Url)> {
-    match owner {
-        crate::native_bridge::OwnerDispatchScope::Top => Some((None, host.document_url().clone())),
-        crate::native_bridge::OwnerDispatchScope::Child(handle) => host
-            .child_browsing_context_request_scope(handle)
-            .map(|(frame_id, document_url)| (Some(frame_id), document_url)),
-        crate::native_bridge::OwnerDispatchScope::LightweightPopup(popup_id) => host
-            .lightweight_popup_request_base_url(scope, popup_id)
-            .map(|document_url| (None, document_url)),
-    }
 }
 
 pub(in crate::network_host) fn effective_subresource_referrer_policy(

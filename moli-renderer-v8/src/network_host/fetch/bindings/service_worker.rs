@@ -29,6 +29,7 @@ pub(super) fn dispatch_service_worker_fetch(
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
         &prepared.document_url,
+        &prepared.request_origin,
         &prepared.resolved_url,
         &prepared.method,
         prepared.credentials_mode,

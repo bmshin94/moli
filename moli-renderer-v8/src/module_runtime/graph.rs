@@ -348,12 +348,12 @@ impl NativeModuleGraphFetchRequest {
         self.fetch_metadata.request_metadata.integrity.as_deref()
     }
 
-    fn request(&self) -> anyhow::Result<Request> {
+    fn request(&self, request_origin: &moli_url::WebOrigin) -> anyhow::Result<Request> {
         let request = Request::new("GET", self.source_url.as_str(), None, vec![])
             .expect("module graph URL should already be parsed")
             .with_page_network_policy()
             .with_initiator_url(&self.initiator_url)
-            .with_request_origin(moli_url::WebOrigin::from_url(&self.initiator_url))
+            .with_request_origin(request_origin.clone())
             .with_credentials_mode(self.fetch_metadata.credentials_mode)
             .with_script_fetch_metadata(self.fetch_metadata.request_metadata.clone());
         Ok(match self.kind {
@@ -373,6 +373,7 @@ impl NativeModuleGraphFetchRequest {
         &self,
         loader: &ResourceRequestClient,
         load: crate::network::loads::ResourceLoadLease,
+        request_origin: moli_url::WebOrigin,
         callback: F,
     ) -> anyhow::Result<()>
     where
@@ -382,7 +383,7 @@ impl NativeModuleGraphFetchRequest {
             ) + Send
             + 'static,
     {
-        self.fetch_source_callback_inner(loader, load, callback)
+        self.fetch_source_callback_inner(loader, load, request_origin, callback)
     }
 
     pub(crate) fn fetch_source_for_document<F>(
@@ -405,13 +406,19 @@ impl NativeModuleGraphFetchRequest {
             )
             .ok_or_else(|| anyhow::anyhow!("Document detached before module fetch registration"))?;
         let request_client = load.request_client();
-        self.fetch_source_callback_with_load(&request_client, load, callback)
+        self.fetch_source_callback_with_load(
+            &request_client,
+            load,
+            loader.fetch_context().request_origin(),
+            callback,
+        )
     }
 
     fn fetch_source_callback_inner<F>(
         &self,
         loader: &ResourceRequestClient,
         load: crate::network::loads::ResourceLoadLease,
+        request_origin: moli_url::WebOrigin,
         callback: F,
     ) -> anyhow::Result<()>
     where
@@ -424,8 +431,7 @@ impl NativeModuleGraphFetchRequest {
         let source_url = self.source_url.clone();
         let kind = self.kind;
         let integrity = self.fetch_metadata.request_metadata.integrity.clone();
-        let request = self.request()?;
-        let initiator_url = self.initiator_url.clone();
+        let request = self.request(&request_origin)?;
         let request_mode = request.request_mode;
         let credentials_mode = request.credentials_mode;
         let completion = move |response: anyhow::Result<moli_fetch::Response>| {
@@ -470,12 +476,12 @@ impl NativeModuleGraphFetchRequest {
                         );
                     let (head, _, body_bytes) = response.into_parts();
                     crate::network_host::validate_cors_response_chain(
-                        &initiator_url,
+                        &request_origin,
                         &head,
                         credentials_mode,
                     ).map_err(|error| ModuleLoadError::new(ModuleLoadStage::Fetch, error).message().to_owned())?;
                     let response_is_eligible = crate::network_host::network_response_filter(
-                        &initiator_url,
+                        &request_origin,
                         &head,
                         request_mode,
                     ).is_none();
@@ -2659,7 +2665,9 @@ mod tests {
             ModuleFetchMetadata::default(),
             ModuleKind::Json,
         )
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("native JSON module request should build");
 
         assert_eq!(
@@ -2676,7 +2684,9 @@ mod tests {
             ModuleFetchMetadata::default(),
             ModuleKind::Css,
         )
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("native CSS module request should build");
 
         assert_eq!(
@@ -2701,7 +2711,9 @@ mod tests {
         );
         let graph_request = single_fetch.fetch_request();
         let fetch_request = graph_request
-            .request()
+            .request(&moli_url::WebOrigin::from_url(&url(
+                "https://app.example.test/page",
+            )))
             .expect("modulepreload JSON fetch request should build");
 
         assert_eq!(
@@ -2722,7 +2734,9 @@ mod tests {
         );
         let graph_request = single_fetch.fetch_request();
         let fetch_request = graph_request
-            .request()
+            .request(&moli_url::WebOrigin::from_url(&url(
+                "https://app.example.test/page",
+            )))
             .expect("modulepreload CSS fetch request should build");
 
         assert_eq!(
@@ -2953,7 +2967,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         assert_eq!(
@@ -2992,7 +3008,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         assert_eq!(request.credentials_mode, RequestCredentialsMode::Include);
@@ -3039,7 +3057,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         let request_metadata = request
@@ -3073,7 +3093,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         assert_eq!(request.credentials_mode, RequestCredentialsMode::Include);
@@ -3126,7 +3148,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         let request_metadata = request
@@ -3171,7 +3195,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         let request_metadata = request
@@ -3205,7 +3231,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         let request_metadata = request
@@ -3232,7 +3260,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         assert_eq!(
@@ -3889,9 +3919,14 @@ import "./c.mjs";
                 None,
             )
             .expect("module fetch test load should register");
-        request.fetch_source_callback_with_load(loader, load, move |result, network_result| {
-            let _ = tx.send((result, network_result));
-        })?;
+        request.fetch_source_callback_with_load(
+            loader,
+            load,
+            moli_url::WebOrigin::from_url(request.initiator_url()),
+            move |result, network_result| {
+                let _ = tx.send((result, network_result));
+            },
+        )?;
         let (result, network_result) = rx.await?;
         let source_result = result.map_err(anyhow::Error::msg);
         let network_result = network_result.expect("module fetch should record network result");
@@ -3941,7 +3976,9 @@ import "./c.mjs";
             module_key: None,
             dependency: None,
         }
-        .request()
+        .request(&moli_url::WebOrigin::from_url(&url(
+            "https://app.example.test/page",
+        )))
         .expect("request should build");
 
         assert_eq!(request.credentials_mode, RequestCredentialsMode::SameOrigin);

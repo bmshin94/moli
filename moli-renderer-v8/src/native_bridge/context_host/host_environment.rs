@@ -524,6 +524,34 @@ impl JsContextHost {
         self.document_resource_loader_for_window_owner(target.owner())
     }
 
+    pub(crate) fn subresource_request_environment(
+        &self,
+        loader: &DocumentResourceLoader,
+        dispatch_scope: crate::native_bridge::OwnerDispatchScope,
+    ) -> Option<crate::network::context::SubresourceRequestEnvironment> {
+        use crate::native_bridge::OwnerDispatchScope;
+        let context = loader.fetch_context();
+        let target = self.current_window_document_task_target_for_dispatch_scope(dispatch_scope)?;
+        if target.owner() != context.owner() {
+            return None;
+        }
+        let (document, frame_id) = match dispatch_scope {
+            OwnerDispatchScope::Top => (self.document_handle(), None),
+            OwnerDispatchScope::Child(handle) => (
+                self.child_browsing_context_document_handle(handle)?,
+                Some(self.frame_owner_current_child_snapshot(handle)?.frame_id.0),
+            ),
+            OwnerDispatchScope::LightweightPopup(popup_id) => {
+                (self.lightweight_popup_document_handle(popup_id)?, None)
+            }
+        };
+        let base_url = self
+            .dom_host()
+            .document_base_url_for_handle(document)
+            .unwrap_or_else(|| context.base_url().clone());
+        Some(context.subresource_environment(base_url, frame_id))
+    }
+
     pub(crate) fn parent_document_resource_loader_for_child_context(
         &self,
         handle: DomHandle,

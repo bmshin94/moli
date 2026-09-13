@@ -33,22 +33,33 @@ pub(crate) struct ServiceWorkerStylesheetFetchContext {
 
 #[derive(Clone)]
 pub(crate) struct RendererStylesheetFetcher {
-    loader: ResourceRequestClient,
-    task_runner: crate::network::RendererResourceTaskRunner,
+    loader: crate::network::context::DocumentResourceLoader,
     service_worker_context: Option<ServiceWorkerStylesheetFetchContext>,
     request_resource_type: moli_fetch::RequestResourceType,
     link_preload: bool,
 }
 
 impl RendererStylesheetFetcher {
+    pub(crate) fn resource_loader(&self) -> &crate::network::context::DocumentResourceLoader {
+        &self.loader
+    }
+
+    pub(crate) fn with_preload_metadata(
+        mut self,
+        resource_type: moli_fetch::RequestResourceType,
+        link_preload: bool,
+    ) -> Self {
+        self.request_resource_type = resource_type;
+        self.link_preload = link_preload;
+        self
+    }
+
     pub(crate) fn new(
-        loader: ResourceRequestClient,
-        task_runner: crate::network::RendererResourceTaskRunner,
+        loader: crate::network::context::DocumentResourceLoader,
         service_worker_context: Option<ServiceWorkerStylesheetFetchContext>,
     ) -> Self {
         Self {
             loader,
-            task_runner,
             service_worker_context,
             request_resource_type: moli_fetch::RequestResourceType::CssStyleSheet,
             link_preload: false,
@@ -56,15 +67,13 @@ impl RendererStylesheetFetcher {
     }
 
     pub(crate) fn for_speculative_preload(
-        loader: ResourceRequestClient,
-        task_runner: crate::network::RendererResourceTaskRunner,
+        loader: crate::network::context::DocumentResourceLoader,
         service_worker_context: Option<ServiceWorkerStylesheetFetchContext>,
         request_resource_type: moli_fetch::RequestResourceType,
         link_preload: bool,
     ) -> Self {
         Self {
             loader,
-            task_runner,
             service_worker_context,
             request_resource_type,
             link_preload,
@@ -73,8 +82,11 @@ impl RendererStylesheetFetcher {
 }
 
 impl StylesheetFetcher for RendererStylesheetFetcher {
+    fn resource_cache_scope(&self) -> u64 {
+        self.loader.identity().value()
+    }
     fn spawn_stylesheet_task(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
-        self.task_runner.spawn(task);
+        self.loader.spawn_resource_task(task);
     }
 
     fn fetch_stylesheet_resource(
@@ -83,21 +95,23 @@ impl StylesheetFetcher for RendererStylesheetFetcher {
         url: Url,
         options: StylesheetFetchOptions,
     ) -> Pin<Box<dyn Future<Output = StylesheetFetchTerminal> + Send + 'static>> {
-        if self.loader.author_styles_disabled() {
+        if self.loader.request_client().author_styles_disabled() {
             return Box::pin(async move {
                 StylesheetFetchTerminal::network_error(format!(
                     "failed to fetch stylesheet `{url}`: net::ERR_BLOCKED_BY_CLIENT"
                 ))
             });
         }
-        let loader = self.loader.clone();
-        let resource_task_runner = self.task_runner.clone();
+        let loader = self.loader.request_client().clone();
+        let request_origin = self.loader.fetch_context().request_origin();
+        let resource_task_runner = self.loader.task_runner();
         let service_worker_context = self.service_worker_context.clone();
         let request_resource_type = self.request_resource_type;
         let link_preload = self.link_preload;
         Box::pin(async move {
             fetch_stylesheet_readiness_with_service_worker(
                 loader,
+                request_origin,
                 resource_task_runner,
                 document_url,
                 url,
@@ -133,6 +147,7 @@ impl StylesheetFetcher for RendererStylesheetFetcher {
 
 pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
     loader: ResourceRequestClient,
+    request_origin: moli_url::WebOrigin,
     resource_task_runner: crate::network::RendererResourceTaskRunner,
     document_url: Url,
     url: Url,
@@ -143,6 +158,7 @@ pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
 ) -> StylesheetFetchTerminal {
     let request = stylesheet_readiness_request(
         &document_url,
+        &request_origin,
         &url,
         &options,
         request_resource_type,
@@ -168,7 +184,7 @@ pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
                     filter: response.response_filter,
                 };
                 return stylesheet_terminal_from_response(
-                    &document_url,
+                    &request_origin,
                     &url,
                     &options,
                     *response.response,
@@ -183,7 +199,7 @@ pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
             }
         }
     }
-    fetch_stylesheet_readiness_with_request(loader, document_url, url, options, request).await
+    fetch_stylesheet_readiness_with_request(loader, request_origin, url, options, request).await
 }
 
 pub(crate) fn stylesheet_request_mode_and_credentials(
@@ -210,6 +226,7 @@ pub(crate) fn apply_stylesheet_request_parameters(
 
 fn stylesheet_readiness_request(
     document_url: &Url,
+    request_origin: &moli_url::WebOrigin,
     url: &Url,
     options: &StylesheetFetchOptions,
     resource_type: moli_fetch::RequestResourceType,
@@ -220,7 +237,7 @@ fn stylesheet_readiness_request(
         .expect("stylesheet url should already be parsed")
         .with_page_network_policy()
         .with_initiator_url(document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(document_url))
+        .with_request_origin(request_origin.clone())
         .with_resource_type(resource_type);
     let captured_fetch_priority =
         moli_fetch::FetchPriorityHint::from_attribute(options.fetch_priority());
@@ -236,14 +253,14 @@ fn stylesheet_readiness_request(
 
 async fn fetch_stylesheet_readiness_with_request(
     loader: ResourceRequestClient,
-    document_url: Url,
+    request_origin: moli_url::WebOrigin,
     url: Url,
     options: StylesheetFetchOptions,
     request: moli_fetch::Request,
 ) -> StylesheetFetchTerminal {
     match loader.fetch_text_stream(request).await {
         Ok(response) => stylesheet_terminal_from_response(
-            &document_url,
+            &request_origin,
             &url,
             &options,
             crate::protocol_types::NavigationResponse::from(response),
@@ -264,11 +281,13 @@ enum StylesheetResponseProvenance {
 }
 
 impl StylesheetResponseProvenance {
-    fn is_cors_same_origin(self, document_url: &Url, head: &moli_fetch::ResponseHead) -> bool {
+    fn is_cors_same_origin(
+        self,
+        request_origin: &moli_url::WebOrigin,
+        head: &moli_fetch::ResponseHead,
+    ) -> bool {
         match self {
-            Self::Network => !head
-                .url_list()
-                .has_cross_origin_url(&moli_url::WebOrigin::from_url(document_url)),
+            Self::Network => !head.url_list().has_cross_origin_url(request_origin),
             Self::ServiceWorker { filter } => !matches!(
                 filter,
                 Some(
@@ -281,7 +300,7 @@ impl StylesheetResponseProvenance {
 }
 
 fn stylesheet_terminal_from_response(
-    document_url: &Url,
+    request_origin: &moli_url::WebOrigin,
     request_url: &Url,
     options: &StylesheetFetchOptions,
     response: crate::protocol_types::NavigationResponse,
@@ -303,7 +322,7 @@ fn stylesheet_terminal_from_response(
             StylesheetResponseProvenance::ServiceWorker { .. } => Ok(()),
             StylesheetResponseProvenance::Network => {
                 crate::network_host::validate_cors_response_chain(
-                    document_url,
+                    request_origin,
                     &head,
                     credentials_mode,
                 )
@@ -311,7 +330,7 @@ fn stylesheet_terminal_from_response(
             }
         });
     let origin_clean = cors_usability.as_ref().map_or_else(
-        || response_provenance.is_cors_same_origin(document_url, &head),
+        || response_provenance.is_cors_same_origin(request_origin, &head),
         Result::is_ok,
     );
     let usability = if !(200..=299).contains(&response.status) {
@@ -417,6 +436,7 @@ mod tests {
 
         let request = stylesheet_readiness_request(
             &document_url,
+            &moli_url::WebOrigin::from_url(&document_url),
             &stylesheet_url,
             &options,
             moli_fetch::RequestResourceType::CssStyleSheet,
@@ -456,6 +476,7 @@ mod tests {
         let stylesheet_url = Url::parse("https://cdn.example.test/app.css").unwrap();
         let request = stylesheet_readiness_request(
             &document_url,
+            &moli_url::WebOrigin::from_url(&document_url),
             &stylesheet_url,
             &StylesheetFetchOptions::default(),
             moli_fetch::RequestResourceType::CssStyleSheet,
@@ -500,7 +521,7 @@ mod tests {
         );
 
         let terminal = stylesheet_terminal_from_response(
-            &document_url,
+            &moli_url::WebOrigin::from_url(&document_url),
             &stylesheet_url,
             &options,
             response,
@@ -532,7 +553,7 @@ mod tests {
         );
 
         let terminal = stylesheet_terminal_from_response(
-            &document_url,
+            &moli_url::WebOrigin::from_url(&document_url),
             &stylesheet_url,
             &options,
             response,
@@ -561,7 +582,7 @@ mod tests {
         );
 
         let terminal = stylesheet_terminal_from_response(
-            &document_url,
+            &moli_url::WebOrigin::from_url(&document_url),
             &stylesheet_url,
             &StylesheetFetchOptions::default(),
             response,
@@ -593,7 +614,7 @@ mod tests {
             stylesheet_response(&response_url, Some("text/css"), "body { color: green; }");
 
         let terminal = stylesheet_terminal_from_response(
-            &document_url,
+            &moli_url::WebOrigin::from_url(&document_url),
             &request_url,
             &StylesheetFetchOptions::default(),
             response,
@@ -624,7 +645,7 @@ mod tests {
             stylesheet_response(&request_url, Some("text/css"), "body { color: green; }");
 
         let terminal = stylesheet_terminal_from_response(
-            &document_url,
+            &moli_url::WebOrigin::from_url(&document_url),
             &request_url,
             &options,
             response,

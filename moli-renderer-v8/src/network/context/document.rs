@@ -21,6 +21,12 @@ static NEXT_DOCUMENT_RESOURCE_LOADER_ID: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DocumentResourceLoaderIdentity(u64);
 
+impl DocumentResourceLoaderIdentity {
+    pub(crate) fn value(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DocumentResourceLoaderState {
     Active,

@@ -2499,22 +2499,30 @@ async fn main_parser_async_classic_owns_load_delay_from_discovery_through_settle
         let mut scheduler = crate::document_script_scheduler::DocumentScriptScheduler::new();
         let resource_task_runner = page_vm.resource_task_runner();
 
-        assert!(scheduler.accept_parser_discovered_async_candidate(
-            script.clone(),
-            &loader,
-            resource_task_runner,
-            Some(shared_load),
-            None,
-            |_| {
+        assert!(
+            scheduler.accept_parser_discovered_async_candidate(
+                script.clone(),
+                &loader,
                 page_vm
-                    .vm_mut()
-                    .accept_main_document_script_load_delay_binding(
-                        owner,
-                        crate::frame_owner_model::MainDocumentScriptLoadDelayKind::Classic,
-                    )
-                    .expect("parser discovery should bind classic lifecycle ownership")
-            },
-        ));
+                    .vm()
+                    .current_main_document_resource_loader()
+                    .unwrap()
+                    .fetch_context()
+                    .request_origin(),
+                resource_task_runner,
+                Some(shared_load),
+                None,
+                |_| {
+                    page_vm
+                        .vm_mut()
+                        .accept_main_document_script_load_delay_binding(
+                            owner,
+                            crate::frame_owner_model::MainDocumentScriptLoadDelayKind::Classic,
+                        )
+                        .expect("parser discovery should bind classic lifecycle ownership")
+                },
+            )
+        );
         assert_eq!(
             page_vm
                 .vm()

@@ -38,8 +38,7 @@ impl JsContextHost {
                     crate::native_bridge::context_host::OwnerDispatchScope::Child(child_handle),
                 );
                 RendererStylesheetFetcher::new(
-                    loader.request_client().clone(),
-                    loader.task_runner(),
+                    loader,
                     Some(ServiceWorkerStylesheetFetchContext {
                         browser_context_runtime: self.browser_context_runtime.clone(),
                         client_id,

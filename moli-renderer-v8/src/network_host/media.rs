@@ -36,26 +36,29 @@ pub(crate) fn start_media_element_resource_fetch(
     if !host.pending_media_load_sequence_is_current(media_handle, sequence) {
         return Err("media lifecycle sequence owner is stale".to_owned());
     }
-    let (owner, frame_id, document_url) = match pending.owner() {
+    let owner = match pending.owner() {
         PendingMediaLoadOwner::Main { owner, .. }
             if host.main_document_task_owner_is_current(owner) =>
         {
-            (OwnerDispatchScope::Top, None, host.document_url().clone())
+            OwnerDispatchScope::Top
         }
         PendingMediaLoadOwner::Child { child_handle, .. } => {
-            let snapshot = host
-                .frame_owner_current_child_snapshot(child_handle)
-                .ok_or_else(|| "media child request scope is unavailable".to_owned())?;
-            (
-                OwnerDispatchScope::Child(child_handle),
-                Some(snapshot.frame_id.0),
-                snapshot.document_url,
-            )
+            OwnerDispatchScope::Child(child_handle)
         }
-        PendingMediaLoadOwner::Main { .. } | PendingMediaLoadOwner::LoadNeutral => {
-            return Err("media lifecycle sequence has no current request owner".to_owned());
-        }
+        _ => return Err("media request owner is stale".to_owned()),
     };
+    let Some(resource_loader) = host.document_resource_loader_for_dispatch_scope(owner) else {
+        return Ok(MediaElementResourceFetchStart::PolicySkipped);
+    };
+    let environment = host
+        .subresource_request_environment(&resource_loader, owner)
+        .ok_or_else(|| "media Document request environment is unavailable".to_owned())?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        request_origin,
+        frame_id,
+        ..
+    } = environment;
     let element = host
         .dom_host()
         .node(media_handle)
@@ -92,9 +95,6 @@ pub(crate) fn start_media_element_resource_fetch(
         return Ok(MediaElementResourceFetchStart::Local { successful });
     }
 
-    let Some(resource_loader) = host.document_resource_loader_for_dispatch_scope(owner) else {
-        return Ok(MediaElementResourceFetchStart::PolicySkipped);
-    };
     let loader = resource_loader.request_client().clone();
     if !loader.optional_resource_fetch_enabled(resource_type) {
         return Ok(MediaElementResourceFetchStart::PolicySkipped);
@@ -104,6 +104,7 @@ pub(crate) fn start_media_element_resource_fetch(
     let request_cookie_report = observe_subresource_request_cookie_report(
         &loader,
         &document_url,
+        &request_origin,
         &request_url,
         "GET",
         credentials_mode,
@@ -111,7 +112,7 @@ pub(crate) fn start_media_element_resource_fetch(
     let request = Request::new("GET", request_url.as_str(), None, Vec::new())
         .map_err(|error| error.to_string())?
         .with_initiator_url(&document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+        .with_request_origin(request_origin.clone())
         .with_resource_type(RequestResourceType::Media)
         .with_page_network_policy()
         .with_request_mode(request_mode)
@@ -174,7 +175,7 @@ pub(crate) fn start_media_element_resource_fetch(
             request_cookie_report,
             network_context: AsyncSubresourceNetworkContext {
                 frame_id,
-                request_origin: moli_url::WebOrigin::from_url(&document_url),
+                request_origin: request_origin.clone(),
                 document_url,
                 resource_type,
                 policy_context,
@@ -214,7 +215,7 @@ pub(crate) fn start_media_element_resource_fetch(
         internal_id,
         AsyncSubresourceNetworkContext {
             frame_id,
-            request_origin: moli_url::WebOrigin::from_url(&document_url),
+            request_origin: request_origin.clone(),
             document_url,
             resource_type,
             policy_context,

@@ -74,7 +74,7 @@ impl ScriptVm {
         let request = Request::new("GET", manifest_url.as_str(), None, request_headers.clone())
             .expect("a resolved app manifest URL should remain valid")
             .with_initiator_url(&document_url)
-            .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+            .with_request_origin(resource_loader.fetch_context().request_origin())
             .with_request_mode(RequestMode::Cors)
             .with_credentials_mode(credentials_mode)
             .with_redirect_mode(RequestRedirectMode::Follow)
@@ -83,6 +83,7 @@ impl ScriptVm {
             .with_page_network_policy();
         RendererAppManifestLoadPreparation::Ready(Box::new(RendererPreparedAppManifestLoad::new(
             document_url,
+            resource_loader.fetch_context().request_origin(),
             manifest_url,
             link_identity,
             RendererPreparedNetworkResourceLoad::new(

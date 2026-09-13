@@ -50,7 +50,13 @@ pub(crate) fn start_scanned_image_preload(
     {
         return ScannedImagePreloadStart::Disabled;
     }
-    let document_url = host.document_url().clone();
+    let Some(environment) =
+        host.subresource_request_environment(&resource_loader, OwnerDispatchScope::Top)
+    else {
+        return ScannedImagePreloadStart::Disabled;
+    };
+    let document_url = environment.document_url;
+    let request_origin = environment.request_origin;
     let client_id = host.service_worker_client_id_for_subresource_owner(OwnerDispatchScope::Top);
     if host
         .service_worker_controller_for_fetch(client_id, &document_url, &request_url)
@@ -78,7 +84,7 @@ pub(crate) fn start_scanned_image_preload(
     let request = match Request::new("GET", request_url.as_str(), None, request_headers) {
         Ok(request) => request
             .with_initiator_url(&document_url)
-            .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+            .with_request_origin(request_origin.clone())
             .with_resource_type(RequestResourceType::Image)
             .with_page_network_policy()
             .with_request_mode(RequestMode::NoCors)
@@ -134,7 +140,7 @@ pub(crate) fn start_scanned_image_preload(
         let response_is_decode_eligible = result.as_ref().is_ok_and(|response| {
             response.redirect_chain.is_empty()
                 && validate_fetch_response_security_policy_with_body(
-                    &document_url,
+                    &request_origin,
                     &response.head(),
                     response.body_bytes(),
                     RequestMode::NoCors,
@@ -166,27 +172,30 @@ pub(crate) fn start_image_element_resource_fetch(
     if !host.pending_image_load_event_is_current(image_handle, pending) {
         return Err("image lifecycle sequence owner is stale".to_owned());
     }
-    let (owner, frame_id, document_url) = match pending.owner() {
+    let owner = match pending.owner() {
         PendingImageLoadEventOwner::Main(binding)
             if host.main_document_task_owner_is_current(binding.owner()) =>
         {
-            (OwnerDispatchScope::Top, None, host.document_url().clone())
+            OwnerDispatchScope::Top
         }
         PendingImageLoadEventOwner::Child(binding) => {
-            let snapshot = host
-                .frame_owner_current_child_snapshot(binding.child_handle())
-                .ok_or_else(|| "image child request scope is unavailable".to_owned())?;
-            (
-                OwnerDispatchScope::Child(binding.child_handle()),
-                Some(snapshot.frame_id.0),
-                snapshot.document_url,
-            )
+            OwnerDispatchScope::Child(binding.child_handle())
         }
         PendingImageLoadEventOwner::Main(_) => {
-            return Err("image lifecycle sequence has no current request owner".to_owned());
+            return Err("image request owner is stale".to_owned());
         }
     };
     let resource_loader = host.document_resource_loader_for_dispatch_scope(owner);
+    let environment = resource_loader
+        .as_ref()
+        .and_then(|loader| host.subresource_request_environment(loader, owner))
+        .ok_or_else(|| "image Document request environment is unavailable".to_owned())?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        request_origin,
+        frame_id,
+        ..
+    } = environment;
     let network_enabled = resource_loader.as_ref().is_some_and(|loader| {
         loader
             .request_client()
@@ -232,6 +241,7 @@ pub(crate) fn start_image_element_resource_fetch(
     let request_cookie_report = observe_subresource_request_cookie_report(
         &loader,
         &document_url,
+        &request_origin,
         &request_url,
         "GET",
         credentials_mode,
@@ -273,7 +283,7 @@ pub(crate) fn start_image_element_resource_fetch(
     let request = Request::new("GET", request_url.as_str(), None, request_headers.clone())
         .map_err(|error| error.to_string())?
         .with_initiator_url(&document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+        .with_request_origin(request_origin.clone())
         .with_resource_type(RequestResourceType::Image)
         .with_page_network_policy()
         .with_request_mode(request_mode)
@@ -331,7 +341,7 @@ pub(crate) fn start_image_element_resource_fetch(
             request_cookie_report,
             network_context: AsyncSubresourceNetworkContext {
                 frame_id,
-                request_origin: moli_url::WebOrigin::from_url(&document_url),
+                request_origin: request_origin.clone(),
                 document_url,
                 resource_type: SubresourceResourceType::Image,
                 policy_context,
@@ -392,7 +402,7 @@ pub(crate) fn start_image_element_resource_fetch(
         internal_id,
         AsyncSubresourceNetworkContext {
             frame_id,
-            request_origin: moli_url::WebOrigin::from_url(&document_url),
+            request_origin: request_origin.clone(),
             document_url,
             resource_type: SubresourceResourceType::Image,
             policy_context,

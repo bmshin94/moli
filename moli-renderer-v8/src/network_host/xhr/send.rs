@@ -286,7 +286,7 @@ fn send_synchronous_network_xhr(
     )
     .expect("xhr request url was already resolved")
     .with_initiator_url(&prepared.document_url)
-    .with_request_origin(moli_url::WebOrigin::from_url(&prepared.document_url))
+    .with_request_origin(prepared.request_origin.clone())
     .with_credentials_mode(prepared.credentials_mode)
     .with_network_partition_key(prepared.network_partition_key.clone())
     .with_browser_request_metadata(BrowserRequestMetadata::Xhr);
@@ -294,6 +294,7 @@ fn send_synchronous_network_xhr(
     let request_cookie_report = observe_subresource_request_cookie_report(
         prepared.resource_loader.request_client(),
         &prepared.document_url,
+        &prepared.request_origin,
         &prepared.resolved_url,
         &prepared.method,
         prepared.credentials_mode,
@@ -405,7 +406,7 @@ fn send_synchronous_network_xhr(
 
     let result = result.and_then(|response| {
         crate::network_host::validate_fetch_response_security_policy_with_body(
-            &prepared.document_url,
+            &prepared.request_origin,
             &response.head(),
             response.body_bytes(),
             RequestMode::Cors,
@@ -418,7 +419,7 @@ fn send_synchronous_network_xhr(
     match result {
         Ok(response) => {
             let observable_headers = crate::network_host::filter_cors_exposed_response_headers(
-                &prepared.document_url,
+                &prepared.request_origin,
                 &response.head(),
                 prepared.credentials_mode,
             );

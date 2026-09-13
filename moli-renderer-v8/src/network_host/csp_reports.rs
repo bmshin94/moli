@@ -101,6 +101,7 @@ pub(crate) struct WindowCspReportRequestContext {
     request_client: ResourceRequestClient,
     frame_id: Option<String>,
     document_url: url::Url,
+    request_origin: moli_url::WebOrigin,
     network_partition_key: Option<String>,
     policy_context: crate::types::SubresourcePolicyContext,
     client_id: crate::service_worker_runtime::ServiceWorkerClientId,
@@ -197,7 +198,7 @@ fn send_content_security_policy_report_request(
 
     let request = request
         .with_initiator_url(&request_context.document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(&request_context.document_url))
+        .with_request_origin(request_context.request_origin.clone())
         .with_network_partition_key(request_context.network_partition_key.clone())
         .with_subframe_context(request_context.frame_id.is_some());
     let info = report_subresource_fetch_info(
@@ -233,6 +234,7 @@ fn send_content_security_policy_report_request(
         let load = request_context.register_report_load(None);
         host.record_pending_subresource_csp_report(
             request_context.identity,
+            request_context.request_origin.clone(),
             request_context.client_id,
             load,
             request_context.network_partition_key.clone(),
@@ -290,6 +292,7 @@ fn dispatch_service_worker_content_security_policy_report(
     let load = request_context.register_report_load(Some(cancel_handle.clone()));
     let internal_id = host.record_async_subresource_csp_report(
         request_context.identity,
+        request_context.request_origin.clone(),
         request_context.client_id,
         load,
         request_context.network_partition_key.clone(),
@@ -316,7 +319,7 @@ fn dispatch_service_worker_content_security_policy_report(
         request_cookie_report: info.request_cookie_report.clone(),
         network_context: AsyncSubresourceNetworkContext {
             frame_id: info.frame_id.clone(),
-            request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+            request_origin: request_context.request_origin.clone(),
             document_url: info.document_url.clone(),
             resource_type: SubresourceResourceType::CspReport,
             policy_context: request_context.policy_context,
@@ -360,6 +363,7 @@ fn spawn_content_security_policy_report_fetch(
     let task_runner = load.task_runner();
     let internal_id = host.record_async_subresource_csp_report(
         request_context.identity,
+        request_context.request_origin.clone(),
         request_context.client_id,
         load,
         request_context.network_partition_key.clone(),
@@ -377,7 +381,7 @@ fn spawn_content_security_policy_report_fetch(
         internal_id,
         AsyncSubresourceNetworkContext {
             frame_id: info.frame_id,
-            request_origin: moli_url::WebOrigin::from_url(&info.document_url),
+            request_origin: request_context.request_origin.clone(),
             document_url: info.document_url,
             resource_type: SubresourceResourceType::CspReport,
             policy_context: request_context.policy_context,
@@ -410,6 +414,9 @@ fn report_subresource_fetch_info(
         request_cookie_report: observe_subresource_request_cookie_report(
             request_client,
             document_url,
+            request
+                .browser_origin()
+                .expect("CSP reports carry an explicit origin"),
             &request.url,
             &request.method,
             RequestCredentialsMode::SameOrigin,
@@ -436,8 +443,14 @@ fn window_csp_report_request_context_for_identity(
     let resource_loader = host
         .document_resource_loader_for_window_owner(identity.owner())?
         .clone();
-    let (frame_id, document_url) =
-        subresource_request_scope_for_owner(scope, host, identity.dispatch_scope())?;
+    let environment =
+        host.subresource_request_environment(&resource_loader, identity.dispatch_scope())?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        request_origin,
+        frame_id,
+        ..
+    } = environment;
     let client_id = match identity.dispatch_scope() {
         crate::native_bridge::OwnerDispatchScope::Top => {
             host.service_worker_client_id_for_window_fetch(None)
@@ -456,6 +469,7 @@ fn window_csp_report_request_context_for_identity(
         resource_loader,
         frame_id,
         document_url,
+        request_origin,
         network_partition_key: active_subresource_network_partition_key(
             host,
             identity.dispatch_scope(),

@@ -1,6 +1,6 @@
 use super::*;
 use crate::document_runtime::DocumentSubresourceCspKind;
-use crate::native_bridge::{JsContextHost, OwnerDispatchScope, TextTrackLoadSequenceId};
+use crate::native_bridge::{JsContextHost, TextTrackLoadSequenceId};
 use crate::service_worker_runtime::{
     ServiceWorkerFetchDispatch, ServiceWorkerRequestDestination,
     service_worker_fetch_request_metadata,
@@ -36,33 +36,19 @@ pub(crate) fn start_text_track_resource_fetch(
     }
     let target = pending.target();
     let owner = target.dispatch_scope();
-    let document_owner = target
-        .owner()
-        .frame_document_owner()
-        .ok_or_else(|| "text-track request does not target a frame Document".to_owned())?;
-    let (frame_id, document_url) = match owner {
-        OwnerDispatchScope::Top if host.main_document_task_owner_is_current(document_owner) => {
-            (None, host.document_url().clone())
-        }
-        OwnerDispatchScope::Child(child_handle) => {
-            let snapshot = host
-                .frame_owner_current_child_snapshot(child_handle)
-                .filter(|snapshot| {
-                    snapshot.scheduler_lane_id == document_owner.scheduler_lane_id
-                        && snapshot.local_window_id == document_owner.local_window_id
-                        && snapshot.document_id == document_owner.document_id
-                })
-                .ok_or_else(|| "text-track child request scope is stale".to_owned())?;
-            (Some(snapshot.frame_id.0), snapshot.document_url)
-        }
-        OwnerDispatchScope::Top => {
-            return Err("text-track request has no current document owner".to_owned());
-        }
-        OwnerDispatchScope::LightweightPopup(_) => {
-            return Err("text-track requests in lightweight popups are unsupported".to_owned());
-        }
+    let Some(resource_loader) = host.document_resource_loader_for_window_owner(target.owner())
+    else {
+        return Ok(TextTrackResourceFetchStart::PolicySkipped);
     };
-    let base_url = host.document_base_url_for_handle(pending.owner_document_handle());
+    let environment = host
+        .subresource_request_environment(&resource_loader, owner)
+        .ok_or_else(|| "text-track Document request environment is unavailable".to_owned())?;
+    let crate::network::context::SubresourceRequestEnvironment {
+        document_url,
+        base_url,
+        request_origin,
+        frame_id,
+    } = environment;
     if pending.source().trim().is_empty() {
         return Ok(TextTrackResourceFetchStart::Local(Err(
             "text-track element has no source".to_owned(),
@@ -79,6 +65,8 @@ pub(crate) fn start_text_track_resource_fetch(
         .filter(|element| element.is_html_element("audio") || element.is_html_element("video"))
         .ok_or_else(|| "text-track media parent is unavailable".to_owned())?;
     let (request_mode, credentials_mode) = text_track_cross_origin_request_modes(media);
+    moli_fetch::FetchUrlList::new(&request_url, &[])
+        .validate_request_mode(request_mode, &request_origin)?;
     if host
         .check_top_document_subresource_csp(scope, &request_url, DocumentSubresourceCspKind::Media)
         .blocks_request()
@@ -102,10 +90,6 @@ pub(crate) fn start_text_track_resource_fetch(
         return Ok(TextTrackResourceFetchStart::Local(result));
     }
 
-    let Some(resource_loader) = host.document_resource_loader_for_window_owner(target.owner())
-    else {
-        return Ok(TextTrackResourceFetchStart::PolicySkipped);
-    };
     let loader = resource_loader.request_client().clone();
     if !loader.optional_resource_fetch_enabled(SubresourceResourceType::TextTrack) {
         return Ok(TextTrackResourceFetchStart::PolicySkipped);
@@ -115,6 +99,7 @@ pub(crate) fn start_text_track_resource_fetch(
     let request_cookie_report = observe_subresource_request_cookie_report(
         &loader,
         &document_url,
+        &request_origin,
         &request_url,
         "GET",
         credentials_mode,
@@ -122,7 +107,7 @@ pub(crate) fn start_text_track_resource_fetch(
     let request = Request::new("GET", request_url.as_str(), None, Vec::new())
         .map_err(|error| error.to_string())?
         .with_initiator_url(&document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(&document_url))
+        .with_request_origin(request_origin.clone())
         .with_resource_type(RequestResourceType::TextTrack)
         .with_page_network_policy()
         .with_request_mode(request_mode)
@@ -185,7 +170,7 @@ pub(crate) fn start_text_track_resource_fetch(
             request_cookie_report,
             network_context: AsyncSubresourceNetworkContext {
                 frame_id,
-                request_origin: moli_url::WebOrigin::from_url(&document_url),
+                request_origin: request_origin.clone(),
                 document_url,
                 resource_type: SubresourceResourceType::TextTrack,
                 policy_context,
@@ -225,7 +210,7 @@ pub(crate) fn start_text_track_resource_fetch(
         internal_id,
         AsyncSubresourceNetworkContext {
             frame_id,
-            request_origin: moli_url::WebOrigin::from_url(&document_url),
+            request_origin: request_origin.clone(),
             document_url,
             resource_type: SubresourceResourceType::TextTrack,
             policy_context,

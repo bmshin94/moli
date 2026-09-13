@@ -3346,6 +3346,11 @@ async fn reentrant_runtime_admission_survives_page_task_claim_in_stable_authorit
     vm.document_runtime.note_dom_content_loaded_dispatched();
     let runtime_script_work = vm.document_runtime.runtime_script_work_handle();
 
+    let request_origin = vm
+        .current_main_document_resource_loader()
+        .unwrap()
+        .fetch_context()
+        .request_origin();
     let mut emitted = Vec::new();
     assert!(
         vm.emit_ready_runtime_page_owned_work(|work| {
@@ -3354,6 +3359,7 @@ async fn reentrant_runtime_admission_survives_page_task_claim_in_stable_authorit
                 .dynamic_scripts
                 .enqueue_admission(
                     &loader,
+                    request_origin.clone(),
                     task_runner.clone(),
                     reentrant_admission
                         .take()

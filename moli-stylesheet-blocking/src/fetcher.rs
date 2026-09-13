@@ -253,6 +253,11 @@ impl StylesheetFetchTerminal {
 }
 
 pub trait StylesheetFetcher: Clone + Send + 'static {
+    /// Distinguishes environment-specific responses when a store serves several Documents.
+    fn resource_cache_scope(&self) -> u64 {
+        0
+    }
+
     fn spawn_stylesheet_task(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>);
 
     fn fetch_stylesheet_resource(

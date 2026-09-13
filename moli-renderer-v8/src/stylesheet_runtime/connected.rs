@@ -760,13 +760,12 @@ impl DocumentRuntime {
         if let Some(disposition) = stylesheet_link_disposition(&self.dom_host, node_id) {
             let load_event_binding =
                 Self::load_event_binding_for_connected_admission(event_admission);
-            let stylesheet_fetcher = self.stylesheet_fetcher();
-            let document_url = self
-                .dom_host
-                .node(self.dom_host.document_handle())
-                .and_then(Node::as_document)
-                .map(|document| document.url().clone())
-                .expect("live dom host must retain a document url");
+            let stylesheet_fetcher = self.stylesheet_fetcher_for_owner(handle, host_ptr);
+            let document_url = stylesheet_fetcher
+                .resource_loader()
+                .fetch_context()
+                .document_url()
+                .clone();
             if disposition.is_blocking() {
                 self.note_discovered_live_blocking_stylesheets();
             }
@@ -946,20 +945,20 @@ impl DocumentRuntime {
                         )
                     })
                     .unwrap_or(RequestResourceType::CssStyleSheet);
-                let Ok(fetch) = self.preload_stylesheet_with_request_metadata(
+                let fetcher = self
+                    .stylesheet_fetcher_for_owner(handle, host_ptr)
+                    .with_preload_metadata(request_resource_type, true);
+                let document_url = fetcher
+                    .resource_loader()
+                    .fetch_context()
+                    .document_url()
+                    .clone();
+                let fetch = self.stylesheet_lifecycle.fetches.preload_stylesheet(
+                    &fetcher,
+                    document_url,
                     request.url().clone(),
                     request.options().clone(),
-                    request_resource_type,
-                    true,
-                ) else {
-                    self.complete_immediate_owner_processing(
-                        handle,
-                        element_kind,
-                        false,
-                        load_event_binding,
-                    );
-                    return result;
-                };
+                );
                 let load = StylesheetLinkClient::new_preload_with_load_event_binding(
                     handle,
                     request.url().clone(),
@@ -1016,9 +1015,8 @@ impl DocumentRuntime {
             self.stylesheet_lifecycle
                 .owner_states
                 .install_pending_operation(Arc::clone(&operation));
-            let resource_loader = self
-                .current_document_resource_loader()
-                .expect("connected preload-like link requires its Document authority");
+            let stylesheet_fetcher = self.stylesheet_fetcher_for_owner(handle, host_ptr);
+            let resource_loader = stylesheet_fetcher.resource_loader().clone();
             let loader = resource_loader.request_client().clone();
             if !loader.optional_resource_fetch_enabled(resource_type) {
                 let _ = self
@@ -1035,23 +1033,29 @@ impl DocumentRuntime {
                 .task_producer
                 .clone()
                 .expect("connected stylesheet fetch requires a bound Page task producer");
-            let service_worker_context = self
-                .stylesheet_lifecycle
-                .service_worker_connected_link_context
-                .clone();
-            let document_url = self
-                .dom_host
-                .node(self.dom_host.document_handle())
-                .and_then(Node::as_document)
-                .map(|document| document.url().clone())
-                .expect("live dom host must retain a document url")
-                .clone();
+            let service_worker_context = if host_ptr.is_null() {
+                self.stylesheet_lifecycle
+                    .service_worker_connected_link_context
+                    .clone()
+            } else {
+                let host = unsafe { &*host_ptr };
+                let scope = host
+                    .owner_dispatch_scope_for_node(handle)
+                    .expect("link owner scope");
+                Some(ServiceWorkerConnectedLinkContext {
+                    browser_context_runtime: host.browser_context_runtime(),
+                    client_id: host.service_worker_client_id_for_subresource_owner(scope),
+                })
+            };
+            let document_url = resource_loader.fetch_context().document_url().clone();
             let start_unix_millis = moli_time::unix_epoch_millis();
             let resource_task_runner = resource_loader.task_runner();
+            let request_origin = resource_loader.fetch_context().request_origin();
             resource_loader.spawn_resource_task(async move {
                 let result = fetch_connected_link_readiness_with_service_worker(
                     loader,
                     resource_task_runner,
+                    request_origin,
                     document_url.clone(),
                     url.clone(),
                     fetch_options,
@@ -1243,17 +1247,13 @@ impl DocumentRuntime {
             .task_producer
             .clone()
             .expect("connected stylesheet import requires a bound Page task producer");
-        let stylesheet_fetcher = self.stylesheet_fetcher();
-        let document_url = self
-            .dom_host
-            .node(self.dom_host.document_handle())
-            .and_then(Node::as_document)
-            .map(|document| document.url().clone())
-            .expect("live dom host must retain a document url")
+        let stylesheet_fetcher = self.stylesheet_fetcher_for_owner(handle, host_ptr);
+        let document_url = stylesheet_fetcher
+            .resource_loader()
+            .fetch_context()
+            .document_url()
             .clone();
-        let resource_loader = self
-            .current_document_resource_loader()
-            .expect("connected stylesheet import requires its Document authority");
+        let resource_loader = stylesheet_fetcher.resource_loader().clone();
         resource_loader.spawn_resource_task(async move {
             let (graph, network_results) = fetch_observed_stylesheet_import_graph(
                 stylesheet_fetcher,
@@ -1321,16 +1321,13 @@ impl DocumentRuntime {
             .task_producer
             .clone()
             .expect("live stylesheet import requires a bound Page task producer");
-        let stylesheet_fetcher = self.stylesheet_fetcher();
-        let document_url = self
-            .dom_host
-            .node(self.dom_host.document_handle())
-            .and_then(Node::as_document)
-            .map(|document| document.url().clone())
-            .expect("live dom host must retain a document url");
-        let resource_loader = self
-            .current_document_resource_loader()
-            .expect("live stylesheet import requires its Document authority");
+        let stylesheet_fetcher = self.stylesheet_fetcher_for_owner(owner, host_ptr);
+        let document_url = stylesheet_fetcher
+            .resource_loader()
+            .fetch_context()
+            .document_url()
+            .clone();
+        let resource_loader = stylesheet_fetcher.resource_loader().clone();
         resource_loader.spawn_resource_task(async move {
             let (_, mut network_results) = fetch_observed_stylesheet_import_graph(
                 stylesheet_fetcher,
@@ -2082,19 +2079,21 @@ async fn fetch_connected_link_readiness(
     url: Url,
     options: ConnectedLinkReadinessFetchOptions,
 ) -> Result<crate::protocol_types::NavigationResponse, String> {
-    let request = connected_link_readiness_request(&document_url, &url, &options);
+    let request_origin = moli_url::WebOrigin::from_url(&document_url);
+    let request = connected_link_readiness_request(&document_url, &request_origin, &url, &options);
     fetch_connected_link_readiness_with_request(loader, url, options, request).await
 }
 
 async fn fetch_connected_link_readiness_with_service_worker(
     loader: ResourceRequestClient,
     resource_task_runner: crate::network::RendererResourceTaskRunner,
+    request_origin: moli_url::WebOrigin,
     document_url: Url,
     url: Url,
     options: ConnectedLinkReadinessFetchOptions,
     service_worker_context: Option<ServiceWorkerConnectedLinkContext>,
 ) -> Result<ConnectedLinkReadinessFetchResponse, String> {
-    let request = connected_link_readiness_request(&document_url, &url, &options);
+    let request = connected_link_readiness_request(&document_url, &request_origin, &url, &options);
     if let (Some(context), Some(destination)) = (
         service_worker_context,
         ServiceWorkerRequestDestination::for_subresource_resource_type(options.resource_type),
@@ -2133,17 +2132,24 @@ async fn fetch_connected_link_readiness_with_service_worker(
             }
         }
     }
+    let request_mode = options.request_mode;
     fetch_connected_link_readiness_with_request(loader, url, options, request)
         .await
         .map(|response| {
             let load_event_successful = connected_link_load_event_successful(&response, None);
-            let origin_clean = moli_url::same_origin(&document_url, &response.final_url);
+            let origin_clean = crate::network_host::network_response_filter(
+                &request_origin,
+                &response.head(),
+                request_mode,
+            )
+            .is_none_or(|filter| filter.is_readable());
             ConnectedLinkReadinessFetchResponse::new(response, origin_clean, load_event_successful)
         })
 }
 
 fn connected_link_readiness_request(
     document_url: &Url,
+    request_origin: &moli_url::WebOrigin,
     url: &Url,
     options: &ConnectedLinkReadinessFetchOptions,
 ) -> moli_fetch::Request {
@@ -2156,7 +2162,7 @@ fn connected_link_readiness_request(
         .expect("preload-like link url should already be parsed")
         .with_page_network_policy()
         .with_initiator_url(document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(document_url));
+        .with_request_origin(request_origin.clone());
     let mut request = request
         .with_request_mode(options.request_mode)
         .with_credentials_mode(options.credentials_mode);
@@ -3499,8 +3505,22 @@ mod tests {
         let loader = loader_owner.handle();
         let fetcher =
             crate::stylesheet_blocking::RendererStylesheetFetcher::for_speculative_preload(
-                loader,
-                crate::network::RendererResourceTaskRunner::from_current_tokio()?,
+                crate::network::context::DocumentResourceLoader::new(
+                    loader,
+                    crate::network::RendererResourceTaskRunner::from_current_tokio()?,
+                    crate::network::context::DocumentFetchContext::new(
+                        crate::native_bridge::WindowDocumentOwner::Frame(
+                            crate::frame_owner_model::FrameDocumentTaskOwner::new(
+                                crate::frame_owner_model::FrameSchedulerLaneId(1),
+                                crate::frame_owner_model::LocalWindowId(1),
+                                crate::frame_owner_model::DocumentId(1),
+                            ),
+                        ),
+                        document_url.clone(),
+                        document_url.clone(),
+                        moli_url::origin_ascii_serialization(&document_url),
+                    ),
+                ),
                 None,
                 RequestResourceType::CssStyleSheet,
                 true,

@@ -14,6 +14,7 @@ use super::{
 
 pub(super) fn document_script_source_load_port(
     loader: &ResourceRequestClient,
+    request_origin: moli_url::WebOrigin,
     task_runner: RendererResourceTaskRunner,
     owner_wake: Option<RendererOwnerWakeSender>,
 ) -> DocumentScriptSourceLoadPort {
@@ -21,6 +22,7 @@ pub(super) fn document_script_source_load_port(
     DocumentScriptSourceLoadPort::new(move |script, document_character_set| {
         SharedScriptSourceLoad::spawn_with_request_resource_type_and_owner_wake(
             script,
+            request_origin.clone(),
             loader.clone(),
             task_runner.clone(),
             document_character_set,
@@ -143,6 +145,7 @@ impl<
         &mut self,
         script: PreparedScript,
         loader: &ResourceRequestClient,
+        request_origin: moli_url::WebOrigin,
         task_runner: RendererResourceTaskRunner,
         shared_load: Option<SharedScriptSourceLoad>,
         document_character_set: Option<&str>,
@@ -151,8 +154,12 @@ impl<
         )
             -> crate::frame_owner_model::MainDocumentScriptLoadDelayLease,
     ) -> bool {
-        let source_load_port =
-            document_script_source_load_port(loader, task_runner, self.runner.owner_wake.clone());
+        let source_load_port = document_script_source_load_port(
+            loader,
+            request_origin,
+            task_runner,
+            self.runner.owner_wake.clone(),
+        );
         self.runner
             .on_parser_discovered_async_candidate_with_source_load_port(
                 script,
@@ -182,6 +189,7 @@ impl<
         &mut self,
         script: PreparedScript,
         loader: &ResourceRequestClient,
+        request_origin: moli_url::WebOrigin,
         task_runner: RendererResourceTaskRunner,
         shared_load: Option<SharedScriptSourceLoad>,
         document_character_set: Option<&str>,
@@ -190,8 +198,12 @@ impl<
         )
             -> crate::frame_owner_model::MainDocumentScriptLoadDelayLease,
     ) -> bool {
-        let source_load_port =
-            document_script_source_load_port(loader, task_runner, self.runner.owner_wake.clone());
+        let source_load_port = document_script_source_load_port(
+            loader,
+            request_origin,
+            task_runner,
+            self.runner.owner_wake.clone(),
+        );
         self.runner
             .recover_parse_time_async_handoff_with_source_load_port(
                 script,

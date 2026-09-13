@@ -688,6 +688,10 @@ impl ScriptVm {
                 request_cookie_report: None,
             },
             script,
+            self.current_main_document_resource_loader()
+                .expect("parser interception requires its Document authority")
+                .fetch_context()
+                .request_origin(),
             request_client,
             task_runner,
             document_character_set,
@@ -1541,7 +1545,7 @@ impl ScriptVm {
             request_cookie_report,
             network_context: crate::types::AsyncSubresourceNetworkContext {
                 frame_id,
-                request_origin: moli_url::WebOrigin::from_url(&document_url),
+                request_origin: pending.request_origin.clone(),
                 document_url,
                 resource_type: SubresourceResourceType::CspReport,
                 policy_context,
@@ -1682,9 +1686,7 @@ impl ScriptVm {
             original_request_headers.clone(),
         )?
         .with_initiator_url(&pending_fetch.info.document_url)
-        .with_request_origin(moli_url::WebOrigin::from_url(
-            &pending_fetch.info.document_url,
-        ))
+        .with_request_origin(pending_fetch.request_origin.clone())
         .with_request_mode(pending_fetch.request_mode)
         .with_credentials_mode(pending_fetch.credentials_mode)
         .with_auth(auth.into())
@@ -5703,7 +5705,7 @@ impl ScriptVm {
                             {
                                 observable_head.headers =
                                     crate::network_host::filter_cors_exposed_response_headers(
-                                        &streaming.pending.info.document_url,
+                                        &streaming.pending.request_origin,
                                         &observable_head,
                                         streaming.pending.credentials_mode,
                                     );
