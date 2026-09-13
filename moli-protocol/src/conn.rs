@@ -3176,7 +3176,7 @@ impl CdpConnection {
                 else {
                     return Vec::new();
                 };
-                self.exact_target_destroyed_events_for_all_discovery_owners(target_info)
+                self.target_retirement_events(target_info)
             }
         }
     }
@@ -3193,12 +3193,23 @@ impl CdpConnection {
             .target_info_changed_events_for_all_observer_owners(target_info)
     }
 
-    fn exact_target_destroyed_events_for_all_discovery_owners(
+    fn target_retirement_events(
         &mut self,
         target_info: DevToolsTargetInfo,
     ) -> Vec<BackgroundProtocolEvent> {
-        self.agent_hosts
-            .target_destroyed_events_for_all_discovery_owners(target_info)
+        let mut events = self
+            .agent_hosts
+            .target_destroyed_events_for_all_discovery_owners(target_info.clone());
+        // The primary automation listener may already receive the root
+        // discovery event. Otherwise publish the same retirement independently
+        // of CDP discovery filters and frontend command origin.
+        if events
+            .iter()
+            .all(|event| event.protocol_session_id().is_some())
+        {
+            events.extend(target_destroyed_automation_events(vec![target_info]));
+        }
+        events
     }
 
     pub(crate) fn target_crashed_events_for_all_discovery_owners(
@@ -3209,23 +3220,6 @@ impl CdpConnection {
     ) -> Vec<BackgroundProtocolEvent> {
         self.agent_hosts
             .target_crashed_events_for_all_discovery_owners(target_id, status, error_code)
-    }
-
-    pub(crate) fn target_destroyed_automation_events(
-        &self,
-        target_info: DevToolsTargetInfo,
-    ) -> Vec<BackgroundProtocolEvent> {
-        target_destroyed_automation_events(
-            self.project_page_tab_target_infos_for_destruction(target_info),
-        )
-    }
-
-    fn project_page_tab_target_infos_for_destruction(
-        &self,
-        target_info: DevToolsTargetInfo,
-    ) -> Vec<DevToolsTargetInfo> {
-        self.agent_hosts
-            .project_page_tab_target_infos_for_destruction(target_info)
     }
 
     #[cfg(test)]

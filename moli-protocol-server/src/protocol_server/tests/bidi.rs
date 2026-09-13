@@ -1,5 +1,7 @@
 use super::*;
 
+mod shared_page_retirement;
+
 #[tokio::test]
 async fn native_browser_page_is_discovered_shared_and_retained_across_frontends() {
     use moli_core::browser::{

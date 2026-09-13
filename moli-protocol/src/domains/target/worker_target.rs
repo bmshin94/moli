@@ -1866,10 +1866,7 @@ fn prepare_dedicated_worker_target_retirement(
         Some(target_id) => target_id.to_owned(),
         None => return outputs,
     };
-    let destroyed_delta = conn
-        .has_any_target_discovery()
-        .then(|| conn.prepare_destroyed_target_host_delta(&target_id))
-        .flatten();
+    let destroyed_delta = conn.prepare_destroyed_target_host_delta(&target_id);
     let mut detached_delta = conn
         .browser_context_by_id(browser_context_id)
         .and_then(|context| {
@@ -2512,7 +2509,6 @@ fn remove_shared_worker_target_with_reason(
     reason: &'static str,
 ) -> TargetPreparedOutputs {
     let mut outputs = TargetPreparedOutputs::default();
-    let should_emit_destroyed = conn.has_any_target_discovery();
     let target_id = {
         let Some(context) = conn.browser_context_by_id(browser_context_id) else {
             return outputs;
@@ -2525,9 +2521,7 @@ fn remove_shared_worker_target_with_reason(
         };
         target_id
     };
-    let destroyed_delta = should_emit_destroyed
-        .then(|| conn.prepare_destroyed_target_host_delta(&target_id))
-        .flatten();
+    let destroyed_delta = conn.prepare_destroyed_target_host_delta(&target_id);
     let Some(context) = conn.browser_context_by_id_mut(browser_context_id) else {
         return outputs;
     };
@@ -2642,7 +2636,6 @@ fn remove_service_worker_target_with_reason(
     reason: &'static str,
 ) -> TargetPreparedOutputs {
     let mut outputs = TargetPreparedOutputs::default();
-    let should_emit_destroyed = conn.has_any_target_discovery();
     let service_worker_domain_sessions =
         service_worker::enabled_sessions_for_browser_context(conn, browser_context_id);
     let target_id = {
@@ -2663,9 +2656,7 @@ fn remove_service_worker_target_with_reason(
         }
         target_id
     };
-    let destroyed_delta = should_emit_destroyed
-        .then(|| conn.prepare_destroyed_target_host_delta(&target_id))
-        .flatten();
+    let destroyed_delta = conn.prepare_destroyed_target_host_delta(&target_id);
     let Some(context) = conn.browser_context_by_id_mut(browser_context_id) else {
         return outputs;
     };
@@ -5179,7 +5170,19 @@ mod tests {
         );
         let events = drain_target_lifecycle_events_for_test(&mut conn, retirement).await;
 
-        assert!(events.is_empty(), "disabled discovery must remain silent");
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.has_protocol_wire_message()),
+            "disabled discovery must remain silent on CDP"
+        );
+        assert_eq!(events.len(), 1);
+        let Some(crate::devtools_runtime::AutomationEvent::TargetDestroyed(event)) =
+            events.into_iter().next().unwrap().into_parts().1
+        else {
+            panic!("native retirement must reach automation")
+        };
+        assert_eq!(event.target_id.as_str(), target_id);
         assert!(
             conn.browser_context
                 .as_ref()
@@ -5472,6 +5475,68 @@ mod tests {
                 target_id: target_id.clone(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn worker_retirement_has_one_primary_event_with_any_discovery_scope() {
+        use crate::devtools_runtime::AutomationEvent;
+
+        for service in [false, true] {
+            for discovery in [None, Some(None), Some(Some("SID-browser"))] {
+                let mut conn = crate::test_support::connection();
+                conn.set_root_target_discovery_enabled(false);
+                conn.browser_context = Some(conn.new_browser_context_fixture_for_test("BID-1"));
+                if let Some(owner) = discovery {
+                    conn.set_target_discovery_for_owner(
+                        owner,
+                        CdpTargetFilter::default_target_discovery(),
+                    );
+                }
+                let created = if service {
+                    register_service_worker_target(&mut conn, "BID-1", service_worker_info(31))
+                } else {
+                    register_shared_worker_target(&mut conn, "BID-1", None, shared_worker_info(31))
+                };
+                drain_target_lifecycle_events_for_test(&mut conn, created).await;
+                let retire = |conn: &mut CdpConnection| {
+                    if service {
+                        remove_service_worker_target(conn, "BID-1", 31, None)
+                    } else {
+                        remove_shared_worker_target(
+                            conn,
+                            "BID-1",
+                            SharedWorkerInstanceId::from_u64(31),
+                        )
+                    }
+                };
+                let retired = retire(&mut conn);
+                let events = drain_target_lifecycle_events_for_test(&mut conn, retired).await;
+                let primary = events
+                    .iter()
+                    .filter(|event| event.protocol_session_id().is_none())
+                    .filter_map(|event| event.clone().into_parts().1)
+                    .filter(|event| matches!(event, AutomationEvent::TargetDestroyed(_)))
+                    .count();
+                assert_eq!(
+                    primary, 1,
+                    "one retirement independent of discovery: service={service}, discovery={discovery:?}"
+                );
+                let wire = events
+                    .iter()
+                    .filter(|event| event.protocol_method() == Some("Target.targetDestroyed"))
+                    .collect::<Vec<_>>();
+                assert_eq!(wire.len(), usize::from(discovery.is_some()));
+                if let Some(owner) = discovery {
+                    assert_eq!(wire[0].protocol_session_id(), owner);
+                }
+                let repeated = retire(&mut conn);
+                assert!(
+                    drain_target_lifecycle_events_for_test(&mut conn, repeated)
+                        .await
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[tokio::test]

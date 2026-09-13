@@ -1478,7 +1478,6 @@ struct BidiDevToolsCommandCompletion {
     session_id: String,
     event_sources: BidiDevToolsEventSources,
     event_context: Option<String>,
-    close_target_event: Option<TargetLifecycleEvent>,
     create_target_browser_context_id:
         Option<moli_protocol::devtools_runtime::DevToolsBrowserContextId>,
     observe_browsing_context_load: bool,
@@ -2052,10 +2051,6 @@ async fn start_bidi_devtools_command(
             bidi.file_prompt_handler_for_script_commands(),
         );
     let event_context = bidi_event_context_from_devtools_command(&dispatch.command);
-    let close_target_id = match &dispatch.command {
-        DevToolsCommand::CloseTarget(command) => Some(command.target_id.as_str().to_owned()),
-        _ => None,
-    };
     let script_may_create_targets = matches!(
         &dispatch.command,
         DevToolsCommand::EvaluateScript(_) | DevToolsCommand::CallFunction(_)
@@ -2080,11 +2075,6 @@ async fn start_bidi_devtools_command(
             .await,
         Some(&*scheduler),
     );
-    let close_target_event = if let Some(target_id) = close_target_id.as_deref() {
-        bidi_target_lifecycle_event_for_target(scheduler, &dispatch.session_id, target_id).await
-    } else {
-        None
-    };
     if let Some(error) =
         validate_bidi_top_level_context_command(scheduler, &dispatch.session_id, &dispatch.command)
             .await
@@ -2109,7 +2099,6 @@ async fn start_bidi_devtools_command(
         session_id: dispatch.session_id.clone(),
         event_sources,
         event_context,
-        close_target_event,
         create_target_browser_context_id,
         observe_browsing_context_load,
         script_may_create_targets,
@@ -2236,7 +2225,6 @@ async fn complete_bidi_devtools_command_execution(
         session_id,
         mut event_sources,
         event_context,
-        close_target_event,
         create_target_browser_context_id,
         observe_browsing_context_load,
         script_may_create_targets,
@@ -2263,7 +2251,6 @@ async fn complete_bidi_devtools_command_execution(
         }
         _ => None,
     };
-    let close_succeeded = matches!(&execution.result, Ok(DevToolsCommandResult::CloseTarget(_)));
     if let Some(target_id) = created_target_id.as_deref() {
         let mut event =
             match bidi_target_lifecycle_event_for_target(scheduler, &session_id, target_id).await {
@@ -2281,9 +2268,6 @@ async fn complete_bidi_devtools_command_execution(
             event.target_info = None;
         }
         event_sources.push_automation_event(AutomationEvent::TargetCreated(event));
-    }
-    if close_succeeded && let Some(event) = close_target_event {
-        event_sources.push_automation_event(AutomationEvent::TargetDestroyed(event));
     }
     let response = match execution.result {
         Ok(result) => bidi_response_from_devtools_result(id, result),

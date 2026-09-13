@@ -1529,13 +1529,24 @@ async fn devtools_command_executes_target_pending_activate_and_close() {
         DevToolsCommandResult::Empty
     );
 
-    let (close_result, _) = conn
+    let (close_result, _, close_events) = conn
         .execute_devtools_command(DevToolsCommand::CloseTarget(DevToolsCloseTargetCommand {
             context: context.clone(),
             target_id: DevToolsTargetId::from("TID-2"),
         }))
         .await
-        .into_parts();
+        .into_parts_with_protocol_events();
+    assert!(
+        close_events
+            .iter()
+            .all(|event| !event.has_protocol_wire_message())
+    );
+    assert_eq!(
+        close_events.into_iter().filter_map(|event| event.into_parts().1)
+            .filter(|event| matches!(event, AutomationEvent::TargetDestroyed(event) if event.target_id.as_str() == "TID-2"))
+            .count(),
+        1,
+    );
     let DevToolsCommandResult::CloseTarget(close_result) =
         close_result.expect("close should succeed")
     else {

@@ -1,12 +1,11 @@
 use super::*;
 use crate::conn::{BackgroundProtocolEvent, CdpTargetHostLifecycleDelta, TargetClosureCleanupPlan};
 
-/// Which lifecycle notifications are already owned by the initiating executor.
+/// Context disposal can detach inspectors before retiring individual pages.
 #[derive(Clone, Copy)]
 pub(crate) enum PageCloseNotifications {
-    BrowserEvent,
-    PageCommand,
-    ContextDisposal,
+    All,
+    InspectorAlreadyDetached,
 }
 
 impl CdpConnection {
@@ -293,13 +292,8 @@ impl CdpConnection {
         activated: Option<moli_core::browser::WebContentsHandle>,
         sequence: moli_core::browser::BrowserSequence,
     ) -> Vec<BackgroundProtocolEvent> {
-        self.retire_closed_web_contents(
-            handle,
-            activated,
-            sequence,
-            PageCloseNotifications::BrowserEvent,
-        )
-        .await
+        self.retire_closed_web_contents(handle, activated, sequence, PageCloseNotifications::All)
+            .await
     }
 
     pub(in crate::conn) async fn retire_closed_web_contents(
@@ -332,7 +326,10 @@ impl CdpConnection {
             .collect::<Vec<_>>();
         let mut seen = std::collections::HashSet::new();
         sessions.retain(|session| seen.insert(session.clone()));
-        if !matches!(notifications, PageCloseNotifications::ContextDisposal) {
+        if !matches!(
+            notifications,
+            PageCloseNotifications::InspectorAlreadyDetached
+        ) {
             events.extend(sessions.iter().map(|session| {
                 BackgroundProtocolEvent::inspector_detached(Some(session), "Render process gone.")
             }));
@@ -341,14 +338,7 @@ impl CdpConnection {
             target.runtime_slot.collected_network_data_artifacts(),
         );
         target.runtime_slot.retire_for_target_close();
-        events.extend(
-            self.project_retired_target(
-                info,
-                sessions,
-                matches!(notifications, PageCloseNotifications::BrowserEvent),
-            )
-            .await,
-        );
+        events.extend(self.project_retired_target(info, sessions).await);
         if let Some(activated) = activated {
             events.extend(self.project_browser_selection(activated, Some(handle), sequence));
         }
@@ -407,7 +397,7 @@ impl CdpConnection {
                 .as_ref()
                 .map(|id| self.attached_sessions_for_target(id.as_str()))
                 .unwrap_or_default();
-            events.extend(self.project_retired_target(info, sessions, true).await);
+            events.extend(self.project_retired_target(info, sessions).await);
         }
         removed.retire_page_projections();
         events.extend(self.project_retired_context_downloads());
@@ -418,7 +408,6 @@ impl CdpConnection {
         &mut self,
         info: crate::devtools_runtime::DevToolsTargetInfo,
         sessions: Vec<String>,
-        emit_automation: bool,
     ) -> Vec<BackgroundProtocolEvent> {
         let Some(target_id) = info.target_id.as_ref().map(|id| id.as_str().to_owned()) else {
             return Vec::new();
@@ -426,13 +415,10 @@ impl CdpConnection {
         let mut events = Vec::new();
         let destroyed = self
             .agent_hosts
-            .project_page_tab_target_infos_for_destruction(info.clone());
+            .project_page_tab_target_infos_for_destruction(info);
         for mut info in destroyed.iter().filter(|info| info.attached).cloned() {
             info.attached = false;
             events.extend(self.exact_target_info_changed_events_for_all_observer_owners(info));
-        }
-        if emit_automation {
-            events.extend(self.target_destroyed_automation_events(info));
         }
         events.extend(
             self.dispose_target_closure_sessions_event_plan_async(
@@ -464,7 +450,7 @@ impl CdpConnection {
             });
         }
         for info in destroyed {
-            events.extend(self.exact_target_destroyed_events_for_all_discovery_owners(info));
+            events.extend(self.target_retirement_events(info));
         }
         if target_id == self.default_target_id() {
             self.mark_default_browser_target_closed();
