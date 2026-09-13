@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +23,7 @@ from typing import Any, Callable
 
 from ..config import REPO_ROOT, ReservedPort, clear_proxy_env, reserve_port
 from ..sampling import ResourceSampler
-from ..serve import probe_url
+from ..serve import _join_log_drain_threads, _start_log_drain_threads, probe_url
 from ..versions import sha256_file
 
 
@@ -41,6 +42,7 @@ class EngineDriverHandle:
     binary: Path | None = None
     binary_sha256: str | None = None
     binary_version: str | None = None
+    log_threads: list[threading.Thread] = field(default_factory=list, repr=False)
 
 
 def _binary_version(binary: Path, version_args: tuple[str, ...]) -> str | None:
@@ -56,20 +58,6 @@ def _binary_version(binary: Path, version_args: tuple[str, ...]) -> str | None:
         return None
     output = (completed.stdout or completed.stderr).strip()
     return output.splitlines()[0] if output else None
-
-
-def _drain_pipes(handle: EngineDriverHandle) -> None:
-    for stream, label in ((handle.process.stdout, "stdout"), (handle.process.stderr, "stderr")):
-        if stream is None:
-            continue
-        try:
-            while True:
-                line = stream.readline()
-                if not line:
-                    break
-                handle.logs.append(f"{label}: {line.decode('utf-8', errors='replace').rstrip()}")
-        except OSError:
-            continue
 
 
 def _terminate(process: subprocess.Popen[bytes]) -> None:
@@ -149,6 +137,8 @@ class EngineDriver:
                     stderr=subprocess.PIPE,
                     start_new_session=True,
                 )
+                logs: list[str] = []
+                log_threads = _start_log_drain_threads(process, logs)
             except BaseException:
                 reserved.close()
                 if temp_dir is not None:
@@ -163,6 +153,8 @@ class EngineDriver:
                 endpoint=endpoint,
                 sampler=sampler,
                 port_lease=reserved,
+                logs=logs,
+                log_threads=log_threads,
                 temp_dir=temp_dir,
                 binary=binary,
                 binary_sha256=sha256_file(binary),
@@ -173,7 +165,7 @@ class EngineDriver:
             version_url = endpoint + "/json/version"
             while time.perf_counter() < deadline:
                 if process.poll() is not None:
-                    _drain_pipes(handle)
+                    _join_log_drain_threads(handle.log_threads)
                     log_tail = "; ".join(handle.logs[-20:])
                     self.shutdown(handle)
                     last_error = RuntimeError(
@@ -206,7 +198,7 @@ class EngineDriver:
             return {}
         try:
             _terminate(handle.process)
-            _drain_pipes(handle)
+            _join_log_drain_threads(handle.log_threads)
             resources = handle.sampler.stop()
         finally:
             handle.port_lease.close()
