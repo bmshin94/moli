@@ -233,8 +233,8 @@ mod owner_wake_retirement_tests {
                 };
                 assert_eq!(
                     owner_wake_senders.len_for_test(),
-                    2,
-                    "only the peer and current renderer remain"
+                    3,
+                    "only the Context task, peer and current test receiver remain"
                 );
             }
             drop(receiver);
@@ -251,7 +251,7 @@ mod owner_wake_retirement_tests {
         };
         assert_eq!(
             owner_wake_senders.len_for_test(),
-            1,
+            2,
             "closed admission must not reintroduce stale routes"
         );
     }

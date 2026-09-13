@@ -320,6 +320,9 @@ pub(in crate::domains) fn worker_network_prepared_outputs(
     };
     let mut outputs = TargetPreparedOutputs::default();
     let occurrence = committed.occurrence();
+    if conn.worker_network_receipt_is_covered(committed) {
+        return outputs;
+    }
     let RendererNetworkSource::Worker(source) = &occurrence.source else {
         return outputs;
     };
@@ -632,10 +635,12 @@ impl CdpConnection {
         &mut self,
         mut workers: Vec<moli_core::browser::WorkerSnapshot>,
         sequence: moli_core::browser::BrowserSequence,
+        contexts: &[moli_core::browser::BrowserContextId],
     ) -> Vec<BackgroundProtocolEvent> {
         let mut outputs = TargetPreparedOutputs::default();
         let retired = self
             .browser_contexts()
+            .filter(|context| contexts.contains(&context.browser_context_id()))
             .flat_map(|context| {
                 context
                     .shared_worker_targets
@@ -730,6 +735,7 @@ impl CdpConnection {
         }
         let contexts = self
             .browser_contexts()
+            .filter(|context| contexts.contains(&context.browser_context_id()))
             .map(|context| context.id.clone())
             .collect::<Vec<_>>();
         for id in contexts {

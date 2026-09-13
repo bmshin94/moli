@@ -50,6 +50,9 @@ pub(crate) struct WeakSharedWorkerRuntimeService {
 
 #[derive(Default)]
 struct SharedWorkerRuntimeInner {
+    // Admission and load completion span the matching registry and physical
+    // host. A new client must not observe a partially installed Running host.
+    connection_admission: Mutex<()>,
     matching: Arc<SharedWorkerMatchingStore>,
     hosts: Arc<SharedWorkerHostStore>,
     service_lane: Arc<SharedWorkerServiceLane>,
@@ -59,6 +62,10 @@ struct SharedWorkerRuntimeInner {
 }
 
 impl SharedWorkerRuntimeService {
+    pub(super) fn connection_admission(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.inner.connection_admission.lock()
+    }
+
     pub(crate) fn client_owner_id_allocator(&self) -> SharedWorkerClientOwnerIdAllocator {
         self.inner.matching.client_owner_id_allocator()
     }

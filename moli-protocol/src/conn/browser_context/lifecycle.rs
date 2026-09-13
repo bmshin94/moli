@@ -17,11 +17,6 @@ impl CdpConnection {
         let Ok(handle) = self.browser.context_handle(id) else {
             return;
         };
-        if let Some(sender) = self.scheduler_hooks.renderer_publication_sender()
-            && handle.set_renderer_output_transport_sender(sender).is_err()
-        {
-            return;
-        }
         let wire_id = loop {
             let id = self.gen_bc_id();
             if !self.has_browser_context_id(&id) {
@@ -30,8 +25,11 @@ impl CdpConnection {
         };
         // Adoption is observation, not Context creation or policy installation.
         // In particular it must not bind the lazy default target to this Context.
-        self.inactive_browser_contexts
-            .push(BrowserContext::from_browser_handle(wire_id, handle));
+        let mut context = BrowserContext::from_browser_handle(wire_id, handle);
+        if let Some(sender) = self.scheduler_hooks.renderer_publication_sender() {
+            context.set_renderer_output_transport_sender(sender);
+        }
+        self.inactive_browser_contexts.push(context);
     }
 
     pub async fn project_created_web_contents(
@@ -189,8 +187,8 @@ impl CdpConnection {
                 );
             }
         }
-        for context in snapshot.contexts {
-            self.project_created_browser_context(context);
+        for context in &snapshot.contexts {
+            self.project_created_browser_context(*context);
         }
         for handle in snapshot.web_contents {
             events.extend(self.project_created_web_contents(handle).await);
@@ -217,7 +215,7 @@ impl CdpConnection {
             events.extend(self.project_browser_selection(selected, None, snapshot.sequence));
         }
         events.extend(
-            self.project_browser_workers(snapshot.workers, snapshot.sequence)
+            self.project_browser_workers(snapshot.workers, snapshot.sequence, &snapshot.contexts)
                 .await,
         );
         events.extend(self.project_browser_network_snapshot(snapshot.network_requests));
@@ -234,6 +232,44 @@ impl CdpConnection {
             events.extend(self.project_created_browser_download(download));
         }
         events.extend(self.project_retired_context_downloads());
+        events.extend(self.project_bound_worker_output().await);
+        events
+    }
+
+    /// Consume the native prefix frozen at first transport binding, before
+    /// admitting that Context's live Worker output or subsequent commands.
+    pub async fn project_bound_worker_output(&mut self) -> Vec<BackgroundProtocolEvent> {
+        let snapshots = self
+            .browser_context
+            .iter_mut()
+            .chain(&mut self.inactive_browser_contexts)
+            .filter_map(|context| {
+                context
+                    .worker_output_snapshot
+                    .take()
+                    .map(|snapshot| (context.browser_context_id(), snapshot))
+            })
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for (context, snapshot) in snapshots {
+            for contents in snapshot.web_contents {
+                events.extend(Box::pin(self.project_created_web_contents(contents)).await);
+            }
+            events.extend(
+                self.project_browser_workers(snapshot.workers, snapshot.sequence, &[context])
+                    .await,
+            );
+            for request in snapshot.requests {
+                events.extend(self.project_worker_network_snapshot(request));
+            }
+            for pause in snapshot.pauses {
+                if let Some((owner, outputs)) =
+                    crate::domains::fetch::native_worker_fetch_prepared_outputs(self, pause).await
+                {
+                    events.extend(outputs.emit_fetch_snapshot(self, &owner).await);
+                }
+            }
+        }
         events
     }
 
@@ -494,10 +530,10 @@ impl CdpConnection {
         browser_context.set_dedicated_worker_pause_on_start(
             self.dedicated_worker_pause_on_start_for_devtools(),
         );
-        browser_context.bind_page_navigation_engines(
-            self.navigation_runtime_config.clone(),
-            self.scheduler_hooks.renderer_publication_sender(),
-        );
+        browser_context.bind_page_navigation_engines(self.navigation_runtime_config.clone(), None);
+        if let Some(sender) = self.scheduler_hooks.renderer_publication_sender() {
+            browser_context.set_renderer_output_transport_sender(sender);
+        }
         if self.browser_context.is_none() {
             self.browser_context = Some(browser_context);
             self.apply_active_engine_fetch_overrides();

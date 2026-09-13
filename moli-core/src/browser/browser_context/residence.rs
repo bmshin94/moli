@@ -43,11 +43,23 @@ impl BrowserContext {
     pub fn set_renderer_output_transport_sender(
         &mut self,
         sender: crate::RendererOutputTransportSender,
-    ) {
+    ) -> bool {
+        if let Some(existing) = &self.renderer_output_transport_sender {
+            assert!(
+                existing.same_channel(&sender),
+                "Context output cannot change transport"
+            );
+            return false;
+        }
         self.renderer_output_transport_sender = Some(sender.clone());
+        self.renderer_runtime_owner
+            .as_ref()
+            .expect("live Context must own its renderer runtime")
+            .bind_output_transport(sender.clone());
         for contents in self.web_contents.values() {
             contents.set_renderer_output_transport_sender(sender.clone());
         }
+        true
     }
 
     pub fn register_web_contents(

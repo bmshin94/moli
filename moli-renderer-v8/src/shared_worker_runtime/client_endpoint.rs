@@ -392,6 +392,7 @@ mod tests {
             new_message_port_registry(),
             new_broadcast_channel_registry(),
             service,
+            crate::network::RendererResourceTaskRunner::for_test(),
         )
     }
 

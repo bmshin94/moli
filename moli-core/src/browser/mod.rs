@@ -44,7 +44,7 @@ pub use events::{
     BrowserEvent, BrowserEventReceiver, BrowserEventRecord, BrowserSnapshot,
     DocumentLifecycleSnapshot, JavaScriptDialogOpened, NavigationAttempt, NavigationError,
     NavigationFailureReason, NavigationFetchFailure, NavigationRequest, NavigationResponseSnapshot,
-    NavigationSnapshot, WebContentsSelection, WebContentsSnapshot,
+    NavigationSnapshot, WebContentsSelection, WebContentsSnapshot, WorkerStateSnapshot,
 };
 pub use navigation_decision::{
     DocumentDecisionProvider, NavigationDecision, NavigationDecisionSnapshot,

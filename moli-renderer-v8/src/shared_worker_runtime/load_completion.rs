@@ -45,6 +45,7 @@ fn finish_loading_with_runtime_service(
     mut params: SharedWorkerLaunchParams,
     result: Result<SharedWorkerLoadedScript, String>,
 ) {
+    let _admission = runtime_service.connection_admission();
     match result {
         Ok(script) => {
             let Some(host) = runtime_service.take_loading_host_for_completion(instance_id) else {
@@ -284,8 +285,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn immediate_script_load_failure_is_queued_through_service_lane() {
+    #[tokio::test]
+    async fn immediate_script_load_failure_is_queued_through_service_lane() {
         let runtime_service = test_support::runtime_service();
         let mut service_wake_rx = test_support::install_owner_wake_sender(&runtime_service);
         let message_port_registry = new_message_port_registry();
@@ -293,6 +294,7 @@ mod tests {
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             runtime_service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let worker_context_runtime = browser_context_runtime.worker_context_runtime();
         let (client_port_id, worker_port_id, message_port_owner) =
@@ -343,8 +345,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn load_completion_stays_in_service_lane_without_live_host_client() {
+    #[tokio::test]
+    async fn load_completion_stays_in_service_lane_without_live_host_client() {
         let runtime_service = test_support::runtime_service();
         let mut service_wake_rx = test_support::install_owner_wake_sender(&runtime_service);
         let message_port_registry = new_message_port_registry();
@@ -352,6 +354,7 @@ mod tests {
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             runtime_service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let worker_context_runtime = browser_context_runtime.worker_context_runtime();
         let (client_port_id, worker_port_id, message_port_owner) =
@@ -429,8 +432,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn successful_load_with_no_live_host_client_is_pruned_before_worker_start() {
+    #[tokio::test]
+    async fn successful_load_with_no_live_host_client_is_pruned_before_worker_start() {
         let runtime_service = test_support::runtime_service();
         let mut service_wake_rx = test_support::install_owner_wake_sender(&runtime_service);
         let message_port_registry = new_message_port_registry();
@@ -438,6 +441,7 @@ mod tests {
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             runtime_service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let worker_context_runtime = browser_context_runtime.worker_context_runtime();
         let (client_port_id, worker_port_id, message_port_owner) =
@@ -505,8 +509,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn worker_start_failure_after_registry_ready_removes_instance() {
+    #[tokio::test]
+    async fn worker_start_failure_after_registry_ready_removes_instance() {
         // Startup spawns a real Worker before rejecting the already-closed host.
         crate::ensure_v8_for_test();
         let runtime_service = test_support::runtime_service();
@@ -516,6 +520,7 @@ mod tests {
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             runtime_service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let worker_context_runtime = browser_context_runtime.worker_context_runtime();
         let (client_port_id, worker_port_id, message_port_owner) =
@@ -591,8 +596,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_worker_load_completion_runs_through_service_lane_wake() {
+    #[tokio::test]
+    async fn shared_worker_load_completion_runs_through_service_lane_wake() {
         let runtime_service = test_support::runtime_service();
         let mut service_wake_rx = test_support::install_owner_wake_sender(&runtime_service);
         let message_port_registry = new_message_port_registry();
@@ -600,6 +605,7 @@ mod tests {
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             runtime_service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let worker_context_runtime = browser_context_runtime.worker_context_runtime();
         let (client_port_id, worker_port_id, message_port_owner) =
@@ -674,8 +680,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn queued_load_completion_does_not_keep_runtime_service_alive_after_context_drop() {
+    #[tokio::test]
+    async fn queued_load_completion_does_not_keep_runtime_service_alive_after_context_drop() {
         let runtime_service = test_support::runtime_service();
         let service_weak = runtime_service.downgrade();
         let message_port_registry = new_message_port_registry();
@@ -684,6 +690,7 @@ mod tests {
                 message_port_registry.clone(),
                 crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
                 runtime_service.clone(),
+                crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
             );
             let worker_context_runtime = browser_context_runtime.worker_context_runtime();
             test_launch_context(&browser_context_runtime, worker_context_runtime)
@@ -721,14 +728,15 @@ mod tests {
         event.complete();
     }
 
-    #[test]
-    fn stale_load_failure_after_registry_shutdown_closes_pending_clients() {
+    #[tokio::test]
+    async fn stale_load_failure_after_registry_shutdown_closes_pending_clients() {
         let runtime_service = test_support::runtime_service();
         let message_port_registry = new_message_port_registry();
         let browser_context_runtime = RendererBrowserContextRuntime::new_with_parts_for_test(
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             runtime_service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let worker_context_runtime = browser_context_runtime.worker_context_runtime();
         let (client_port_id, worker_port_id, message_port_owner) =

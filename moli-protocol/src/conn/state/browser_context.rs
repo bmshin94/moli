@@ -106,6 +106,10 @@ pub struct BrowserContext {
         HashMap<(moli_core::browser::DocumentHandle, u64), Vec<TargetPreparedJavaScriptDialog>>,
     /// Snapshot recovery cursor only; ordinary Worker FIFOs are independent.
     pub(crate) worker_snapshot_sequence: Option<moli_core::browser::BrowserSequence>,
+    /// First transport binding covers this native prefix. Later lag recovery
+    /// must continue consuming the bound Worker FIFOs.
+    pub(crate) worker_network_snapshot_sequence: Option<moli_core::browser::BrowserSequence>,
+    pub(in crate::conn) worker_output_snapshot: Option<moli_core::browser::WorkerStateSnapshot>,
     pub(crate) shared_worker_targets: BTreeMap<SharedWorkerInstanceId, SharedWorkerTargetState>,
     pub(crate) dedicated_worker_targets: BTreeMap<u64, DedicatedWorkerTargetState>,
     pub(crate) service_worker_targets: BTreeMap<u64, ServiceWorkerTargetState>,
@@ -332,6 +336,8 @@ impl BrowserContext {
             automation_download_events_enabled: None,
             pending_popup_javascript_dialogs: HashMap::new(),
             worker_snapshot_sequence: None,
+            worker_network_snapshot_sequence: None,
+            worker_output_snapshot: None,
             shared_worker_targets: BTreeMap::new(),
             dedicated_worker_targets: BTreeMap::new(),
             service_worker_targets: BTreeMap::new(),
@@ -361,9 +367,13 @@ impl BrowserContext {
         sender: moli_core::RendererOutputTransportSender,
     ) {
         // Observer registration can race native Context disposal.
-        let _ = self
+        if let Ok(Some(snapshot)) = self
             .browser_context
-            .set_renderer_output_transport_sender(sender);
+            .set_renderer_output_transport_sender(sender)
+        {
+            self.worker_network_snapshot_sequence = Some(snapshot.sequence);
+            self.worker_output_snapshot = Some(snapshot);
+        }
     }
 
     pub(crate) fn snapshot_profile_backed_cookies(&self) -> Option<Vec<StoredCookie>> {

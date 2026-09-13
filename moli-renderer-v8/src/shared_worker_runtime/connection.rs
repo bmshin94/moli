@@ -31,6 +31,7 @@ fn connect_with_runtime_service(
     descriptor: SharedWorkerDescriptor,
     params: SharedWorkerLaunchParams,
 ) -> SharedWorkerClientId {
+    let _admission = runtime_service.connection_admission();
     let action = runtime_service.connect_registry_entry(descriptor, &params);
     let client_id = match &action {
         SharedWorkerConnectAction::StartLoading { client_id, .. }
@@ -232,8 +233,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn runtime_connect_and_remove_drive_owner_lifecycle_projection() {
+    #[tokio::test]
+    async fn runtime_connect_and_remove_drive_owner_lifecycle_projection() {
         let service = test_support::runtime_service();
         let message_port_owner = test_support::SharedWorkerPageClientHarness::new();
         let message_port_registry = crate::message_port_runtime::new_message_port_registry();
@@ -241,6 +242,7 @@ mod tests {
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let key = test_support::shared_worker_key();
         let owner_id = service.next_client_owner_id();
@@ -266,8 +268,8 @@ mod tests {
         drop(browser_context_runtime);
     }
 
-    #[test]
-    fn owner_lifecycle_projection_collapses_multiple_clients_from_same_owner() {
+    #[tokio::test]
+    async fn owner_lifecycle_projection_collapses_multiple_clients_from_same_owner() {
         let service = test_support::runtime_service();
         let message_port_owner = test_support::SharedWorkerPageClientHarness::new();
         let message_port_registry = crate::message_port_runtime::new_message_port_registry();
@@ -275,6 +277,7 @@ mod tests {
             message_port_registry.clone(),
             crate::broadcast_channel_runtime::new_broadcast_channel_registry(),
             service.clone(),
+            crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
         );
         let key = test_support::shared_worker_key();
         let owner_id = service.next_client_owner_id();
