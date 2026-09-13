@@ -808,6 +808,8 @@ pub(crate) struct JsContextHost {
     force_fresh_layout_reads_for_test: bool,
     root_document_lifecycle: Option<RendererDocumentLifecycleJournalHandle>,
     output_journal: Option<crate::runtime::RendererTurnOutputJournal>,
+    #[cfg(test)]
+    standalone_network_owner: Option<crate::runtime::RendererOwnerLocalHostId>,
     page_context_resources_closed: bool,
     page_default_context: Option<v8::Weak<v8::Context>>,
     pub(crate) v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry,
@@ -1246,9 +1248,9 @@ impl JsContextHost {
         self.close_owned_broadcast_channels();
         self.close_owned_message_ports();
         self.shutdown_workers();
-        // This shares the native reporter FIFO with the last teardown outputs.
-        // Closing an observation source does not claim that detached keepalive
-        // transports have completed or failed.
+        // Retirement rejects new source admissions. Requests already holding
+        // native publication permission close the source after their last
+        // terminal fact, on the same Browser input FIFO.
         if let Some(document) = self.root_document_lifecycle_identity()
             && let Some(journal) = self.output_journal.as_ref()
             && let crate::runtime::RendererOutputResidenceIdentity::Page {

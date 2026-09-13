@@ -364,6 +364,31 @@ impl TargetRuntimeSlot {
         });
     }
 
+    pub(super) fn begin_renderer_lifecycle_replacement(
+        &mut self,
+        renderer_page: RendererPageResidenceIdentity,
+        previous_binding: &CommittedRendererDocumentBinding,
+    ) {
+        // A same-Document renderer lifecycle restart (`document.open()` or a
+        // script replacement) changes the lifecycle epoch before the protocol
+        // target is replaced. Rotate the network queue at that boundary so
+        // late facts keep the request ids announced by the predecessor.
+        if self.retiring_renderer_document_outputs.iter().any(|entry| {
+            entry.renderer_page == renderer_page
+                && entry.binding.renderer_document_identity()
+                    == previous_binding.renderer_document_identity()
+        }) {
+            return;
+        }
+        self.retiring_renderer_document_outputs
+            .push(RetiringRendererDocumentOutput {
+                renderer_page,
+                document_id: previous_binding.document_id,
+                binding: previous_binding.clone(),
+                network_agent: self.network_agent.rotate_document_for_replacement(),
+            });
+    }
+
     pub(crate) fn has_renderer_navigation(&self, navigation: &NavigationId) -> bool {
         self.devtools_renderer_channel.has_navigation(navigation)
     }
@@ -920,7 +945,7 @@ impl BrowserContext {
         &mut self,
         target_id: &str,
         previous_document: Option<(DocumentId, RendererPageResidenceIdentity)>,
-    ) -> Option<RetiringRendererDocumentOutput> {
+    ) -> Option<()> {
         let runtime = &mut self
             .page_targets
             .get_mut(target_id)
@@ -932,26 +957,24 @@ impl BrowserContext {
             .page_slot
             .retiring_document_lifecycle_binding(document_id, renderer_page)?
             .clone();
-        Some(RetiringRendererDocumentOutput {
-            renderer_page,
-            document_id,
-            binding,
-            network_agent: runtime.network_agent.rotate_document_for_replacement(),
-        })
+        let network_agent = runtime.network_agent.rotate_document_for_replacement();
+        runtime
+            .retiring_renderer_document_outputs
+            .push(RetiringRendererDocumentOutput {
+                renderer_page,
+                document_id,
+                binding,
+                network_agent,
+            });
+        Some(())
     }
 
     pub(super) fn finish_document_projection_replacement_for_target(
         &mut self,
         target_id: &str,
-        retiring_document: Option<RetiringRendererDocumentOutput>,
+        retiring_document: Option<()>,
     ) {
-        if let Some(retiring_document) = retiring_document {
-            self.page_targets
-                .get_mut(target_id)
-                .expect("resolved target projection must remain live")
-                .runtime_slot
-                .retiring_renderer_document_outputs
-                .push(retiring_document);
+        if retiring_document.is_some() {
             self.page_targets
                 .get_mut(target_id)
                 .expect("resolved target projection must remain live")
@@ -1066,15 +1089,30 @@ impl BrowserContext {
                         .document_renderer_residence(document)
                         .ok()
                 });
-        let binding = self
-            .renderer_document_lifecycle_binding_for_target(target_id)
-            .filter(|_| source_renderer_page.is_none_or(|page| Some(page) == current_renderer_page))
-            .or_else(|| {
-                self.page_targets
-                    .get(target_id)?
-                    .runtime_slot
-                    .projected_document_network_binding(source_renderer_page?)
-            });
+        let source_is_retiring = self.page_targets.get(target_id).is_some_and(|target| {
+            target
+                .runtime_slot
+                .retiring_renderer_document_outputs
+                .iter()
+                .any(|entry| {
+                    entry.binding.renderer_document_identity() == source_document
+                        && source_renderer_page.is_none_or(|page| entry.renderer_page == page)
+                })
+        });
+        let binding = (!source_is_retiring)
+            .then(|| {
+                self.renderer_document_lifecycle_binding_for_target(target_id)
+                    .filter(|_| {
+                        source_renderer_page.is_none_or(|page| Some(page) == current_renderer_page)
+                    })
+                    .or_else(|| {
+                        self.page_targets
+                            .get(target_id)?
+                            .runtime_slot
+                            .projected_document_network_binding(source_renderer_page?)
+                    })
+            })
+            .flatten();
         if let Some(binding) = binding
             && binding.renderer_document_identity() == source_document
         {

@@ -42,7 +42,7 @@ impl PreparedWorkerXhrSendRequest {
 
 fn record_worker_xhr_started(
     state: &WorkerGlobalState,
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     prepared: &PreparedWorkerXhrSendRequest,
 ) {
     publish_worker_network_item(
@@ -93,7 +93,7 @@ pub(super) fn update_worker_xhr_request(
 
 fn record_worker_xhr_response(
     state: &WorkerGlobalState,
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     head: Option<ResponseHead>,
     body: SubresourceBodyFinished,
     network_request_headers: Option<Vec<(String, String)>>,

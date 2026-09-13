@@ -1821,6 +1821,28 @@ impl BrowserContext {
             }
             protocol.last_sequence = Some(event.sequence);
             if restarts_same_document {
+                let previous_binding = self
+                    .page_slot_for_target(target_id)
+                    .expect("registered Target projection")
+                    .renderer_document_lifecycle
+                    .binding
+                    .as_ref()
+                    .expect("same-Document lifecycle restart requires a binding")
+                    .clone();
+                let renderer_page =
+                    self.document_handle_for_target(target_id)
+                        .and_then(|document| {
+                            self.browser_context
+                                .document_renderer_residence(document)
+                                .ok()
+                        });
+                if let Some(renderer_page) = renderer_page {
+                    self.page_targets
+                        .get_mut(target_id)
+                        .expect("registered Target projection")
+                        .runtime_slot
+                        .begin_renderer_lifecycle_replacement(renderer_page, &previous_binding);
+                }
                 self.page_slot_for_target_mut(target_id)
                     .expect("registered Target projection")
                     .finish_renderer_document_lifecycle_observers(

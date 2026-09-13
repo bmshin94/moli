@@ -208,6 +208,8 @@ impl JsContextHost {
             force_fresh_layout_reads_for_test: false,
             root_document_lifecycle: None,
             output_journal: None,
+            #[cfg(test)]
+            standalone_network_owner: None,
             page_context_resources_closed: false,
             page_default_context: None,
             v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry::default(),

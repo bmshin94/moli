@@ -215,6 +215,20 @@ impl JsContextHost {
         self.note_subresource_activity();
     }
 
+    pub(crate) fn record_native_resource_observation(
+        &mut self,
+        observation: crate::runtime::RendererNetworkObservation,
+    ) {
+        let crate::runtime::RendererNetworkOutputItem::Resource(item) = observation.item() else {
+            unreachable!("resource completion carries a resource observation");
+        };
+        self.pending_network_output.push(item.as_ref().clone());
+        self.append_live_page_observation(crate::runtime::RendererProtocolObservation::Network(
+            observation,
+        ));
+        self.note_subresource_activity();
+    }
+
     pub(crate) fn push_network_output_item(&mut self, mut item: ScriptNetworkOutputItem) {
         // Complete-only producers still need an exact occurrence identity. Do
         // not synthesize a request-start event at the time completion arrives.
@@ -258,6 +272,28 @@ impl JsContextHost {
             return None;
         };
         Some((owner_local_host_id, document))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn standalone_network_source_for_test(
+        &self,
+    ) -> Option<(
+        crate::runtime::RendererOwnerLocalHostId,
+        crate::runtime::RendererDocumentLifecycleIdentity,
+    )> {
+        Some((
+            self.standalone_network_owner?,
+            self.root_document_lifecycle_identity()?,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bind_standalone_network_owner_for_test(&mut self) {
+        // Standalone VMs have a root Document but no protocol owner. Bind their
+        // native identity explicitly without redirecting the fixture's output
+        // queues into a journal that it does not drive.
+        self.standalone_network_owner =
+            Some(crate::runtime::RendererOwnerLocalHostId::new_for_testing(1));
     }
 
     pub(crate) fn record_get_subresource_network_result(

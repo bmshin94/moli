@@ -2643,6 +2643,12 @@ impl ScriptVm {
             AsyncSubresourceFetchEvent::Completion(completion) => {
                 self.complete_async_subresource_fetch_body(*completion)
             }
+            AsyncSubresourceFetchEvent::NativeNetwork(observation) => {
+                self._context_host
+                    .borrow_mut()
+                    .record_native_resource_observation(observation);
+                Ok(AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered)
+            }
             AsyncSubresourceFetchEvent::ObservedNetworkRecord(record) => {
                 self._context_host
                     .borrow_mut()
@@ -4523,6 +4529,10 @@ fn async_subresource_trace_fields_for_event(
         AsyncSubresourceFetchEvent::Completion(completion) => AsyncSubresourceTraceFields {
             event_kind: Some("completion"),
             internal_id: Some(completion.internal_id),
+            ..AsyncSubresourceTraceFields::default()
+        },
+        AsyncSubresourceFetchEvent::NativeNetwork(_) => AsyncSubresourceTraceFields {
+            event_kind: Some("native_network"),
             ..AsyncSubresourceTraceFields::default()
         },
         AsyncSubresourceFetchEvent::ObservedNetworkRecord(record) => AsyncSubresourceTraceFields {

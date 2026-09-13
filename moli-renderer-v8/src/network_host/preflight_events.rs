@@ -2,13 +2,14 @@ use moli_fetch::{FetchCancelHandle, Request, ResponseHead};
 
 use crate::{
     network::ResourceRequestClient,
+    network::ResourceTransfer,
     page_task_queue::RendererResourceCompletionSender,
-    runtime::RendererWorkerNetworkRequest,
+    runtime::RendererNetworkRequest,
     types::{
         AsyncSubresourceFetchEvent, AsyncSubresourceNetworkContext, SubresourceNetworkRecord,
         SubresourceResponseBody,
     },
-    worker::{WorkerNetworkObserver, WorkerResourceTransfer},
+    worker::WorkerNetworkObserver,
 };
 
 #[derive(Clone)]
@@ -18,7 +19,7 @@ pub(crate) enum CorsPreflightNetworkObserver {
         context: AsyncSubresourceNetworkContext,
     },
     Worker {
-        request: RendererWorkerNetworkRequest,
+        request: RendererNetworkRequest,
         observer: WorkerNetworkObserver,
         keepalive: bool,
     },
@@ -47,12 +48,8 @@ impl CorsPreflightNetworkObserver {
                 observer,
                 keepalive,
             } => {
-                let network = WorkerResourceTransfer::preflight(
-                    parent,
-                    observer.clone(),
-                    &request,
-                    *keepalive,
-                );
+                let network =
+                    ResourceTransfer::preflight(parent, observer.clone(), &request, *keepalive);
                 let result = loader
                     .fetch_observed_script_text_with_cancel(
                         request,

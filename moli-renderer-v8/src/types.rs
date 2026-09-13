@@ -644,6 +644,7 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
 pub(super) enum AsyncSubresourceFetchEvent {
     Completion(Box<AsyncSubresourceFetchCompletion>),
     ObservedNetworkRecord(Box<SubresourceNetworkRecord>),
+    NativeNetwork(crate::runtime::RendererNetworkObservation),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
     StreamingChunk(AsyncSubresourceStreamingChunk),
     StreamingFinished(AsyncSubresourceStreamingFinished),
@@ -655,7 +656,7 @@ impl AsyncSubresourceFetchEvent {
             Self::Completion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id,
             },
-            Self::ObservedNetworkRecord(_) => {
+            Self::ObservedNetworkRecord(_) | Self::NativeNetwork(_) => {
                 AsyncSubresourceFetchEventTarget::ObservedNetworkRecord
             }
             Self::StreamingStarted(started) => AsyncSubresourceFetchEventTarget::StreamingStart {

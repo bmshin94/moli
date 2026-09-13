@@ -178,7 +178,7 @@ pub(crate) struct RendererStoragePartitionIdentity {
 
 #[derive(Debug)]
 struct RendererBrowserContextRuntimeInner {
-    worker_resource_task_runner: Arc<OnceLock<crate::network::RendererResourceTaskRunner>>,
+    resource_task_runner: Arc<OnceLock<crate::network::RendererResourceTaskRunner>>,
     worker_service_task: OnceLock<WorkerServiceTask>,
     id: super::RendererBrowserContextRuntimeId,
     worker_lifecycle: super::RendererWorkerLifecycleReporter,
@@ -347,17 +347,14 @@ impl Default for RendererBrowserContextRuntimeOwner {
 
 impl RendererBrowserContextRuntime {
     /// Select the executor at the owning Browser resource boundary, before any
-    /// Worker starts. Context construction itself may precede entering that
+    /// Document or Worker starts. Context construction itself may precede entering that
     /// executor; later Documents and persisted Service Workers share this one
     /// binding, never whichever Worker VM happens to be running.
-    pub fn bind_worker_resource_task_runner(
+    pub fn bind_resource_task_runner(
         &self,
         task_runner: crate::network::RendererResourceTaskRunner,
     ) {
-        let runner = self
-            .inner
-            .worker_resource_task_runner
-            .get_or_init(|| task_runner);
+        let runner = self.inner.resource_task_runner.get_or_init(|| task_runner);
         self.inner.worker_service_task.get_or_init(|| {
             let (shared_tx, mut shared_rx) =
                 crate::shared_worker_runtime::shared_worker_owner_wake_channel();
@@ -396,10 +393,14 @@ impl RendererBrowserContextRuntime {
     #[cfg(test)]
     pub(crate) fn new_for_test() -> RendererBrowserContextRuntimeOwner {
         let owner = Self::new();
-        owner.bind_worker_resource_task_runner(
-            crate::network::RendererResourceTaskRunner::for_test(),
-        );
+        owner.bind_resource_task_runner(crate::network::RendererResourceTaskRunner::for_test());
         owner
+    }
+
+    pub(crate) fn resource_task_runner(
+        &self,
+    ) -> Option<crate::network::RendererResourceTaskRunner> {
+        self.inner.resource_task_runner.get().cloned()
     }
 
     /// Resolves once, before the caller yields. The returned capability can
@@ -501,9 +502,7 @@ impl RendererBrowserContextRuntime {
             crate::new_shared_service_worker_resource_store(),
             browser_resource_runtime,
         );
-        runtime.bind_worker_resource_task_runner(
-            crate::network::RendererResourceTaskRunner::for_test(),
-        );
+        runtime.bind_resource_task_runner(crate::network::RendererResourceTaskRunner::for_test());
         RendererBrowserContextRuntimeOwner {
             runtime: Some(runtime),
             producer_registry: RendererProducerRegistry::new(),
@@ -532,7 +531,7 @@ impl RendererBrowserContextRuntime {
             crate::new_shared_service_worker_resource_store(),
             browser_resource_runtime,
         );
-        runtime.bind_worker_resource_task_runner(task_runner);
+        runtime.bind_resource_task_runner(task_runner);
         RendererBrowserContextRuntimeOwner {
             runtime: Some(runtime),
             producer_registry: RendererProducerRegistry::new(),
@@ -601,8 +600,7 @@ impl RendererBrowserContextRuntime {
         let storage_partition_identity =
             service_worker_context_runtime.storage_partition_identity();
         let dedicated_workers = service_worker_context_runtime.dedicated_workers.clone();
-        let worker_resource_task_runner =
-            service_worker_context_runtime.resource_task_runner.clone();
+        let resource_task_runner = service_worker_context_runtime.resource_task_runner.clone();
         let network = dedicated_workers.network.clone();
         let id = network.runtime();
         let renderer_output_transport_tx = dedicated_workers.transport.clone();
@@ -627,7 +625,7 @@ impl RendererBrowserContextRuntime {
         );
         let runtime = Self {
             inner: Arc::new(RendererBrowserContextRuntimeInner {
-                worker_resource_task_runner,
+                resource_task_runner,
                 worker_service_task: OnceLock::new(),
                 id,
                 worker_lifecycle,
@@ -698,6 +696,16 @@ impl RendererBrowserContextRuntime {
         self.inner
             .network
             .report(owner_local_host_id, document, item)
+    }
+
+    pub(crate) fn network_for_document(
+        &self,
+        owner_local_host_id: super::RendererOwnerLocalHostId,
+        document: super::RendererDocumentLifecycleIdentity,
+    ) -> super::RendererDocumentNetworkReporter {
+        self.inner
+            .network
+            .for_document(owner_local_host_id, document)
     }
 
     pub(crate) fn close_network_source(
@@ -819,7 +827,7 @@ impl RendererBrowserContextRuntime {
 
     pub(crate) fn worker_context_runtime(&self) -> RendererWorkerContextRuntime {
         RendererWorkerContextRuntime {
-            resource_task_runner: self.inner.worker_resource_task_runner.clone(),
+            resource_task_runner: self.inner.resource_task_runner.clone(),
             dedicated_workers: self.inner.dedicated_workers.clone(),
             message_port_registry: self.message_port_registry(),
             broadcast_channel_registry: self.broadcast_channel_registry(),
@@ -1147,10 +1155,8 @@ mod tests {
         let existing = owner.worker_context_runtime();
         assert!(existing.resource_task_runner().is_none());
         let selected = crate::network::RendererResourceTaskRunner::for_test();
-        owner.bind_worker_resource_task_runner(selected.clone());
-        owner.bind_worker_resource_task_runner(
-            crate::network::RendererResourceTaskRunner::for_test(),
-        );
+        owner.bind_resource_task_runner(selected.clone());
+        owner.bind_resource_task_runner(crate::network::RendererResourceTaskRunner::for_test());
         for view in [existing, owner.worker_context_runtime()] {
             assert!(
                 view.resource_task_runner()

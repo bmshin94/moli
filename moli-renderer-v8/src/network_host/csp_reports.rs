@@ -97,6 +97,8 @@ impl ContentSecurityPolicyReportOwner {
 #[derive(Clone)]
 pub(crate) struct WindowCspReportRequestContext {
     identity: crate::native_bridge::WindowDocumentNetworkRequestIdentity,
+    network: crate::runtime::RendererDocumentNetworkReporter,
+    completion_tx: crate::page_task_queue::RendererResourceCompletionSender,
     resource_loader: crate::network::context::DocumentResourceLoader,
     request_client: ResourceRequestClient,
     frame_id: Option<String>,
@@ -265,7 +267,7 @@ fn send_content_security_policy_report_request(
     }
 
     let loader = request_context.request_client.clone();
-    spawn_content_security_policy_report_fetch(host, loader, request_context, info, request);
+    spawn_content_security_policy_report_fetch(loader, request_context, info, request);
 }
 
 fn dispatch_service_worker_content_security_policy_report(
@@ -348,43 +350,48 @@ fn dispatch_service_worker_content_security_policy_report(
 }
 
 fn spawn_content_security_policy_report_fetch(
-    host: &mut JsContextHost,
     request_client: ResourceRequestClient,
     request_context: &WindowCspReportRequestContext,
     info: PendingSubresourceFetchInfo,
     request: Request,
 ) {
-    let cancel_handle = FetchCancelHandle::new();
-    let load = request_context.register_report_load(Some(cancel_handle.clone()));
-    let task_runner = load.task_runner();
-    let internal_id = host.record_async_subresource_csp_report(
-        request_context.identity,
-        request_context.client_id,
-        load,
-        request_context.network_partition_key.clone(),
-        request_context.policy_context,
-        info.clone(),
-    );
-    let request_body_text = report_request_body_text(&request);
-    spawn_async_subresource_fetch(
-        task_runner,
-        host.resource_completion_sender(),
-        request_client,
-        request.clone(),
-        Some(cancel_handle),
-        Vec::new(),
-        internal_id,
-        AsyncSubresourceNetworkContext {
-            frame_id: info.frame_id,
-            document_url: info.document_url,
-            resource_type: SubresourceResourceType::CspReport,
-            policy_context: request_context.policy_context,
+    let Some(request_network) = request_context.network.start_request() else {
+        return;
+    };
+    let completion_tx = request_context.completion_tx.clone();
+    let network = crate::network::ResourceTransfer::from_request(
+        request_network,
+        move |observation| {
+            let _ = completion_tx.send_async_subresource_event(
+                crate::types::AsyncSubresourceFetchEvent::NativeNetwork(observation),
+            );
         },
-        request.url,
-        request.method,
-        request.request_headers,
-        request_body_text,
+        |network| {
+            moli_page_types::SubresourceRequestStarted::new(
+                network.handle(),
+                info.frame_id,
+                info.document_url,
+                info.url,
+                info.method,
+                info.request_headers,
+                info.request_body,
+                info.resource_type,
+                moli_page_types::SubresourceRequestInitiatorType::Script,
+                info.request_cookie_report,
+            )
+            .with_request_body_bytes(info.request_body_bytes)
+            .with_keepalive(true)
+        },
     );
+    let cancel = FetchCancelHandle::new();
+    let load = request_context.register_report_load(Some(cancel.clone()));
+    load.task_runner().spawn(async move {
+        let result = request_client
+            .fetch_observed_script_text_with_cancel(request, cancel, network.as_ref())
+            .await;
+        network.complete(&result);
+        load.finish();
+    });
 }
 
 fn report_subresource_fetch_info(
@@ -448,8 +455,16 @@ fn window_csp_report_request_context_for_identity(
                 popup_id,
             )),
     };
+    let source = host.renderer_network_source();
+    #[cfg(test)]
+    let source = source.or_else(|| host.standalone_network_source_for_test());
+    let (owner_local_host_id, document) = source?;
     Some(WindowCspReportRequestContext {
         identity,
+        network: host
+            .browser_context_runtime()
+            .network_for_document(owner_local_host_id, document),
+        completion_tx: host.resource_completion_sender(),
         request_client: resource_loader.frozen_request_client(),
         resource_loader,
         frame_id,

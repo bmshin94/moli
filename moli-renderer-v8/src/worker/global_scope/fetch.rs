@@ -12,7 +12,7 @@ use moli_page_types::{
 
 pub(in crate::worker) fn publish_worker_network_item(
     observer: &crate::worker::WorkerNetworkObserver,
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     item: ScriptNetworkOutputItem,
 ) {
     observer.publish(network.report(item));
@@ -20,7 +20,7 @@ pub(in crate::worker) fn publish_worker_network_item(
 
 fn send_worker_fetch_transport_completion(
     sender: &mpsc::UnboundedSender<WorkerFetchEvent>,
-    network: crate::runtime::RendererWorkerNetworkRequest,
+    network: crate::runtime::RendererNetworkRequest,
     observer: crate::worker::WorkerNetworkObserver,
     completion: WorkerRequestCompletion,
 ) {
@@ -94,7 +94,7 @@ fn worker_fetch_request(pending: &PendingWorkerFetch) -> SubresourceRequestStart
 }
 
 pub(in crate::worker) fn worker_request_started(
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     document_url: &Url,
     url: &Url,
     method: &str,
@@ -149,7 +149,7 @@ fn record_worker_fetch_started(state: &WorkerGlobalState, pending: &PendingWorke
 
 pub(in crate::worker) fn record_worker_fetch_response(
     observer: &crate::worker::WorkerNetworkObserver,
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     head: ResponseHead,
     network_request_headers: Option<Vec<(String, String)>>,
 ) {
@@ -182,7 +182,7 @@ pub(in crate::worker) fn record_worker_subresource_failure(
     resource_type: SubresourceResourceType,
     error_text: String,
 ) {
-    let Some(transfer) = crate::worker::WorkerResourceTransfer::start(
+    let Some(transfer) = crate::network::ResourceTransfer::start(
         state.global_kind.network(),
         state.parent_tx.network_observer(),
         |network| {
@@ -216,7 +216,7 @@ fn worker_network_result_parts<R>(
 
 async fn collect_worker_resource_response(
     observed: moli_fetch::NetworkFetchResult<moli_fetch::StreamingRawResponse>,
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     observer: &crate::worker::WorkerNetworkObserver,
     observe_response: bool,
     error_prefix: &str,
@@ -269,7 +269,7 @@ async fn collect_worker_resource_response(
 
 pub(in crate::worker) fn spawn_worker_fetch_network(
     load: ResourceLoadLease,
-    network: crate::runtime::RendererWorkerNetworkRequest,
+    network: crate::runtime::RendererNetworkRequest,
     observer: crate::worker::WorkerNetworkObserver,
     completion_tx: mpsc::UnboundedSender<WorkerFetchEvent>,
     fetch_id: u32,
@@ -492,7 +492,7 @@ fn spawn_worker_fetch_service_worker(
     runtime: ServiceWorkerRuntimeService,
     client_id: ServiceWorkerClientId,
     load: ResourceLoadLease,
-    network: crate::runtime::RendererWorkerNetworkRequest,
+    network: crate::runtime::RendererNetworkRequest,
     observer: crate::worker::WorkerNetworkObserver,
     completion_tx: mpsc::UnboundedSender<WorkerFetchEvent>,
     fetch_id: u32,
@@ -611,7 +611,7 @@ fn spawn_worker_fetch_service_worker(
 
 pub(in crate::worker) fn spawn_worker_xhr_network(
     load: ResourceLoadLease,
-    network: crate::runtime::RendererWorkerNetworkRequest,
+    network: crate::runtime::RendererNetworkRequest,
     observer: crate::worker::WorkerNetworkObserver,
     deliver: impl FnOnce(WorkerRequestDelivery) + Send + 'static,
     xhr_id: u32,
@@ -2702,7 +2702,7 @@ pub(in crate::worker) fn record_worker_fetch_failure(
 
 pub(super) fn publish_worker_request_failure(
     observer: &crate::worker::WorkerNetworkObserver,
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     error: WorkerRequestError,
 ) {
     let error = if is_cors_policy_failure_message(error.message()) {
