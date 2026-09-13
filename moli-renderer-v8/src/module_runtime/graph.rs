@@ -468,7 +468,7 @@ impl NativeModuleGraphFetchRequest {
                         crate::referrer_policy::response_referrer_policy_from_headers(
                             &response.headers,
                         );
-                    let (head, _, body_bytes) = response.into_parts();
+                    let (head, body_bytes) = response.into_byte_parts();
                     crate::network_host::validate_cors_response_chain(
                         &initiator_url,
                         &head,
