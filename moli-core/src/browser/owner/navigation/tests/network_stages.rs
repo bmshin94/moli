@@ -258,6 +258,11 @@ macro_rules! worker_stage_tests {
 }
 
 worker_stage_tests! {
+    native_worker_main_stages_service: Service, MainScript, Complete;
+    native_worker_main_stages_service_module: Service, MainModule, Complete;
+    native_worker_main_stages_service_partial_body: Service, MainScript, PartialFailure;
+    native_worker_main_stages_service_retirement: Service, MainScript, RetiredCancellation;
+    native_worker_main_stages_service_retirement_retains_partial_body: Service, MainScript, RetiredAfterChunk;
     native_worker_main_stages_shared: Shared, MainScript, Complete;
     native_worker_main_stages_shared_module: Shared, MainModule, Complete;
     native_worker_main_stages_shared_partial_body: Shared, MainScript, PartialFailure;
@@ -425,7 +430,10 @@ async fn worker_network_stages_with_request(
             WorkerKind::Service
                 if matches!(
                     request_kind,
-                    RequestKind::ImportScript | RequestKind::StaticModule
+                    RequestKind::ImportScript
+                        | RequestKind::StaticModule
+                        | RequestKind::MainScript
+                        | RequestKind::MainModule
                 ) =>
             {
                 request_script.clone()
@@ -455,6 +463,9 @@ async fn worker_network_stages_with_request(
                 format!(
                     "globalThis.worker = new SharedWorker('/worker.js',{options});worker.port.start()"
                 )
+            }
+            WorkerKind::Service if main_script => {
+                format!("navigator.serviceWorker.register('/probe',{options})")
             }
             WorkerKind::Service => {
                 format!("navigator.serviceWorker.register('/worker.js',{options})")
@@ -822,16 +833,31 @@ async fn worker_network_stages_with_request(
                 context.close_web_contents(contents).unwrap().close_async(),
             )
             .await
-            .expect("last SharedWorker client closes with the partial body held");
-            assert!(
-                browser
-                    .subscribe()
-                    .unwrap()
-                    .0
-                    .workers
-                    .iter()
-                    .all(|worker| worker.handle() != owner)
-            );
+            .expect("the Worker client closes with the partial body held");
+            if let WorkerHandle::Service { version, .. } = owner {
+                context
+                    .execute_service_worker_command(
+                        crate::browser::ServiceWorkerCommand::StopVersion {
+                            version_id: version,
+                        },
+                    )
+                    .unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if browser.subscribe().unwrap().0.workers.iter().all(|worker| {
+                        worker.handle() != owner
+                            || matches!(worker,
+                            crate::browser::WorkerSnapshot::Service { worker, .. }
+                            if worker.execution == crate::browser::ServiceWorkerExecution::Stopped)
+                    }) {
+                        break;
+                    }
+                    buffered.push_back(events.recv().await.unwrap());
+                }
+            })
+            .await
+            .expect("the exact Worker run retires with its partial body held");
             held_tail = release;
         } else if let Some(release) = release {
             release.send(()).unwrap();
@@ -848,6 +874,7 @@ async fn worker_network_stages_with_request(
     server.await.unwrap();
     if let WorkerHandle::Service { version, .. } = owner
         && !finish.retires_before_headers()
+        && !matches!(finish, Finish::RetiredAfterChunk)
     {
         context
             .execute_service_worker_command(crate::browser::ServiceWorkerCommand::StopVersion {

@@ -565,14 +565,31 @@ async fn native_service_worker_network_held_output_and_old_receipt_cannot_cross_
         .unwrap();
     let recovered = conn
         .project_browser_snapshot(browser.subscribe().unwrap().0)
-        .await;
+        .await
+        .into_iter()
+        .map(BackgroundProtocolEvent::into_protocol_message)
+        .collect::<Vec<_>>();
     assert_eq!(
         recovered
             .iter()
-            .filter(|event| event.protocol_method() == Some("Network.loadingFinished"))
+            .filter(|event| event["method"] == "Network.loadingFinished")
             .count(),
-        1
+        2
     );
+    for url in [
+        first.info.script_url.clone(),
+        server.url("/native-worker-network/probe"),
+    ] {
+        assert_eq!(
+            recovered
+                .iter()
+                .filter(|event| event["method"] == "Network.requestWillBeSent"
+                    && event["params"]["request"]["url"] == url)
+                .count(),
+            1,
+            "the restarted main and original fetch each recover once"
+        );
+    }
     assert!(
         worker_target_background_events_async(&mut conn, held)
             .await

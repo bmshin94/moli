@@ -107,7 +107,6 @@ use super::{
         ServiceWorkerScriptUpdateCheckChange, ServiceWorkerScriptUpdateCheckCompletion,
         ServiceWorkerScriptUpdateCheckFailure, ServiceWorkerScriptUpdateCheckFailureStatus,
         ServiceWorkerScriptUpdateCheckParams, ServiceWorkerScriptUpdateCheckResult,
-        load_service_worker_script_update_check,
     },
     service_lane::ServiceWorkerServiceLane,
     snapshots::{
@@ -638,7 +637,7 @@ mod tests {
         version_id: ServiceWorkerVersionId,
         run: &RendererServiceWorkerRunIdentity,
     ) -> SharedRendererServiceWorkerHost {
-        RendererServiceWorkerHost::new_loading(&test_run_owner(version_id, run))
+        RendererServiceWorkerHost::new_loading_for_test(&test_run_owner(version_id, run))
     }
 
     fn new_running_test_host(
@@ -7279,8 +7278,14 @@ self.addEventListener("message", event => {
             "force-update warning should wait until the install launch starts: {target_events:?}"
         );
 
+        let owner = {
+            let state = service.inner.state.lock();
+            let version = state.pending_main_script_update_checks[&registration_id].new_version_id;
+            state.versions[&version].run_owner()
+        };
         service.finish_main_script_update_check_completed(
             registration_id,
+            owner,
             Ok(ServiceWorkerScriptUpdateCheckResult {
                 main_script: test_loaded_script(&script_url, "self.skipWaiting();"),
                 change: ServiceWorkerScriptUpdateCheckChange::ScriptComparisonSkipped,
@@ -7953,8 +7958,14 @@ self.addEventListener("message", event => {
             completion_queue.sender(),
         );
 
+        let owner = {
+            let state = service.inner.state.lock();
+            let version = state.pending_main_script_update_checks[&registration_id].new_version_id;
+            state.versions[&version].run_owner()
+        };
         service.finish_main_script_update_check_completed(
             registration_id,
+            owner,
             Ok(test_update_check_result(
                 &script_url,
                 "self.skipWaiting();",
@@ -8244,8 +8255,33 @@ self.addEventListener("message", event => {
         );
         assert!(!completion_queue.has_ready_task());
 
+        let owner = {
+            let state = service.inner.state.lock();
+            let version = state.pending_main_script_update_checks[&registration_id].new_version_id;
+            state.versions[&version].run_owner()
+        };
+        for stale_owner in [
+            ServiceWorkerRunOwner::fresh(owner.version_id()),
+            ServiceWorkerRunOwner::fresh(active_version_id),
+        ] {
+            service.finish_main_script_update_check_completed(
+                registration_id,
+                stale_owner,
+                Ok(test_update_check_result(&script_url, "abc", false)),
+            );
+            let state = service.inner.state.lock();
+            assert_eq!(
+                state.pending_main_script_update_checks[&registration_id].new_version_id,
+                owner.version_id()
+            );
+            assert!(
+                !completion_queue.has_ready_task(),
+                "another run cannot complete the current update job"
+            );
+        }
         service.finish_main_script_update_check_completed(
             registration_id,
+            owner,
             Ok(test_update_check_result(&script_url, "abc", false)),
         );
 
@@ -8347,8 +8383,14 @@ self.addEventListener("message", event => {
             Some(new_version_id)
         );
 
+        let owner = {
+            let state = service.inner.state.lock();
+            let version = state.pending_main_script_update_checks[&registration_id].new_version_id;
+            state.versions[&version].run_owner()
+        };
         service.finish_main_script_update_check_completed(
             registration_id,
+            owner,
             Ok(test_update_check_result(&script_url, "abc", true)),
         );
 
@@ -8410,8 +8452,14 @@ self.addEventListener("message", event => {
             completion_queue.sender(),
         );
 
+        let owner = {
+            let state = service.inner.state.lock();
+            let version = state.pending_main_script_update_checks[&registration_id].new_version_id;
+            state.versions[&version].run_owner()
+        };
         service.finish_main_script_update_check_completed(
             registration_id,
+            owner,
             Err(ServiceWorkerScriptUpdateCheckFailure::script_load(
                 "script fetch failed".to_owned(),
             )),
@@ -8484,8 +8532,14 @@ self.addEventListener("message", event => {
             completion_queue.sender(),
         );
 
+        let owner = {
+            let state = service.inner.state.lock();
+            let version = state.pending_main_script_update_checks[&registration_id].new_version_id;
+            state.versions[&version].run_owner()
+        };
         service.finish_main_script_update_check_completed(
             registration_id,
+            owner,
             Ok(test_update_check_result(&script_url, "abc", false)),
         );
 

@@ -17,6 +17,40 @@ impl crate::runtime::RendererDedicatedWorkerHost {
 }
 
 impl super::WorkerResourceTransfer {
+    pub(crate) fn start_script(
+        source: &crate::runtime::RendererWorkerNetworkReporter,
+        observer: super::WorkerNetworkObserver,
+        script_url: &Url,
+        initiator_url: &Url,
+    ) -> Option<std::sync::Arc<Self>> {
+        Self::start(source, observer, |request| {
+            super::global_scope::worker_request_started(
+                request,
+                initiator_url,
+                script_url,
+                "GET",
+                &[],
+                &None,
+                moli_page_types::SubresourceResourceType::Script,
+            )
+        })
+    }
+
+    pub(crate) fn materialize_script_response<T>(
+        &self,
+        response: moli_fetch::Response,
+        materialize: impl FnOnce(moli_fetch::Response) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let body = moli_page_types::SubresourceResponseBody::from_fetch_response(&response);
+        let head = crate::network::ResourceResponseHead {
+            head: response.head(),
+            network_request_headers: response
+                .network_request_extra_info()
+                .map(|info| info.headers.clone()),
+        };
+        self.finish_script_response(head, body, materialize(response))
+    }
+
     pub(crate) fn start_main_script(
         source: &crate::runtime::RendererWorkerNetworkReporter,
         observer: super::WorkerNetworkObserver,
@@ -52,6 +86,15 @@ impl super::WorkerResourceTransfer {
             head: response.head(),
             network_request_headers: response.network_request_headers().map(<[_]>::to_vec),
         };
+        self.finish_script_response(head, body, result)
+    }
+
+    fn finish_script_response<T>(
+        &self,
+        head: crate::network::ResourceResponseHead,
+        body: moli_page_types::SubresourceResponseBody,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
         match &result {
             Ok(_) => self.body_completed(head, body),
             Err(message) => self.failed(&crate::network::ResourceResponseFailure::PartialBody {
