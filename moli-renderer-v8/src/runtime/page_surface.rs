@@ -493,6 +493,7 @@ pub struct RendererSharedWorkerTargetInfo {
     pub instance_id: SharedWorkerInstanceId,
     pub url: String,
     pub name: String,
+    pub execution_ready: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

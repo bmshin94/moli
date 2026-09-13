@@ -107,13 +107,16 @@ async fn worker_binding_restores_the_unobserved_network_prefix_once(dedicated: b
                 .filter(|message| message["method"] == method
                     && message["sessionId"] == "SID-bound-network")
                 .count(),
-            1,
-            "{messages:?}"
+            if dedicated { 1 } else { 2 },
+            "the original fetch and each eligible main request replay exactly once: {messages:?}"
         );
     }
     let id = messages
         .iter()
-        .find(|message| message["method"] == "Network.requestWillBeSent")
+        .find(|message| {
+            message["method"] == "Network.requestWillBeSent"
+                && message["params"]["request"]["url"] == "data:text/plain,before-binding"
+        })
         .unwrap()["params"]["requestId"]
         .as_str()
         .unwrap();
@@ -316,7 +319,7 @@ async fn worker_network_snapshot_and_late_fifo_preserve_source_and_body_visibili
     );
     assert_eq!(requests.iter().filter(|entry| matches!(&entry.state,
         moli_core::browser::NetworkRequestState::Completed { request, .. } if request.is_worker_main_script())).count(),
-        if dedicated { 2 } else { 0 }, "each Dedicated main script has its own native request");
+        2, "each physical Worker's main script has its own native request");
     let mut conn = fixture.connection();
     conn.project_browser_snapshot(snapshot).await;
     let context_id = conn
@@ -365,7 +368,10 @@ async fn worker_network_snapshot_and_late_fifo_preserve_source_and_body_visibili
         .collect::<Vec<_>>();
     let starts = messages
         .iter()
-        .filter(|message| message["method"] == "Network.requestWillBeSent")
+        .filter(|message| {
+            message["method"] == "Network.requestWillBeSent"
+                && message["params"]["request"]["url"] == URL
+        })
         .collect::<Vec<_>>();
     assert_eq!(starts.len(), 2, "{messages:?}");
     assert_ne!(
@@ -382,7 +388,14 @@ async fn worker_network_snapshot_and_late_fifo_preserve_source_and_body_visibili
             .iter()
             .filter(|message| message["method"] == "Network.loadingFinished")
             .count(),
-        2
+        if dedicated { 2 } else { 4 }
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["method"] == "Network.requestWillBeSent")
+            .count(),
+        if dedicated { 2 } else { 4 }
     );
     assert!(conn.project_browser_snapshot(recover).await.is_empty());
     for (residence, observation) in observations {
@@ -734,12 +747,20 @@ async fn native_nested_worker_snapshot_keeps_typed_parent_and_session_scope() {
                 .filter(|message| {
                     message["method"] == "Network.requestWillBeSent"
                         && message["sessionId"] == session
+                        && message["params"]["request"]["url"] == url
                 })
                 .collect::<Vec<_>>();
             assert_eq!(starts.len(), 1, "{messages:?}");
             assert_eq!(starts[0]["params"]["request"]["url"], url);
             assert!(starts[0]["params"].get("frameId").is_none());
         }
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["method"] == "Network.requestWillBeSent")
+                .count(),
+            if dedicated { 2 } else { 3 }
+        );
         fixture.service.shutdown();
     }
 }

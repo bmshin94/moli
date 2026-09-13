@@ -7,31 +7,41 @@ impl crate::runtime::RendererDedicatedWorkerHost {
         script_url: &Url,
         initiator_url: &Url,
     ) -> Option<std::sync::Arc<super::WorkerResourceTransfer>> {
-        let mut url = script_url.clone();
-        url.set_fragment(None);
-        super::WorkerResourceTransfer::start(
+        super::WorkerResourceTransfer::start_main_script(
             self.network(),
             super::WorkerNetworkObserver::Dedicated(self.network_observer()),
-            |request| {
-                moli_page_types::SubresourceRequestStarted::new(
-                    request.handle(),
-                    None,
-                    initiator_url.clone(),
-                    url,
-                    "GET".into(),
-                    Vec::new(),
-                    None,
-                    moli_page_types::SubresourceResourceType::Script,
-                    moli_page_types::SubresourceRequestInitiatorType::Other,
-                    None,
-                )
-                .with_worker_main_script()
-            },
+            script_url,
+            initiator_url,
         )
     }
 }
 
 impl super::WorkerResourceTransfer {
+    pub(crate) fn start_main_script(
+        source: &crate::runtime::RendererWorkerNetworkReporter,
+        observer: super::WorkerNetworkObserver,
+        script_url: &Url,
+        initiator_url: &Url,
+    ) -> Option<std::sync::Arc<Self>> {
+        let mut url = script_url.clone();
+        url.set_fragment(None);
+        super::WorkerResourceTransfer::start(source, observer, |request| {
+            moli_page_types::SubresourceRequestStarted::new(
+                request.handle(),
+                None,
+                initiator_url.clone(),
+                url,
+                "GET".into(),
+                Vec::new(),
+                None,
+                moli_page_types::SubresourceResourceType::Script,
+                moli_page_types::SubresourceRequestInitiatorType::Other,
+                None,
+            )
+            .with_worker_main_script()
+        })
+    }
+
     pub(crate) fn main_script_response<T>(
         &self,
         response: &crate::protocol_types::NavigationResponse,

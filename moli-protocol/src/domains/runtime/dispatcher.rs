@@ -11542,6 +11542,7 @@ mod protocol_neutral_tests {
             None,
             "https://example.test/shared-worker.js".to_owned(),
             "shared-worker".to_owned(),
+            true,
         );
         target.attach_session("SID-shared-worker".to_owned());
         target.set_runtime_frontend_enabled("SID-shared-worker", true);

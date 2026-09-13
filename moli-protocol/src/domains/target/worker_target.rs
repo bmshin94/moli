@@ -117,7 +117,7 @@ enum WorkerTargetLifecycleOutput {
         attachment: TargetSharedWorkerProtocolAttachmentIdentity,
         events: Vec<crate::conn::BackgroundProtocolEvent>,
     },
-    SharedWorkerCreated {
+    SharedWorkerTargetChanged {
         target_delta: PreparedTargetHostDelta,
     },
     SharedWorkerAttached {
@@ -220,6 +220,7 @@ enum WorkerTargetLifecycleOutput {
 /// Already-existing lifetime capabilities, not another readiness ledger.
 #[derive(Debug, PartialEq)]
 enum WorkerRuntimeObserver {
+    Shared(TargetSharedWorkerProtocolAttachmentIdentity),
     Dedicated(TargetSharedWorkerProtocolAttachmentIdentity),
     Service(TargetServiceWorkerRuntimeAttachmentIdentity),
 }
@@ -227,13 +228,19 @@ enum WorkerRuntimeObserver {
 impl WorkerRuntimeObserver {
     fn session_id(&self) -> &str {
         match self {
-            Self::Dedicated(attachment) => attachment.session_id(),
+            Self::Shared(attachment) | Self::Dedicated(attachment) => attachment.session_id(),
             Self::Service(runtime) => runtime.session_id(),
         }
     }
 
     fn is_enabled(&self, conn: &mut CdpConnection) -> bool {
         match self {
+            Self::Shared(attachment) => {
+                exact_shared_worker_target(conn, attachment).is_some_and(|target| {
+                    target.execution_ready
+                        && target.runtime_frontend_enabled(attachment.session_id())
+                })
+            }
             Self::Dedicated(attachment) => exact_dedicated_worker_target(conn, attachment)
                 .is_some_and(|target| target.runtime_frontend_enabled(attachment.session_id())),
             Self::Service(runtime) => exact_service_worker_runtime_target_mut(conn, runtime)
@@ -558,7 +565,8 @@ pub(in crate::domains) fn worker_lifecycle_prepared_outputs(
                 DedicatedWorkerRetirementCause::RendererDestroyed,
             )
         }
-        moli_core::page::RendererWorkerLifecycle::SharedCreated(info) => {
+        moli_core::page::RendererWorkerLifecycle::SharedCreated(info)
+        | moli_core::page::RendererWorkerLifecycle::SharedStarted(info) => {
             register_native_shared_worker_projection(conn, &browser_context_id, info.clone())
         }
         moli_core::page::RendererWorkerLifecycle::SharedDestroyed(instance_id) => {
@@ -1756,40 +1764,60 @@ fn register_shared_worker_target(
     info: RendererSharedWorkerTargetInfo,
 ) -> TargetPreparedOutputs {
     let mut outputs = TargetPreparedOutputs::default();
-    if conn
+    let existing = conn
         .browser_context_by_id(browser_context_id)
         .and_then(|context| context.shared_worker_target_id_for_renderer_instance(info.instance_id))
-        .is_some()
-    {
-        return outputs;
-    }
-    let target_id = conn.gen_target_id();
-    let auto_attach_owners = shared_worker_auto_attach_owner_sessions(conn);
-    let attached_sessions = auto_attach_owners
-        .iter()
-        .map(|owner| {
-            (
-                owner.clone(),
-                conn.gen_session_id(),
-                conn.auto_attach_owner_waits_for_debugger_on_start(owner.as_deref()),
-            )
-        })
-        .collect::<Vec<_>>();
-    let created_snapshot = {
+        .map(str::to_owned);
+    let target_id = existing.clone().unwrap_or_else(|| conn.gen_target_id());
+    let ready = info.execution_ready;
+    let target_delta = {
         let Some(context) = conn.browser_context_by_id_mut(browser_context_id) else {
             return outputs;
         };
-        context.insert_shared_worker_target(SharedWorkerTargetState::new(
-            info.instance_id,
-            target_id.clone(),
-            owner_target_id,
-            info.url,
-            info.name,
-        ));
-        let snapshot = context.devtools_target_info(&target_id);
-        debug_assert!(snapshot.is_some());
-        snapshot
+        if existing.is_some() {
+            let target = context
+                .shared_worker_target_mut(&target_id)
+                .expect("resolved SharedWorker target");
+            if target.execution_ready || !ready {
+                return outputs;
+            }
+            target.execution_ready = true;
+            let changed = target.url != info.url;
+            target.url = info.url;
+            changed.then(|| {
+                PreparedTargetHostDelta::info_changed(
+                    target_id.clone(),
+                    context.devtools_target_info(&target_id),
+                )
+            })
+        } else {
+            context.insert_shared_worker_target(SharedWorkerTargetState::new(
+                info.instance_id,
+                target_id.clone(),
+                owner_target_id,
+                info.url,
+                info.name,
+                ready,
+            ));
+            Some(PreparedTargetHostDelta::created(
+                target_id.clone(),
+                context.devtools_target_info(&target_id),
+            ))
+        }
     };
+    if let Some(target_delta) = target_delta {
+        outputs.push(WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { target_delta });
+    }
+    if !ready {
+        return outputs;
+    }
+    let attached_sessions = shared_worker_auto_attach_owner_sessions(conn)
+        .into_iter()
+        .map(|owner| {
+            let waiting = conn.auto_attach_owner_waits_for_debugger_on_start(owner.as_deref());
+            (owner, conn.gen_session_id(), waiting)
+        })
+        .collect::<Vec<_>>();
     let mut attached_outputs = Vec::new();
     for (owner_session_id, session_id, waiting_for_debugger) in attached_sessions {
         if let Some(target_info) = conn
@@ -1832,16 +1860,42 @@ fn register_shared_worker_target(
             ));
         }
     }
-    if let Some(target_info) = created_snapshot {
-        outputs.push(WorkerTargetLifecycleOutput::SharedWorkerCreated {
-            target_delta: PreparedTargetHostDelta::created(target_id.clone(), Some(target_info)),
-        });
-    }
     for (attachment, prepared_attach) in attached_outputs {
         outputs.push(WorkerTargetLifecycleOutput::SharedWorkerAttached {
             attachment,
             prepared_attach,
         });
+    }
+    outputs.extend(shared_worker_runtime_ready_outputs(
+        conn,
+        browser_context_id,
+        &target_id,
+    ));
+    outputs
+}
+
+fn shared_worker_runtime_ready_outputs(
+    conn: &CdpConnection,
+    browser_context_id: &str,
+    target_id: &str,
+) -> TargetPreparedOutputs {
+    let mut outputs = TargetPreparedOutputs::default();
+    let Some(target) = conn
+        .browser_context_by_id(browser_context_id)
+        .and_then(|context| context.shared_worker_target(target_id))
+        .filter(|target| target.execution_ready)
+    else {
+        return outputs;
+    };
+    for session in target.session_ids() {
+        if target.runtime_frontend_enabled(&session)
+            && let Some(attachment) =
+                target.protocol_attachment_identity(browser_context_id, &session)
+        {
+            outputs.push(WorkerTargetLifecycleOutput::RuntimeObserverReady(
+                WorkerRuntimeObserver::Shared(attachment),
+            ));
+        }
     }
     outputs
 }
@@ -2014,6 +2068,12 @@ pub(in crate::domains) async fn resume_worker_runtime_listener_for_session(
                 .service_worker_target_for_session(Some(session_id))?
                 .runtime_attachment_identity_for_current_run(&browser_context_id, session_id)
                 .map(WorkerRuntimeObserver::Service),
+            CdpSessionRoute::SharedWorkerTarget {
+                browser_context_id, ..
+            } => conn
+                .shared_worker_target_for_session(Some(session_id))?
+                .protocol_attachment_identity(&browser_context_id, session_id)
+                .map(WorkerRuntimeObserver::Shared),
             CdpSessionRoute::DedicatedWorkerTarget {
                 browser_context_id, ..
             } => conn
@@ -2061,6 +2121,12 @@ async fn resume_worker_runtime_observer(
             if message.value().get("id") == Some(&json!(0)))
     });
     match observer {
+        WorkerRuntimeObserver::Shared(attachment) => Some(
+            WorkerTargetLifecycleOutput::SharedWorkerRuntimeInspectorMessages {
+                attachment,
+                messages,
+            },
+        ),
         WorkerRuntimeObserver::Dedicated(attachment) => Some(
             WorkerTargetLifecycleOutput::DedicatedWorkerRuntimeInspectorMessages {
                 attachment,
@@ -3221,7 +3287,7 @@ async fn emit_target_lifecycle_events(
                     side_effects.extend_background_events(events);
                 }
             }
-            WorkerTargetLifecycleOutput::SharedWorkerCreated { target_delta } => {
+            WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { target_delta } => {
                 side_effects.extend_background_events(
                     conn.prepared_target_host_delta_event_plan(target_delta),
                 );
@@ -4059,6 +4125,7 @@ mod tests {
 
     fn shared_worker_info(instance_id: u64) -> RendererSharedWorkerTargetInfo {
         RendererSharedWorkerTargetInfo {
+            execution_ready: true,
             owner_local_host_id: moli_core::RendererOwnerLocalHostId::new_for_testing(1),
             instance_id: SharedWorkerInstanceId::from_u64(instance_id),
             url: "https://example.test/shared-worker.js".to_owned(),
@@ -5292,7 +5359,7 @@ mod tests {
         let output = outputs
             .next()
             .expect("discovered shared worker should emit targetCreated");
-        let WorkerTargetLifecycleOutput::SharedWorkerCreated { target_delta } = output else {
+        let WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { target_delta } = output else {
             panic!("expected targetCreated output");
         };
         let target_id = target_delta.target_id().to_owned();
@@ -5642,7 +5709,7 @@ mod tests {
             .worker_target_lifecycle_outputs
             .iter()
             .find_map(|output| match output {
-                WorkerTargetLifecycleOutput::SharedWorkerCreated { target_delta } => {
+                WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { target_delta } => {
                     Some(target_delta.target_id().to_owned())
                 }
                 _ => None,
@@ -6667,7 +6734,8 @@ mod tests {
             register_shared_worker_target(&mut conn, "BID-1", None, shared_worker_info(11))
                 .worker_target_lifecycle_outputs;
         assert_eq!(outputs.len(), 2);
-        let WorkerTargetLifecycleOutput::SharedWorkerCreated { target_delta } = &outputs[0] else {
+        let WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { target_delta } = &outputs[0]
+        else {
             panic!("creation must precede attachment")
         };
         let (attachment, prepared_attach) = shared_worker_attached_output(&outputs[1])
@@ -6684,6 +6752,62 @@ mod tests {
             crate::conn::CdpSessionRoute::SharedWorkerTarget { .. }
         ));
         assert!(attachment.is_current());
+    }
+
+    #[test]
+    fn shared_worker_loading_membership_waits_for_exact_execution_ready_before_attachment() {
+        let mut conn = crate::test_support::connection();
+        conn.set_auto_attach_owner(
+            None,
+            true,
+            true,
+            crate::conn::CdpTargetFilter::default_auto_attach(),
+        );
+        conn.browser_context = Some(conn.new_browser_context_fixture_for_test("BID-1".to_owned()));
+        let mut info = shared_worker_info(11);
+        info.execution_ready = false;
+        let created = register_shared_worker_target(&mut conn, "BID-1", None, info.clone())
+            .worker_target_lifecycle_outputs;
+        let [WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { target_delta }] =
+            created.as_slice()
+        else {
+            panic!("loading creates membership without an Inspector attachment")
+        };
+        let target_id = target_delta.target_id().to_owned();
+        let target = conn
+            .browser_context_by_id_mut("BID-1")
+            .unwrap()
+            .shared_worker_target_mut(&target_id)
+            .unwrap();
+        assert!(!target.execution_ready);
+        assert!(!target.has_session());
+        // A logical listener can subscribe during loading and binds on Started.
+        target.attach_session("listener".into());
+        target.set_runtime_frontend_enabled("listener", true);
+        info.execution_ready = true;
+        info.url = "https://example.test/redirected.js".into();
+        let ready = register_shared_worker_target(&mut conn, "BID-1", None, info.clone())
+            .worker_target_lifecycle_outputs;
+        let [
+            WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { .. },
+            attached,
+            WorkerTargetLifecycleOutput::RuntimeObserverReady(WorkerRuntimeObserver::Shared(
+                observer,
+            )),
+        ] = ready.as_slice()
+        else {
+            panic!("ready updates the original URL before one automatic attachment")
+        };
+        let (attachment, prepared) = shared_worker_attached_output(attached).unwrap();
+        assert_eq!(attachment.target_id(), target_id);
+        assert_eq!(observer.session_id(), "listener");
+        assert!(observer.is_current());
+        assert_eq!(prepared.target_info().url, info.url);
+        assert!(
+            register_shared_worker_target(&mut conn, "BID-1", None, info)
+                .worker_target_lifecycle_outputs
+                .is_empty()
+        );
     }
 
     #[test]
@@ -6720,6 +6844,7 @@ mod tests {
             None,
             "https://example.test/owner-shared-worker.js".to_owned(),
             "owner".to_owned(),
+            true,
         );
         owner_shared_worker.attach_session("SID-shared-worker".to_owned());
         conn.browser_context
@@ -6787,7 +6912,8 @@ mod tests {
             register_shared_worker_target(&mut conn, "BID-1", None, shared_worker_info(12))
                 .worker_target_lifecycle_outputs;
         assert_eq!(outputs.len(), 1);
-        let WorkerTargetLifecycleOutput::SharedWorkerCreated { target_delta } = &outputs[0] else {
+        let WorkerTargetLifecycleOutput::SharedWorkerTargetChanged { target_delta } = &outputs[0]
+        else {
             panic!("discovery should still emit Target.targetCreated");
         };
         let target_id = target_delta.target_id().to_owned();
@@ -6811,6 +6937,7 @@ mod tests {
             None,
             "https://example.test/shared-worker.js".to_owned(),
             "worker".to_owned(),
+            true,
         );
         target.attach_session("SID-first".to_owned());
         target.attach_session("SID-second".to_owned());
@@ -7632,6 +7759,7 @@ mod tests {
             None,
             "https://example.test/shared-worker.js".into(),
             "worker".into(),
+            true,
         );
         target.attach_session("SID-worker".into());
         target.set_console_enabled("SID-worker", true);
@@ -7732,6 +7860,7 @@ mod tests {
             None,
             "https://example.test/shared-worker.js".to_owned(),
             "worker".to_owned(),
+            true,
         );
         target.attach_session("SID-shared-worker".to_owned());
         target.set_console_enabled("SID-shared-worker", true);

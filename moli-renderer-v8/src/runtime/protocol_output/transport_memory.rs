@@ -177,7 +177,8 @@ fn observation_transport_charge_bytes(observation: &RendererProtocolObservation)
                 crate::runtime::RendererWorkerLifecycle::Service(event) => {
                     service_worker_lifecycle_payload_bytes(event)
                 }
-                crate::runtime::RendererWorkerLifecycle::SharedCreated(info) => {
+                crate::runtime::RendererWorkerLifecycle::SharedCreated(info)
+                | crate::runtime::RendererWorkerLifecycle::SharedStarted(info) => {
                     string_charge(&info.url).saturating_add(string_charge(&info.name))
                 }
                 crate::runtime::RendererWorkerLifecycle::SharedDestroyed(_)

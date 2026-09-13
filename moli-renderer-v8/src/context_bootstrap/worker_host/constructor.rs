@@ -839,7 +839,7 @@ pub(in crate::context_bootstrap) fn worker_constructor_base_url(
         })
 }
 
-pub(in crate::context_bootstrap) fn worker_script_resource_url(script_url: &Url) -> Url {
+fn worker_script_resource_url(script_url: &Url) -> Url {
     let mut url = script_url.clone();
     url.set_fragment(None);
     url
@@ -994,7 +994,7 @@ pub(in crate::context_bootstrap) fn throw_worker_dom_exception(
     scope.throw_exception(exception);
 }
 
-pub(in crate::context_bootstrap) fn materialize_worker_script_response(
+fn materialize_worker_script_response(
     script_url: &Url,
 ) -> Result<Option<crate::protocol_types::NavigationResponse>, String> {
     let resource_url = worker_script_resource_url(script_url);

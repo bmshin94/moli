@@ -99,6 +99,7 @@ impl DedicatedWorkerTargetState {
                 None,
                 String::new(),
                 name,
+                true,
             ),
             main_script: None,
             main_script_request: None,

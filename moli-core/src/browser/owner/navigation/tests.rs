@@ -1444,6 +1444,86 @@ async fn shared_worker_network_before_close(
 }
 
 #[tokio::test]
+async fn native_shared_worker_local_main_retains_raw_body_before_ready_and_close() {
+    use crate::browser::{NetworkOwner, WorkerSnapshot};
+    use crate::page::{
+        RendererNetworkOutputItem, ScriptNetworkOutputItem, SubresourceBodyFinishedResult,
+    };
+    for blob in [false, true] {
+        let service = BrowserService::start().unwrap();
+        let browser = service.handle();
+        let (context, contents) = context_with_contents(&service);
+        let (_, mut events) = browser.subscribe().unwrap();
+        let source = "onconnect=()=>close()";
+        let script = if blob {
+            format!(
+                "URL.createObjectURL(new Blob([new Uint8Array([47,47,255,10]),{source:?}],{{type:'text/javascript'}}))"
+            )
+        } else {
+            format!("'data:text/javascript,'+encodeURIComponent({source:?})")
+        };
+        navigate(&context, contents, &format!("data:text/html,<script>globalThis.worker=new SharedWorker({script},'native-local-main');worker.port.start()</script>")).await;
+        let mut owner = None;
+        let mut terminal = None;
+        let mut ready = false;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let record = events.recv().await.unwrap();
+                match record.event {
+                    BrowserEvent::WorkerCreated(worker @ WorkerSnapshot::Shared { .. }) => {
+                        let WorkerSnapshot::Shared { info, .. } = &worker else {
+                            unreachable!()
+                        };
+                        assert!(!info.execution_ready);
+                        assert!(owner.replace(worker.handle()).is_none());
+                    }
+                    BrowserEvent::NetworkRequestCompleted(occurrence)
+                        if Some(occurrence.owner) == owner.map(NetworkOwner::Worker) =>
+                    {
+                        let RendererNetworkOutputItem::Resource(item) = &occurrence.renderer.item
+                        else {
+                            panic!("main resource")
+                        };
+                        let ScriptNetworkOutputItem::SubresourceBodyFinished(body) = item.as_ref()
+                        else {
+                            panic!("main completion")
+                        };
+                        let SubresourceBodyFinishedResult::Ready(body) = body.result() else {
+                            panic!("local main succeeds")
+                        };
+                        let expected = if blob {
+                            [b"//\xff\n".as_slice(), source.as_bytes()].concat()
+                        } else {
+                            source.as_bytes().to_vec()
+                        };
+                        assert_eq!(body.clone_body_bytes(), expected);
+                        assert!(terminal.replace(record.sequence).is_none());
+                    }
+                    BrowserEvent::WorkerUpdated(worker @ WorkerSnapshot::Shared { .. })
+                        if Some(worker.handle()) == owner =>
+                    {
+                        let WorkerSnapshot::Shared { info, .. } = worker else {
+                            unreachable!()
+                        };
+                        assert!(info.execution_ready);
+                        assert!(terminal.is_some_and(|sequence| sequence < record.sequence));
+                        assert!(!std::mem::replace(&mut ready, true));
+                    }
+                    BrowserEvent::WorkerDestroyed(worker) if Some(worker) == owner => {
+                        assert!(ready);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("local main raw bytes and readiness must precede retirement without DevTools");
+        service.shutdown();
+    }
+}
+
+#[tokio::test]
 async fn native_shared_worker_membership_and_retirement_do_not_require_devtools() {
     use crate::browser::{WorkerHandle, WorkerSnapshot};
     for retirement in ["worker", "context", "browser"] {
@@ -1466,9 +1546,27 @@ async fn native_shared_worker_membership_and_retirement_do_not_require_devtools(
         })
         .await
         .expect("Browser must observe the real worker without a DevTools transport");
-        let BrowserEvent::WorkerCreated(worker) = &created.event else {
+        let BrowserEvent::WorkerCreated(initial) = &created.event else {
             unreachable!()
         };
+        let worker = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let record = events.recv().await.unwrap();
+                if let BrowserEvent::WorkerUpdated(worker @ WorkerSnapshot::Shared { .. }) =
+                    record.event
+                    && worker.handle() == initial.handle()
+                {
+                    assert!(record.sequence > created.sequence);
+                    let WorkerSnapshot::Shared { info, .. } = &worker else {
+                        unreachable!()
+                    };
+                    assert!(info.execution_ready);
+                    break worker;
+                }
+            }
+        })
+        .await
+        .expect("the original SharedWorker must become ready");
         assert_eq!(browser.subscribe().unwrap().0.workers, vec![worker.clone()]);
         let WorkerHandle::Shared { instance, .. } = worker.handle() else {
             unreachable!()

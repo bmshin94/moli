@@ -64,6 +64,7 @@ enum Finish {
     DetachedKeepalive,
     DetachedBeforeHeadersFailure,
     RetiredCancellation,
+    RetiredAfterChunk,
 }
 
 impl Finish {
@@ -257,6 +258,11 @@ macro_rules! worker_stage_tests {
 }
 
 worker_stage_tests! {
+    native_worker_main_stages_shared: Shared, MainScript, Complete;
+    native_worker_main_stages_shared_module: Shared, MainModule, Complete;
+    native_worker_main_stages_shared_partial_body: Shared, MainScript, PartialFailure;
+    native_worker_main_stages_shared_retirement: Shared, MainScript, RetiredCancellation;
+    native_worker_main_stages_shared_retirement_retains_partial_body: Shared, MainScript, RetiredAfterChunk;
     native_worker_main_stages_dedicated: Dedicated, MainScript, Complete;
     native_worker_main_stages_dedicated_module: Dedicated, MainModule, Complete;
     native_worker_main_stages_nested: Nested, MainScript, Complete;
@@ -440,6 +446,11 @@ async fn worker_network_stages_with_request(
                 format!("globalThis.worker = new Worker('/worker.js',{options})")
             }
             WorkerKind::Nested => "globalThis.worker = new Worker('/worker.js')".into(),
+            WorkerKind::Shared if main_script => {
+                format!(
+                    "globalThis.worker = new SharedWorker('/probe',{options});worker.port.start()"
+                )
+            }
             WorkerKind::Shared => {
                 format!(
                     "globalThis.worker = new SharedWorker('/worker.js',{options});worker.port.start()"
@@ -558,7 +569,7 @@ async fn worker_network_stages_with_request(
                     .await
                     .unwrap();
                 release_tail.await.unwrap();
-                if !matches!(finish, Finish::PartialFailure) {
+                if !matches!(finish, Finish::PartialFailure | Finish::RetiredAfterChunk) {
                     stream
                         .write_all(&response_body.as_bytes()[2..])
                         .await
@@ -729,6 +740,7 @@ async fn worker_network_stages_with_request(
     } else {
         vec![(0, Some(chunk)), (1, Some(tail)), (2, None)]
     };
+    let mut held_tail = None;
     for (stage, release) in stages {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -785,7 +797,7 @@ async fn worker_network_stages_with_request(
                         SubresourceBodyFinishedResult::Ready(body),
                     ) => assert_eq!(body.clone_body_bytes(), response_body.as_bytes()),
                     (
-                        Finish::PartialFailure,
+                        Finish::PartialFailure | Finish::RetiredAfterChunk,
                         SubresourceBodyFinishedResult::FailedWithPartialBody {
                             error_text,
                             partial_body,
@@ -804,7 +816,24 @@ async fn worker_network_stages_with_request(
             }
             _ => unreachable!(),
         }
-        if let Some(release) = release {
+        if stage == 1 && matches!(finish, Finish::RetiredAfterChunk) {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                context.close_web_contents(contents).unwrap().close_async(),
+            )
+            .await
+            .expect("last SharedWorker client closes with the partial body held");
+            assert!(
+                browser
+                    .subscribe()
+                    .unwrap()
+                    .0
+                    .workers
+                    .iter()
+                    .all(|worker| worker.handle() != owner)
+            );
+            held_tail = release;
+        } else if let Some(release) = release {
             release.send(()).unwrap();
         }
     }
@@ -812,6 +841,9 @@ async fn worker_network_stages_with_request(
     // a fixture-induced disconnect could falsely prove retirement cancellation.
     if let Some(headers) = headers {
         headers.send(()).unwrap();
+    }
+    if let Some(tail) = held_tail {
+        tail.send(()).unwrap();
     }
     server.await.unwrap();
     if let WorkerHandle::Service { version, .. } = owner
@@ -823,7 +855,7 @@ async fn worker_network_stages_with_request(
             })
             .unwrap();
     }
-    if !finish.retires_before_headers() {
+    if !finish.retires_before_headers() && !matches!(finish, Finish::RetiredAfterChunk) {
         context
             .close_web_contents(contents)
             .unwrap()
