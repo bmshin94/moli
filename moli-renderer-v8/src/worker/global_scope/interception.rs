@@ -58,11 +58,11 @@ fn current_request(
     phase: WorkerFetchPhase,
 ) -> Result<WorkerPendingFetchContinue, String> {
     let unavailable = || "Worker request is no longer paused".to_owned();
-    let (id, url, method, headers, body, record) = match target {
+    let (id, url, method, headers, body, record, response) = match target {
         WorkerFetchTarget::Fetch(id) => {
             let pending = state.pending_fetches.get(&id).ok_or_else(unavailable)?;
             if pending.load.is_cancelled()
-                || pending.network.handle() != handle
+                || pending.response.network.handle() != handle
                 || (phase != WorkerFetchPhase::Request && pending.paused_response.is_none())
             {
                 return Err(unavailable());
@@ -73,13 +73,14 @@ fn current_request(
                 &pending.request_method,
                 &pending.request_headers,
                 &pending.request_body,
-                pending.network_record.as_ref(),
+                pending.request_override.as_ref(),
+                &pending.response,
             )
         }
         WorkerFetchTarget::Xhr(id) => {
             let pending = state.pending_xhrs.get(&id).ok_or_else(unavailable)?;
             if pending.load.is_cancelled()
-                || pending.network.handle() != handle
+                || pending.response.network.handle() != handle
                 || (phase != WorkerFetchPhase::Request && pending.paused_response.is_none())
             {
                 return Err(unavailable());
@@ -90,7 +91,8 @@ fn current_request(
                 &pending.request_method,
                 &pending.request_headers,
                 &pending.request_body,
-                pending.network_record.as_ref(),
+                pending.request_override.as_ref(),
+                &pending.response,
             )
         }
         WorkerFetchTarget::CspReport(id) => {
@@ -103,7 +105,6 @@ fn current_request(
             }
             return Ok(WorkerPendingFetchContinue {
                 fetch_id: id,
-                internal_id: handle.get(),
                 url: pending.request.url.clone(),
                 method: pending.request.method.clone(),
                 headers: pending.request.request_headers.clone(),
@@ -116,15 +117,14 @@ fn current_request(
     };
     Ok(WorkerPendingFetchContinue {
         fetch_id: id,
-        internal_id: handle.get(),
         url: record.map_or(url, |record| &record.url).clone(),
         method: record.map_or(method, |record| &record.method).clone(),
         headers: record
             .map_or(headers, |record| &record.request_headers)
             .clone(),
         body: record.map_or(body, |record| &record.request_body).clone(),
-        intercept_response: record.is_some_and(|record| record.intercept_response),
-        handle_auth_requests: record.is_some_and(|record| record.handle_auth_requests),
+        intercept_response: response.intercept_response(),
+        handle_auth_requests: response.handle_auth_requests(),
         auth: None,
     })
 }
@@ -132,7 +132,6 @@ fn current_request(
 fn xhr_request(request: WorkerPendingFetchContinue) -> WorkerPendingXhrContinue {
     WorkerPendingXhrContinue {
         xhr_id: request.fetch_id,
-        internal_id: request.internal_id,
         url: request.url,
         method: request.method,
         body: request.body,
@@ -328,10 +327,9 @@ fn cancel_worker_auth(
                 .get_mut(&fetch_id)
                 .ok_or_else(unavailable)?;
             let response = pending.paused_response.take().ok_or_else(unavailable)?;
-            if let Some(record) = pending.network_record.as_mut() {
-                record.handle_auth_requests = false;
-                record.intercept_response = intercept_response;
-            }
+            pending
+                .response
+                .configure_interception(intercept_response, false);
             let _ = state
                 .fetch_completion_tx
                 .send(WorkerFetchEvent::Completion(Box::new(
@@ -348,10 +346,9 @@ fn cancel_worker_auth(
                 .get_mut(&xhr_id)
                 .ok_or_else(unavailable)?;
             let response = pending.paused_response.take().ok_or_else(unavailable)?;
-            if let Some(record) = pending.network_record.as_mut() {
-                record.handle_auth_requests = false;
-                record.intercept_response = intercept_response;
-            }
+            pending
+                .response
+                .configure_interception(intercept_response, false);
             let _ = state
                 .xhr_completion_tx
                 .send(WorkerXhrCompletion::decision(xhr_id, Ok(response)));

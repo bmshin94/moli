@@ -12,21 +12,18 @@ mod tests;
 
 fn send_worker_fetch_transport_completion(
     sender: &mpsc::UnboundedSender<WorkerFetchEvent>,
-    network: Arc<ResourceTransfer>,
+    resource: Arc<ResourceResponseStream>,
     completion: WorkerRequestCompletion,
 ) {
     let _ = sender.send(WorkerFetchEvent::TransportCompletion(
-        WorkerRequestDelivery {
-            network,
-            completion: Some(Box::new(completion)),
-        },
+        WorkerRequestDelivery::new(resource, completion),
     ));
 }
 
 impl Drop for WorkerRequestDelivery {
     fn drop(&mut self) {
         if let Some(completion) = self.completion.take() {
-            completion.publish(&self.network);
+            completion.publish(&self.response);
         }
     }
 }
@@ -34,7 +31,7 @@ impl Drop for WorkerRequestDelivery {
 fn worker_fetch_request_metadata(
     pending: &PendingWorkerFetch,
 ) -> (&Url, &str, &[(String, String)], &Option<Vec<u8>>) {
-    match &pending.network_record {
+    match &pending.request_override {
         Some(record) => (
             &record.url,
             &record.method,
@@ -91,18 +88,16 @@ pub(in crate::worker) fn worker_request_started(
     .with_request_body_bytes(body.clone())
 }
 
-fn update_worker_fetch_request(
-    pending: &mut PendingWorkerFetch,
-    record: PendingWorkerFetchNetworkRecord,
-) {
+fn update_worker_fetch_request(pending: &mut PendingWorkerFetch, record: WorkerRequestOverride) {
     let (url, method, headers, body) = worker_fetch_request_metadata(pending);
     let changed = url != &record.url
         || method != record.method
         || headers != record.request_headers
         || body != &record.request_body;
-    pending.network_record = Some(record);
+    pending.request_override = Some(record);
     if changed {
         pending
+            .response
             .network
             .update_request(|network| worker_fetch_request(pending, network));
     }
@@ -152,47 +147,31 @@ fn worker_network_result_parts<R>(
 
 async fn collect_worker_resource_response(
     observed: moli_fetch::NetworkFetchResult<moli_fetch::StreamingRawResponse>,
-    network: &ResourceTransfer,
-    observe_response: bool,
+    resource: &ResourceResponseStream,
     error_prefix: &str,
 ) -> (
     Result<ResourceBodyResponse, ResourceResponseFailure>,
     Option<Vec<(String, String)>>,
 ) {
     let (mut response, network_request_headers) = worker_network_result_parts(observed);
-    let head = Arc::new(ResourceResponseHead {
+    resource.response_started(ResourceResponseHead {
         status_text: None,
         head: response.head(),
         network_request_headers: network_request_headers.clone(),
     });
-    if observe_response {
-        network.response_started(head.clone());
-    }
-    let mut body_writer = SubresourceResponseBodyWriter::default();
     while let Some(chunk) = response.next_chunk().await {
-        body_writer.append(&chunk);
-        if observe_response {
-            network.data_received(chunk.len());
-        }
+        resource.data_received(&chunk);
     }
-    let body = body_writer.finish();
     let result = match response.finish().await {
-        Ok(()) => Ok(ResourceBodyResponse {
-            head: head.head.clone(),
-            body,
-        }),
-        Err(error) => Err(ResourceResponseFailure::PartialBody {
-            message: format!("{error_prefix}: {error}"),
-            response: head,
-            body,
-        }),
+        Ok(()) => Ok(resource.finish_response().expect("received response")),
+        Err(error) => Err(resource.failure(format!("{error_prefix}: {error}"))),
     };
     (result, network_request_headers)
 }
 
 pub(in crate::worker) fn spawn_worker_fetch_network(
     load: ResourceLoadLease,
-    network: Arc<ResourceTransfer>,
+    resource: Arc<ResourceResponseStream>,
     observer: crate::worker::WorkerNetworkObserver,
     completion_tx: mpsc::UnboundedSender<WorkerFetchEvent>,
     fetch_id: u32,
@@ -211,9 +190,8 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
     request_metadata: ServiceWorkerFetchRequestMetadata,
     auth: Option<crate::protocol_types::SubresourceAuthCredentials>,
     suppress_default_content_type: bool,
-    allow_headers_first: bool,
 ) {
-    let preflight_network = network.request();
+    let preflight_network = resource.network.request();
     load.task_runner().spawn(async move {
         let loader = load.request_client();
         let preflight_observer = observer.clone();
@@ -265,9 +243,8 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                     if let Some(auth) = auth {
                         request = request.with_auth(auth.into());
                     }
-                    let stream_to_script = allow_headers_first
-                        && request.request_mode != RequestMode::NoCors
-                        && request.follow_redirects;
+                    let stream_to_script =
+                        request.request_mode != RequestMode::NoCors && request.follow_redirects;
                     match fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer(
                         &loader,
                         request,
@@ -277,37 +254,31 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                     )
                     .await
                     {
-                        Ok(observed) if !stream_to_script => {
-                            collect_worker_resource_response(
-                                observed,
-                                &network,
-                                allow_headers_first,
-                                "fetch",
-                            )
-                            .await
+                        Ok(observed)
+                            if !stream_to_script
+                                || resource.intercepts_response(&observed.response().head()) =>
+                        {
+                            collect_worker_resource_response(observed, &resource, "fetch").await
                         }
                         Ok(observed) => {
                             let (mut response, network_request_headers) =
                                 worker_network_result_parts(observed);
                             let body_source_id = crate::network_host::new_network_body_source_id();
                             let head = response.head();
-                            network.response_started(Arc::new(ResourceResponseHead {
+                            resource.response_started(ResourceResponseHead {
                                 status_text: None,
                                 head: head.clone(),
                                 network_request_headers: network_request_headers.clone(),
-                            }));
+                            });
                             let _ = completion_tx.send(WorkerFetchEvent::StreamingStarted(
                                 Box::new(WorkerFetchStreamingStarted {
                                     fetch_id,
                                     body_source_id,
-                                    head: head.clone(),
-                                    network_request_headers: network_request_headers.clone(),
+                                    head,
                                 }),
                             ));
-                            let mut body_writer = SubresourceResponseBodyWriter::default();
                             while let Some(chunk) = response.next_chunk().await {
-                                body_writer.append(&chunk);
-                                network.data_received(chunk.len());
+                                resource.data_received(&chunk);
                                 let _ = completion_tx.send(WorkerFetchEvent::StreamingChunk(
                                     WorkerFetchStreamingChunk {
                                         body_source_id,
@@ -316,32 +287,23 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                                 ));
                             }
                             let result = match response.finish().await {
-                                Ok(()) => Ok(ResourceBodyResponse {
-                                    head,
-                                    body: body_writer.finish(),
-                                }),
-                                Err(error) => Err(ResourceResponseFailure::PartialBody {
-                                    message: format!("fetch: {error}"),
-                                    response: Arc::new(ResourceResponseHead {
-                                        status_text: None,
-                                        head,
-                                        network_request_headers: network_request_headers.clone(),
-                                    }),
-                                    body: body_writer.finish(),
-                                }),
+                                Ok(()) => {
+                                    Ok(resource.finish_response().expect("received response"))
+                                }
+                                Err(error) => Err(resource.failure(format!("fetch: {error}"))),
                             };
                             load.finish();
                             let _ = completion_tx.send(WorkerFetchEvent::StreamingFinished(
                                 WorkerFetchStreamingFinished {
                                     body_source_id,
-                                    delivery: WorkerRequestDelivery {
-                                        network,
-                                        completion: Some(Box::new(WorkerRequestCompletion {
+                                    delivery: WorkerRequestDelivery::new(
+                                        resource,
+                                        WorkerRequestCompletion {
                                             id: fetch_id,
                                             network_request_headers,
                                             result,
-                                        })),
-                                    },
+                                        },
+                                    ),
                                 },
                             ));
                             return;
@@ -365,7 +327,7 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
         }
         send_worker_fetch_transport_completion(
             &completion_tx,
-            network,
+            resource,
             WorkerRequestCompletion {
                 id: fetch_id,
                 network_request_headers,
@@ -419,7 +381,7 @@ fn spawn_worker_fetch_service_worker(
     runtime: ServiceWorkerRuntimeService,
     client_id: ServiceWorkerClientId,
     load: ResourceLoadLease,
-    network: Arc<ResourceTransfer>,
+    resource: Arc<ResourceResponseStream>,
     observer: crate::worker::WorkerNetworkObserver,
     completion_tx: mpsc::UnboundedSender<WorkerFetchEvent>,
     fetch_id: u32,
@@ -476,7 +438,7 @@ fn spawn_worker_fetch_service_worker(
     if !runtime.dispatch_controlled_fetch(dispatch) {
         send_worker_fetch_transport_completion(
             &completion_tx,
-            network,
+            resource,
             WorkerRequestCompletion {
                 id: fetch_id,
                 network_request_headers: None,
@@ -491,7 +453,7 @@ fn spawn_worker_fetch_service_worker(
             Ok(ServiceWorkerDirectFetchResult::Fallback) => {
                 spawn_worker_fetch_network(
                     load,
-                    network,
+                    resource,
                     observer,
                     completion_tx,
                     fetch_id,
@@ -510,7 +472,6 @@ fn spawn_worker_fetch_service_worker(
                     request_metadata,
                     None,
                     suppress_default_content_type,
-                    true,
                 );
                 return;
             }
@@ -522,7 +483,7 @@ fn spawn_worker_fetch_service_worker(
         };
         send_worker_fetch_transport_completion(
             &completion_tx,
-            network,
+            resource,
             WorkerRequestCompletion {
                 id: fetch_id,
                 network_request_headers: None,
@@ -534,15 +495,14 @@ fn spawn_worker_fetch_service_worker(
 
 pub(in crate::worker) fn spawn_worker_xhr_network(
     load: ResourceLoadLease,
-    network: Arc<ResourceTransfer>,
+    resource: Arc<ResourceResponseStream>,
     observer: crate::worker::WorkerNetworkObserver,
     deliver: impl FnOnce(WorkerRequestDelivery) + Send + 'static,
     xhr_id: u32,
     cancel_handle: FetchCancelHandle,
     request: Result<Request, String>,
-    observe_response: bool,
 ) {
-    let preflight_network = network.request();
+    let preflight_network = resource.network.request();
     load.task_runner().spawn(async move {
         let loader = load.request_client();
         let preflight_observer = observer.clone();
@@ -572,13 +532,7 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
                 .await
                 {
                     Ok(observed) => {
-                        collect_worker_resource_response(
-                            observed,
-                            &network,
-                            observe_response,
-                            "xhr",
-                        )
-                        .await
+                        collect_worker_resource_response(observed, &resource, "xhr").await
                     }
                     Err(error) => {
                         let message = format!("xhr: {error}");
@@ -588,17 +542,20 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
             }
             Err(error) => (Err(ResourceResponseFailure::from(error)), None),
         };
-        if observe_response || result.is_err() {
+        if !result
+            .as_ref()
+            .is_ok_and(|response| resource.intercepts_response(&response.head))
+        {
             load.finish();
         }
-        deliver(WorkerRequestDelivery {
-            network,
-            completion: Some(Box::new(WorkerRequestCompletion {
+        deliver(WorkerRequestDelivery::new(
+            resource,
+            WorkerRequestCompletion {
                 id: xhr_id,
                 network_request_headers,
                 result,
-            })),
-        });
+            },
+        ));
     });
 }
 
@@ -606,10 +563,9 @@ pub(in crate::worker) fn continue_pending_worker_fetch(
     state: &Rc<RefCell<WorkerGlobalState>>,
     request: WorkerPendingFetchContinue,
 ) {
-    let allow_headers_first = !request.intercept_response && !request.handle_auth_requests;
     let (
         load,
-        network,
+        resource,
         observer,
         completion_tx,
         cancel_handle,
@@ -636,26 +592,21 @@ pub(in crate::worker) fn continue_pending_worker_fetch(
         };
         let cancel_handle = FetchCancelHandle::new();
         pending.load.attach_cancel_handle(cancel_handle.clone());
-        let initial_network_request_headers = pending
-            .network_record
-            .as_ref()
-            .and_then(|record| record.initial_network_request_headers.clone());
+        pending
+            .response
+            .configure_interception(request.intercept_response, request.handle_auth_requests);
         update_worker_fetch_request(
             pending,
-            PendingWorkerFetchNetworkRecord {
-                internal_id: request.internal_id,
+            WorkerRequestOverride {
                 url: request.url.clone(),
                 method: request.method.clone(),
                 request_headers: request.headers.clone(),
                 request_body: request.body.clone(),
-                initial_network_request_headers,
-                intercept_response: request.intercept_response,
-                handle_auth_requests: request.handle_auth_requests,
             },
         );
         (
             pending.load.clone(),
-            pending.network.clone(),
+            pending.response.clone(),
             observer,
             completion_tx,
             cancel_handle,
@@ -677,7 +628,7 @@ pub(in crate::worker) fn continue_pending_worker_fetch(
 
     spawn_worker_fetch_network(
         load,
-        network,
+        resource,
         observer,
         completion_tx,
         fetch_id,
@@ -696,7 +647,6 @@ pub(in crate::worker) fn continue_pending_worker_fetch(
         request_metadata,
         auth,
         false,
-        allow_headers_first,
     );
 }
 
@@ -710,17 +660,14 @@ pub(in crate::worker) fn fail_pending_worker_fetch(
         let mut state = state.borrow_mut();
         let completion_tx = state.fetch_completion_tx.clone();
         if let Some(pending) = state.pending_fetches.get_mut(&fetch_id) {
+            pending.response.configure_interception(false, false);
             update_worker_fetch_request(
                 pending,
-                PendingWorkerFetchNetworkRecord {
-                    internal_id: request.internal_id,
+                WorkerRequestOverride {
                     url: request.url,
                     method: request.method,
                     request_headers: request.headers,
                     request_body: request.body,
-                    initial_network_request_headers: None,
-                    intercept_response: false,
-                    handle_auth_requests: false,
                 },
             );
         }
@@ -745,10 +692,7 @@ pub(in crate::worker) fn fail_pending_worker_fetch_auth(
         let mut state = state.borrow_mut();
         let completion_tx = state.fetch_completion_tx.clone();
         if let Some(pending) = state.pending_fetches.get_mut(&fetch_id) {
-            if let Some(record) = pending.network_record.as_mut() {
-                record.intercept_response = false;
-                record.handle_auth_requests = false;
-            }
+            pending.response.configure_interception(false, false);
             pending.paused_response = None;
         }
         completion_tx
@@ -776,17 +720,14 @@ pub(in crate::worker) fn fulfill_pending_worker_fetch(
         let Some(pending) = state.pending_fetches.get_mut(&fetch_id) else {
             return;
         };
+        pending.response.configure_interception(false, false);
         update_worker_fetch_request(
             pending,
-            PendingWorkerFetchNetworkRecord {
-                internal_id: request.internal_id,
+            WorkerRequestOverride {
                 url: request.url.clone(),
                 method: request.method.clone(),
                 request_headers: request.headers.clone(),
                 request_body: request.body.clone(),
-                initial_network_request_headers: None,
-                intercept_response: false,
-                handle_auth_requests: false,
             },
         );
         let response =
@@ -815,10 +756,7 @@ pub(in crate::worker) fn continue_pending_worker_fetch_response(
         let Some(pending) = state.pending_fetches.get_mut(&fetch_id) else {
             return;
         };
-        if let Some(record) = pending.network_record.as_mut() {
-            record.intercept_response = false;
-            record.handle_auth_requests = false;
-        }
+        pending.response.configure_interception(false, false);
         let Some(mut response) = pending.paused_response.take() else {
             return;
         };
@@ -851,10 +789,7 @@ pub(in crate::worker) fn fail_pending_worker_fetch_response(
         let Some(pending) = state.pending_fetches.get_mut(&fetch_id) else {
             return;
         };
-        if let Some(record) = pending.network_record.as_mut() {
-            record.intercept_response = false;
-            record.handle_auth_requests = false;
-        }
+        pending.response.configure_interception(false, false);
         pending.paused_response = None;
         completion_tx
     };
@@ -881,10 +816,7 @@ pub(in crate::worker) fn fulfill_pending_worker_fetch_response(
         let Some(pending) = state.pending_fetches.get_mut(&fetch_id) else {
             return;
         };
-        if let Some(record) = pending.network_record.as_mut() {
-            record.intercept_response = false;
-            record.handle_auth_requests = false;
-        }
+        pending.response.configure_interception(false, false);
         let Some(mut paused) = pending.paused_response.take() else {
             return;
         };
@@ -907,8 +839,7 @@ pub(in crate::worker) fn continue_pending_worker_xhr(
     state: &Rc<RefCell<WorkerGlobalState>>,
     request: WorkerPendingXhrContinue,
 ) {
-    let observe_response = !request.intercept_response && !request.handle_auth_requests;
-    let (load, network, observer, completion_tx, cancel_handle, prepared, xhr_id, auth) = {
+    let (load, resource, observer, completion_tx, cancel_handle, prepared, xhr_id, auth) = {
         let mut state = state.borrow_mut();
         let completion_tx = state.xhr_completion_tx.clone();
         let observer = state.parent_tx.network_observer();
@@ -917,26 +848,21 @@ pub(in crate::worker) fn continue_pending_worker_xhr(
         };
         let cancel_handle = FetchCancelHandle::new();
         pending.load.attach_cancel_handle(cancel_handle.clone());
-        let initial_network_request_headers = pending
-            .network_record
-            .as_ref()
-            .and_then(|record| record.initial_network_request_headers.clone());
+        pending
+            .response
+            .configure_interception(request.intercept_response, request.handle_auth_requests);
         super::xhr::update_worker_xhr_request(
             pending,
-            PendingWorkerFetchNetworkRecord {
-                internal_id: request.internal_id,
+            WorkerRequestOverride {
                 url: request.url.clone(),
                 method: request.method.clone(),
                 request_headers: request.headers.clone(),
                 request_body: request.body.clone(),
-                initial_network_request_headers,
-                intercept_response: request.intercept_response,
-                handle_auth_requests: request.handle_auth_requests,
             },
         );
         (
             pending.load.clone(),
-            pending.network.clone(),
+            pending.response.clone(),
             observer,
             completion_tx,
             cancel_handle,
@@ -955,7 +881,7 @@ pub(in crate::worker) fn continue_pending_worker_xhr(
 
     spawn_worker_xhr_network(
         load,
-        network,
+        resource,
         observer,
         move |delivery| {
             let _ = completion_tx.send(WorkerXhrCompletion::TransportCompletion(delivery));
@@ -968,7 +894,6 @@ pub(in crate::worker) fn continue_pending_worker_xhr(
                 Some(auth) => request.with_auth(auth.into()),
                 None => request,
             }),
-        observe_response,
     );
 }
 
@@ -982,17 +907,14 @@ pub(in crate::worker) fn fail_pending_worker_xhr(
         let mut state = state.borrow_mut();
         let completion_tx = state.xhr_completion_tx.clone();
         if let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) {
+            pending.response.configure_interception(false, false);
             super::xhr::update_worker_xhr_request(
                 pending,
-                PendingWorkerFetchNetworkRecord {
-                    internal_id: request.internal_id,
+                WorkerRequestOverride {
                     url: request.url,
                     method: request.method,
                     request_headers: request.headers,
                     request_body: request.body,
-                    initial_network_request_headers: None,
-                    intercept_response: false,
-                    handle_auth_requests: false,
                 },
             );
         }
@@ -1014,10 +936,7 @@ pub(in crate::worker) fn fail_pending_worker_xhr_auth(
         let mut state = state.borrow_mut();
         let completion_tx = state.xhr_completion_tx.clone();
         if let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) {
-            if let Some(record) = pending.network_record.as_mut() {
-                record.intercept_response = false;
-                record.handle_auth_requests = false;
-            }
+            pending.response.configure_interception(false, false);
             pending.paused_response = None;
         }
         completion_tx
@@ -1042,17 +961,14 @@ pub(in crate::worker) fn fulfill_pending_worker_xhr(
         let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) else {
             return;
         };
+        pending.response.configure_interception(false, false);
         super::xhr::update_worker_xhr_request(
             pending,
-            PendingWorkerFetchNetworkRecord {
-                internal_id: request.internal_id,
+            WorkerRequestOverride {
                 url: request.url.clone(),
                 method: request.method.clone(),
                 request_headers: request.headers.clone(),
                 request_body: request.body.clone(),
-                initial_network_request_headers: None,
-                intercept_response: false,
-                handle_auth_requests: false,
             },
         );
         let response =
@@ -1078,10 +994,7 @@ pub(in crate::worker) fn continue_pending_worker_xhr_response(
         let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) else {
             return;
         };
-        if let Some(record) = pending.network_record.as_mut() {
-            record.intercept_response = false;
-            record.handle_auth_requests = false;
-        }
+        pending.response.configure_interception(false, false);
         let Some(mut response) = pending.paused_response.take() else {
             return;
         };
@@ -1111,10 +1024,7 @@ pub(in crate::worker) fn fail_pending_worker_xhr_response(
         let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) else {
             return;
         };
-        if let Some(record) = pending.network_record.as_mut() {
-            record.intercept_response = false;
-            record.handle_auth_requests = false;
-        }
+        pending.response.configure_interception(false, false);
         pending.paused_response = None;
         completion_tx
     };
@@ -1138,10 +1048,7 @@ pub(in crate::worker) fn fulfill_pending_worker_xhr_response(
         let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) else {
             return;
         };
-        if let Some(record) = pending.network_record.as_mut() {
-            record.intercept_response = false;
-            record.handle_auth_requests = false;
-        }
+        pending.response.configure_interception(false, false);
         let Some(mut paused) = pending.paused_response.take() else {
             return;
         };
@@ -1306,7 +1213,7 @@ pub(crate) fn register_worker_websocket<'s>(
             .err()
             .map(|error| format!("failed to build WebSocket cookie header: {error}"))
     };
-    let network_recorded = failure_message.is_some();
+    let request_overrideed = failure_message.is_some();
     let (connection, load) = if let Some(error_text) = failure_message {
         record_worker_websocket_subresource_failure(
             &state.borrow(),
@@ -1351,7 +1258,7 @@ pub(crate) fn register_worker_websocket<'s>(
             loader,
             load,
             opened: false,
-            network_recorded,
+            request_overrideed,
         },
     );
     Some(socket_id)
@@ -1427,10 +1334,10 @@ pub(in crate::worker) fn dispatch_worker_websocket_event(
             match &event {
                 WebSocketEvent::Open { .. } => {
                     entry.opened = true;
-                    entry.network_recorded = true;
+                    entry.request_overrideed = true;
                 }
-                WebSocketEvent::Error { .. } if !entry.opened && !entry.network_recorded => {
-                    entry.network_recorded = true;
+                WebSocketEvent::Error { .. } if !entry.opened && !entry.request_overrideed => {
+                    entry.request_overrideed = true;
                     should_record_error_failure = true;
                 }
                 _ => {}
@@ -2127,8 +2034,8 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
                     request_method: method.clone(),
                     request_headers: headers.clone(),
                     request_body: body.clone(),
-                    network,
-                    network_record: None,
+                    response: ResourceResponseStream::new(network),
+                    request_override: None,
                     paused_response: None,
                     streaming_body_source_id: None,
                 },
@@ -2237,8 +2144,8 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
                     request_method: method.clone(),
                     request_headers: headers.clone(),
                     request_body,
-                    network,
-                    network_record: None,
+                    response: ResourceResponseStream::new(network),
+                    request_override: None,
                     paused_response: None,
                     streaming_body_source_id: None,
                 },
@@ -2247,7 +2154,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
         };
         let (
             completion_tx,
-            network,
+            resource,
             observer,
             referrer_policy,
             network_partition_key,
@@ -2256,7 +2163,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
             let state = state.borrow();
             (
                 state.fetch_completion_tx.clone(),
-                state.pending_fetches[&fetch_id].network.clone(),
+                state.pending_fetches[&fetch_id].response.clone(),
                 state.parent_tx.network_observer(),
                 state.referrer_policy.clone(),
                 state.network_partition_key.clone(),
@@ -2270,7 +2177,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
                 service_worker_runtime,
                 service_worker_client_id,
                 load,
-                network,
+                resource,
                 observer,
                 completion_tx,
                 fetch_id,
@@ -2293,7 +2200,7 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
         } else {
             spawn_worker_fetch_network(
                 load,
-                network,
+                resource,
                 observer,
                 completion_tx,
                 fetch_id,
@@ -2312,7 +2219,6 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
                 request_metadata,
                 None,
                 suppress_default_content_type,
-                true,
             );
         }
 
@@ -2397,7 +2303,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion(
                 .borrow()
                 .pending_fetches
                 .get(&delivery.request_id())
-                .and_then(|pending| delivery.claim(&pending.network));
+                .and_then(|pending| delivery.claim(&pending.response));
             if let Some(completion) = completion {
                 drain_worker_fetch_completion_result(scope, state, completion);
             }
@@ -2423,17 +2329,6 @@ pub(in crate::worker) fn start_worker_streaming_fetch(
     started: WorkerFetchStreamingStarted,
 ) {
     let mut reject = None;
-    if let Some(network_request_headers) = started.network_request_headers.as_ref()
-        && let Some(record) = state
-            .borrow_mut()
-            .pending_fetches
-            .get_mut(&started.fetch_id)
-            .and_then(|pending| pending.network_record.as_mut())
-    {
-        record
-            .initial_network_request_headers
-            .get_or_insert_with(|| network_request_headers.clone());
-    }
     let redirect_status = if started.head.redirect_chain.is_empty() {
         crate::content_security_policy::ContentSecurityPolicyRedirectStatus::NoRedirect
     } else {
@@ -2578,25 +2473,34 @@ fn record_worker_fetch_success(
     response: &ResourceBodyResponse,
     network_request_headers: Option<Vec<(String, String)>>,
 ) {
-    let network_request_headers = pending
-        .network_record
-        .as_ref()
-        .and_then(|record| record.initial_network_request_headers.clone())
-        .or(network_request_headers);
-    response.publish(&pending.network, network_request_headers);
+    response.publish(
+        &pending.response.network,
+        pending
+            .response
+            .record_request_headers(network_request_headers),
+    );
 }
 
 pub(in crate::worker) fn record_worker_fetch_failure(
     pending: &PendingWorkerFetch,
     error: impl Into<ResourceResponseFailure>,
 ) {
-    publish_worker_request_failure(&pending.network, error.into());
+    publish_worker_request_failure(&pending.response, error.into());
 }
 
 pub(super) fn publish_worker_request_failure(
-    network: &ResourceTransfer,
-    mut error: ResourceResponseFailure,
+    resource: &ResourceResponseStream,
+    error: ResourceResponseFailure,
 ) {
+    let mut error = match error {
+        ResourceResponseFailure::Request(message) => resource.failure(message),
+        error => error,
+    };
+    if let ResourceResponseFailure::PartialBody { response, .. } = &mut error {
+        let response = Arc::make_mut(response);
+        response.network_request_headers =
+            resource.record_request_headers(response.network_request_headers.take());
+    }
     let message = match &mut error {
         ResourceResponseFailure::Request(message)
         | ResourceResponseFailure::PartialBody { message, .. } => message,
@@ -2604,7 +2508,7 @@ pub(super) fn publish_worker_request_failure(
     if is_cors_policy_failure_message(message) {
         *message = FAILED_ERROR_TEXT.to_owned();
     }
-    network.failed(&error);
+    resource.network.failed(&error);
 }
 
 pub(in crate::worker) fn drain_worker_fetch_completion_result(
@@ -2614,17 +2518,6 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
 ) {
     let global = scope.get_current_context().global(scope);
     let _ = global;
-    if let Some(network_request_headers) = completion.network_request_headers.as_ref()
-        && let Some(record) = state
-            .borrow_mut()
-            .pending_fetches
-            .get_mut(&completion.id)
-            .and_then(|pending| pending.network_record.as_mut())
-    {
-        record
-            .initial_network_request_headers
-            .get_or_insert_with(|| network_request_headers.clone());
-    }
     if let Ok(response) = &completion.result {
         let response_head = response.head();
         let redirect_status = if response_head.redirect_chain.is_empty() {
@@ -2696,8 +2589,8 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
             let Some(pending) = state_ref.pending_fetches.get_mut(&completion.id) else {
                 return;
             };
-            pending.network_record.clone().and_then(|record| {
-                if record.handle_auth_requests
+            pending.request_override.clone().and_then(|record| {
+                if pending.response.handle_auth_requests()
                     && matches!(response_head.status, 401 | 407)
                     && let Some(challenge) =
                         extract_subresource_auth_challenge(&response_head.headers)
@@ -2708,16 +2601,16 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
                         body: response_body.clone(),
                     });
                     Some(PendingSubresourceAuthInfo {
-                        internal_id: record.internal_id,
+                        internal_id: pending.response.network.handle().get(),
                         url: record.url.clone(),
                         method: record.method.clone(),
                         request_headers: record.request_headers.clone(),
                         request_body: request_body_text(&record.request_body),
                         resource_type: SubresourceResourceType::Fetch,
                         request_cookie_report: response_head.request_cookie_report.clone(),
-                        network_request_headers: record.initial_network_request_headers.clone(),
+                        network_request_headers: pending.response.record_request_headers(None),
                         challenge,
-                        intercept_response: record.intercept_response,
+                        intercept_response: pending.response.intercept_response(),
                         response_final_url: response_head.final_url.clone(),
                         response_status: response_head.status,
                         response_headers: response_head.headers.clone(),
@@ -2735,7 +2628,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
             publish_worker_fetch_pause(
                 &state,
                 crate::runtime::WorkerFetchTarget::Fetch(completion.id),
-                pending.network.handle(),
+                pending.response.network.handle(),
                 pending.load.clone(),
                 crate::runtime::RendererWorkerFetchStage::Auth(Box::new(info)),
             );
@@ -2746,11 +2639,11 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
             let Some(pending) = state.pending_fetches.get_mut(&completion.id) else {
                 return;
             };
-            match pending.network_record.as_ref() {
-                Some(record) if record.intercept_response => {
+            match pending.request_override.as_ref() {
+                Some(record) if pending.response.intercept_response() => {
                     let response_body = response.subresource_response_body();
                     let info = PendingSubresourceResponseInfo {
-                        internal_id: record.internal_id,
+                        internal_id: pending.response.network.handle().get(),
                         url: record.url.clone(),
                         final_url: response_head.final_url.clone(),
                         method: record.method.clone(),
@@ -2758,7 +2651,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
                         request_body: request_body_text(&record.request_body),
                         resource_type: SubresourceResourceType::Fetch,
                         request_cookie_report: response_head.request_cookie_report.clone(),
-                        network_request_headers: record.initial_network_request_headers.clone(),
+                        network_request_headers: pending.response.record_request_headers(None),
                         response_status: response_head.status,
                         response_headers: response_head.headers.clone(),
                         response_body: response_body.clone(),
@@ -2779,7 +2672,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
             publish_worker_fetch_pause(
                 &state,
                 crate::runtime::WorkerFetchTarget::Fetch(completion.id),
-                pending.network.handle(),
+                pending.response.network.handle(),
                 pending.load.clone(),
                 crate::runtime::RendererWorkerFetchStage::Response(Box::new(info)),
             );

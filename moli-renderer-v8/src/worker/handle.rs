@@ -456,7 +456,6 @@ pub(crate) enum WorkerErrorSource {
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerPendingFetchContinue {
     pub(crate) fetch_id: u32,
-    pub(crate) internal_id: u64,
     pub(crate) url: Url,
     pub(crate) method: String,
     pub(crate) body: Option<Vec<u8>>,
@@ -469,7 +468,6 @@ pub(crate) struct WorkerPendingFetchContinue {
 #[derive(Debug, Clone)]
 pub(crate) struct WorkerPendingXhrContinue {
     pub(crate) xhr_id: u32,
-    pub(crate) internal_id: u64,
     pub(crate) url: Url,
     pub(crate) method: String,
     pub(crate) body: Option<Vec<u8>>,
