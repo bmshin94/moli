@@ -71,6 +71,9 @@ FETCH_ABORT_RESOURCE_PATHS = {
     "/fetch/api/resources/stash-take.py",
     "/fetch/api/resources/infinite-slow-response.py",
 }
+LINK_STYLESHEET_COUNTER_PATH = (
+    "/html/semantics/document-metadata/the-link-element/stylesheet.py"
+)
 BENCH_TIMEOUT_MULTIPLIER_QUERY = "__moli_bench_timeout_multiplier"
 BENCH_REPORT_BRIDGE_SRC_RE = re.compile(
     rb"(?P<prefix>\bsrc\s*=\s*)(?P<quote>['\"])"
@@ -1581,6 +1584,8 @@ def _make_handler(
     fetch_stash: FetchStash,
     stopping: threading.Event,
 ) -> type[BaseHTTPRequestHandler]:
+    link_stylesheet_stash = FetchStash()
+
     class WptHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
             if self.headers.get("Upgrade", "").lower() == "websocket":
@@ -1811,6 +1816,9 @@ def _make_handler(
         def _serve(self, *, emit_body: bool) -> None:
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
+            if path == LINK_STYLESHEET_COUNTER_PATH:
+                self._serve_link_stylesheet_counter(parsed.query, emit_body=emit_body)
+                return
             if path == "/fetch/api/resources/status.py":
                 self._serve_fetch_status(parsed.query, emit_body=emit_body)
                 return
@@ -2253,6 +2261,30 @@ def _make_handler(
             self.send_error(status_code)
             return False
 
+        def _serve_link_stylesheet_counter(self, query: str, *, emit_body: bool) -> None:
+            params = parse_qs(query, keep_blank_values=True)
+            try:
+                count = int(link_stylesheet_stash.take(params["id"][0]))
+            except (KeyError, TypeError, ValueError):
+                count = 0
+            if "count" in params:
+                self._send_bytes(
+                    "text/html", str(count).encode("ascii"),
+                    emit_body=emit_body, cache_control=None,
+                )
+                return
+            try:
+                link_stylesheet_stash.put(
+                    params["id"][0], str(count + 1),
+                )
+            except (KeyError, ValueError):
+                self.send_error(500)
+                return
+            self._send_bytes(
+                "text/css", b"body {color: red;}",
+                emit_body=emit_body, cache_control=None,
+            )
+
         def _serve_xhr_delay(self, query: str, *, emit_body: bool) -> None:
             delay_seconds = _wpt_delay_seconds(query)
             if delay_seconds is None:
@@ -2425,6 +2457,7 @@ def _make_handler(
             extra_headers: list[tuple[str, str]] | None = None,
             status_code: int = 200,
             status_text: str | None = None,
+            cache_control: str | None = "no-store",
         ) -> None:
             content_type, extra_headers = _response_content_type_and_extra_headers(
                 content_type,
@@ -2436,7 +2469,8 @@ def _make_handler(
                 self.send_header(name, value)
             if not _headers_include(header_block, "Content-Length"):
                 self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            if cache_control is not None:
+                self.send_header("Cache-Control", cache_control)
             self.end_headers()
             if emit_body:
                 declared_length = next(
