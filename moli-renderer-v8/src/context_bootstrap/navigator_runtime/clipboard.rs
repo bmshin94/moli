@@ -2,14 +2,12 @@ use super::super::{SIMPLE_EVENT_TARGET_ORDERED_HANDLERS_SLOT, SIMPLE_EVENT_TARGE
 use crate::web_api_interfaces;
 use crate::{
     blob,
-    util::{get_private_value, set_private_value, throw_type_error, v8_string},
+    util::{context_host_ptr_from_context_slot, get_private_value, throw_type_error, v8_string},
     webidl,
 };
 use anyhow::{Result, anyhow};
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
-const CLIPBOARD_ITEMS_SLOT: &str = "__moliClipboardItems";
-const CLIPBOARD_TEXT_SLOT: &str = "__moliClipboardText";
 const CLIPBOARD_EVENT_LISTENERS_SLOT: &str = "__moliClipboardEventListeners";
 
 const CLIPBOARD_ITEM_DATA_SLOT: &str = "__moliClipboardItemData";
@@ -25,12 +23,6 @@ struct ClipboardObjectDeclaration {
 
     #[webapi(slot = SIMPLE_EVENT_TARGET_ORDERED_HANDLERS_SLOT, init = true)]
     ordered_handlers: (),
-
-    #[webapi(slot = CLIPBOARD_ITEMS_SLOT, init = "undefined")]
-    items: (),
-
-    #[webapi(slot = CLIPBOARD_TEXT_SLOT, init = "")]
-    text: (),
 }
 
 #[derive(Default, WebApiFunctionTemplate)]
@@ -558,6 +550,9 @@ fn clipboard_read_callback<'s>(
             return;
         }
     };
+    let Some(runtime) = clipboard_browser_context(scope, args.this()) else {
+        return;
+    };
     if let Some(formats) = parsed.formats.unsanitized {
         let invalid = formats.len() > 1 || formats.iter().any(|format| format != "text/html");
         if invalid {
@@ -570,7 +565,14 @@ fn clipboard_read_callback<'s>(
             return;
         }
     }
-    let items = copy_clipboard_items(scope, args.this());
+    if reject_denied_clipboard_access(scope, args.this(), "clipboard-read", &mut rv) {
+        return;
+    }
+    let Some(items) = copy_clipboard_items(scope, &runtime) else {
+        let reason = type_error_value(scope, "Failed to read clipboard data.");
+        set_rejected_promise(scope, &mut rv, reason);
+        return;
+    };
     set_resolved_promise(scope, &mut rv, items.into());
 }
 
@@ -584,23 +586,17 @@ fn clipboard_read_text_callback<'s>(
         set_rejected_promise(scope, &mut rv, reason);
         return;
     }
-    if let Some(text) =
-        get_private_value(scope, args.this(), CLIPBOARD_TEXT_SLOT).filter(|value| value.is_string())
-    {
-        set_resolved_promise(scope, &mut rv, text);
+    let Some(runtime) = clipboard_browser_context(scope, args.this()) else {
+        return;
+    };
+    if reject_denied_clipboard_access(scope, args.this(), "clipboard-read", &mut rv) {
         return;
     }
-    let text_promise = first_clipboard_item(scope, args.this())
-        .and_then(|item| clipboard_item_data_promise(scope, item, "text/plain"))
-        .and_then(|promise| {
-            let converter = v8::Function::builder(clipboard_blob_to_text_callback).build(scope)?;
-            promise.then(scope, converter)
-        });
-    if let Some(promise) = text_promise {
-        rv.set(promise.into());
-    } else {
-        let empty = v8::String::empty(scope);
-        set_resolved_promise(scope, &mut rv, empty.into());
+    let bytes = runtime
+        .clipboard_data_for_type("text/plain")
+        .unwrap_or_default();
+    if let Some(text) = v8_string(scope, &String::from_utf8_lossy(&bytes)) {
+        set_resolved_promise(scope, &mut rv, text.into());
     }
 }
 
@@ -621,6 +617,9 @@ fn clipboard_write_callback<'s>(
             return;
         }
     };
+    if clipboard_browser_context(scope, args.this()).is_none() {
+        return;
+    }
     if parsed.data.len() != 1 {
         let reason = super::super::new_dom_exception_value(
             scope,
@@ -630,15 +629,22 @@ fn clipboard_write_callback<'s>(
         set_rejected_promise(scope, &mut rv, reason);
         return;
     }
+    if reject_denied_clipboard_access(scope, args.this(), "clipboard-write", &mut rv) {
+        return;
+    }
     let item = parsed.data[0];
     let Some(validation) = clipboard_item_write_validation_promise(scope, item) else {
         let reason = type_error_value(scope, "Failed to validate ClipboardItem data.");
         set_rejected_promise(scope, &mut rv, reason);
         return;
     };
-    let callback_data = v8::Array::new(scope, 2);
+    let Some(resolver) = v8::PromiseResolver::new(scope) else {
+        return;
+    };
+    let callback_data = v8::Array::new(scope, 3);
     let _ = callback_data.set_index(scope, 0, args.this().into());
     let _ = callback_data.set_index(scope, 1, item.into());
+    let _ = callback_data.set_index(scope, 2, resolver.into());
     let Some(store_callback) = v8::Function::builder(clipboard_store_validated_item_callback)
         .data(callback_data.into())
         .build(scope)
@@ -647,12 +653,23 @@ fn clipboard_write_callback<'s>(
         set_rejected_promise(scope, &mut rv, reason);
         return;
     };
-    let Some(promise) = validation.then(scope, store_callback) else {
+    let Some(reject_callback) = v8::Function::builder(clipboard_write_rejected_callback)
+        .data(callback_data.into())
+        .build(scope)
+    else {
         let reason = type_error_value(scope, "Failed to write ClipboardItem data.");
         set_rejected_promise(scope, &mut rv, reason);
         return;
     };
-    rv.set(promise.into());
+    if validation
+        .then2(scope, store_callback, reject_callback)
+        .is_none()
+    {
+        let reason = type_error_value(scope, "Failed to write ClipboardItem data.");
+        set_rejected_promise(scope, &mut rv, reason);
+        return;
+    }
+    rv.set(resolver.get_promise(scope).into());
 }
 
 fn clipboard_write_text_callback<'s>(
@@ -672,40 +689,14 @@ fn clipboard_write_text_callback<'s>(
             return;
         }
     };
-    let Some(text) = v8_string(scope, &parsed.data) else {
-        rv.set_undefined();
+    let Some(runtime) = clipboard_browser_context(scope, args.this()) else {
         return;
     };
-    let Some(promise) = resolved_promise(scope, text.into()) else {
-        rv.set_undefined();
+    if reject_denied_clipboard_access(scope, args.this(), "clipboard-write", &mut rv) {
         return;
-    };
-    let Some(item) = build_clipboard_item(scope, vec![("text/plain".to_owned(), promise)]) else {
-        rv.set_undefined();
-        return;
-    };
-    store_clipboard_item(scope, args.this(), item);
-    set_private_value(scope, args.this(), CLIPBOARD_TEXT_SLOT, text.into());
-    set_resolved_promise(scope, &mut rv, v8::undefined(scope).into());
-}
-
-fn clipboard_blob_to_text_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    let Ok(blob) = v8::Local::<v8::Object>::try_from(args.get(0)) else {
-        throw_type_error(scope, "Clipboard text data is not a Blob.");
-        return;
-    };
-    let Some(bytes) = blob::blob_bytes_from_object(scope, blob) else {
-        throw_type_error(scope, "Clipboard text data is not a Blob.");
-        return;
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    if let Some(value) = v8_string(scope, &text) {
-        rv.set(value.into());
     }
+    runtime.set_clipboard_data(vec![("text/plain".to_owned(), parsed.data.into_bytes())]);
+    set_resolved_promise(scope, &mut rv, v8::undefined(scope).into());
 }
 
 fn clipboard_item_write_validation_promise<'s>(
@@ -723,7 +714,11 @@ fn clipboard_item_write_validation_promise<'s>(
             custom_format_count += 1;
         }
         let raw = clipboard_item_raw_data_promise(scope, item, &mime_type)?;
-        entries.push((key, raw));
+        let normalized = clipboard_item_data_promise(scope, item, &mime_type)?;
+        let validation_data = v8::Array::new(scope, 2);
+        let _ = validation_data.set_index(scope, 0, key);
+        let _ = validation_data.set_index(scope, 1, normalized.into());
+        entries.push((validation_data, raw));
     }
     if custom_format_count > 100 {
         let reason = super::super::new_dom_exception_value(
@@ -748,9 +743,9 @@ fn clipboard_item_write_validation_promise<'s>(
     );
     let _ = state.set_index(scope, 2, v8::Boolean::new(scope, false).into());
 
-    for (key, raw) in entries {
+    for (validation_data, raw) in entries {
         let validator = v8::Function::builder(clipboard_validate_write_entry_callback)
-            .data(key)
+            .data(validation_data.into())
             .build(scope)?;
         let validated = raw.then(scope, validator)?;
         let on_fulfilled = v8::Function::builder(clipboard_validation_fulfilled_callback)
@@ -767,11 +762,15 @@ fn clipboard_item_write_validation_promise<'s>(
 fn clipboard_validate_write_entry_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
-    _rv: v8::ReturnValue<'_, v8::Value>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let mime_type = args
-        .data()
-        .to_string(scope)
+    let Ok(data) = v8::Local::<v8::Array>::try_from(args.data()) else {
+        throw_type_error(scope, "Failed to validate ClipboardItem data.");
+        return;
+    };
+    let mime_type = data
+        .get_index(scope, 0)
+        .and_then(|value| value.to_string(scope))
         .map(|value| value.to_rust_string_lossy(scope))
         .unwrap_or_default();
     if !clipboard_item_type_supported(&mime_type) {
@@ -781,6 +780,11 @@ fn clipboard_validate_write_entry_callback<'s>(
             "NotAllowedError",
         );
         return;
+    }
+    // Await the representation's normalization as well as its raw type
+    // validation before committing a byte snapshot to the shared clipboard.
+    if let Some(normalized) = data.get_index(scope, 1) {
+        rv.set(normalized);
     }
     let value = args.get(0);
     let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
@@ -875,27 +879,62 @@ fn clipboard_store_validated_item_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(data) = v8::Local::<v8::Array>::try_from(args.data()) else {
-        throw_type_error(scope, "Failed to write ClipboardItem data.");
+    let Some((clipboard, item, resolver)) = clipboard_write_callback_state(scope, args.data())
+    else {
         return;
     };
-    let clipboard = data
-        .get_index(scope, 0)
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok());
-    let item = data
-        .get_index(scope, 1)
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok());
-    let (Some(clipboard), Some(item)) = (clipboard, item) else {
-        throw_type_error(scope, "Failed to write ClipboardItem data.");
+    // Like Chromium's ScriptPromiseResolver, do not settle a write after its
+    // realm is retired. Each live write still commits independently.
+    let Some(runtime) = clipboard_browser_context(scope, clipboard) else {
         return;
     };
-    store_clipboard_item(scope, clipboard, item);
-    set_private_value(
-        scope,
-        clipboard,
-        CLIPBOARD_TEXT_SLOT,
-        v8::undefined(scope).into(),
-    );
+    if clipboard_permission_denied(scope, clipboard, "clipboard-write") {
+        let reason = super::super::new_dom_exception_value(
+            scope,
+            "Clipboard write permission denied.",
+            "NotAllowedError",
+        );
+        let _ = resolver.reject(scope, reason);
+        return;
+    }
+    let Some(data) = clipboard_item_bytes(scope, item) else {
+        let reason = type_error_value(scope, "Failed to read validated ClipboardItem data.");
+        let _ = resolver.reject(scope, reason);
+        return;
+    };
+    runtime.set_clipboard_data(data);
+    let _ = resolver.resolve(scope, v8::undefined(scope).into());
+}
+
+fn clipboard_write_rejected_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let Some((clipboard, _item, resolver)) = clipboard_write_callback_state(scope, args.data())
+    else {
+        return;
+    };
+    if clipboard_browser_context(scope, clipboard).is_some() {
+        let _ = resolver.reject(scope, args.get(0));
+    }
+}
+
+fn clipboard_write_callback_state<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<(
+    v8::Local<'s, v8::Object>,
+    v8::Local<'s, v8::Object>,
+    v8::Local<'s, v8::PromiseResolver>,
+)> {
+    let data = v8::Local::<v8::Array>::try_from(value).ok()?;
+    let clipboard = v8::Local::<v8::Object>::try_from(data.get_index(scope, 0)?).ok()?;
+    let item = v8::Local::<v8::Object>::try_from(data.get_index(scope, 1)?).ok()?;
+    let resolver = v8::Local::<v8::Object>::try_from(data.get_index(scope, 2)?).ok()?;
+    // This callback data is created only by clipboard_write_callback.
+    let resolver = unsafe { v8::Local::<v8::PromiseResolver>::cast_unchecked(resolver) };
+    Some((clipboard, item, resolver))
 }
 
 fn throw_dom_exception(scope: &mut v8::PinScope<'_, '_>, message: &str, name: &str) {
@@ -903,37 +942,104 @@ fn throw_dom_exception(scope: &mut v8::PinScope<'_, '_>, message: &str, name: &s
     scope.throw_exception(exception);
 }
 
-fn store_clipboard_item<'s>(
+fn clipboard_permission_denied<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     clipboard: v8::Local<'s, v8::Object>,
-    item: v8::Local<'s, v8::Object>,
-) {
-    let items = v8::Array::new(scope, 1);
-    let _ = items.set_index(scope, 0, item.into());
-    let _ = items.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
-    set_private_value(scope, clipboard, CLIPBOARD_ITEMS_SLOT, items.into());
+    permission: &str,
+) -> bool {
+    let Some(context) = clipboard.get_creation_context(scope) else {
+        return true;
+    };
+    let Some(host_ptr) = context_host_ptr_from_context_slot(context) else {
+        return true;
+    };
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let host = unsafe { &mut *host_ptr };
+    let embedding_origin = moli_url::origin_ascii_serialization(host.document_url());
+    let Some(requesting_origin) = host
+        .current_runtime_window_execution_context_identity(scope)
+        .and_then(|identity| host.storage_context_for_window_execution_context_identity(identity))
+        .map(|context| context.storage_key().serialized_storage_key())
+        .and_then(|key| moli_storage_key::deserialize_serialized_storage_key(&key))
+        .map(|key| key.origin().to_owned())
+    else {
+        return true;
+    };
+    host.permission_state_for_origins(permission, &requesting_origin, &embedding_origin) == "denied"
+}
+
+fn reject_denied_clipboard_access<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    clipboard: v8::Local<'s, v8::Object>,
+    permission: &str,
+    rv: &mut v8::ReturnValue<'_, v8::Value>,
+) -> bool {
+    if !clipboard_permission_denied(scope, clipboard, permission) {
+        return false;
+    }
+    let reason = super::super::new_dom_exception_value(
+        scope,
+        "Clipboard permission denied.",
+        "NotAllowedError",
+    );
+    set_rejected_promise(scope, rv, reason);
+    true
+}
+
+fn clipboard_browser_context<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    clipboard: v8::Local<'s, v8::Object>,
+) -> Option<crate::runtime::RendererBrowserContextRuntime> {
+    let context = clipboard.get_creation_context(scope)?;
+    let host_ptr = context_host_ptr_from_context_slot(context)?;
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let host = unsafe { &*host_ptr };
+    // Blink's CreateForRead/Write entry points return an empty Promise for an
+    // invalid ScriptState. Check the receiver realm after WebIDL conversion,
+    // which can itself detach the document through author code.
+    host.current_runtime_window_execution_context_identity(scope)?;
+    Some(host.browser_context_runtime())
 }
 
 fn copy_clipboard_items<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    clipboard: v8::Local<'s, v8::Object>,
-) -> v8::Local<'s, v8::Array> {
-    let item = first_clipboard_item(scope, clipboard);
-    let result = v8::Array::new(scope, i32::from(item.is_some()));
-    if let Some(item) = item {
-        let _ = result.set_index(scope, 0, item.into());
+    runtime: &crate::runtime::RendererBrowserContextRuntime,
+) -> Option<v8::Local<'s, v8::Array>> {
+    let data = runtime.clipboard_data();
+    let result = v8::Array::new(scope, i32::from(!data.is_empty()));
+    if !data.is_empty() {
+        let mut entries = Vec::with_capacity(data.len());
+        for (mime_type, bytes) in data {
+            let blob = blob::build_blob_object(scope, bytes, mime_type.clone())?;
+            let promise = resolved_promise(scope, blob.into())?;
+            entries.push((mime_type, promise));
+        }
+        let item = build_clipboard_item(scope, entries)?;
+        result.set_index(scope, 0, item.into())?;
     }
-    result
+    Some(result)
 }
 
-fn first_clipboard_item<'s>(
+fn clipboard_item_bytes<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    clipboard: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    get_private_value(scope, clipboard, CLIPBOARD_ITEMS_SLOT)
-        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())
-        .and_then(|items| items.get_index(scope, 0))
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    item: v8::Local<'s, v8::Object>,
+) -> Option<Vec<(String, Vec<u8>)>> {
+    let types = get_private_value(scope, item, CLIPBOARD_ITEM_TYPES_SLOT)
+        .and_then(|value| v8::Local::<v8::Array>::try_from(value).ok())?;
+    let mut data = Vec::with_capacity(types.length() as usize);
+    for index in 0..types.length() {
+        let mime_type = types
+            .get_index(scope, index)?
+            .to_string(scope)?
+            .to_rust_string_lossy(scope);
+        let promise = clipboard_item_data_promise(scope, item, &mime_type)?;
+        if promise.state() != v8::PromiseState::Fulfilled {
+            return None;
+        }
+        let blob = v8::Local::<v8::Object>::try_from(promise.result(scope)).ok()?;
+        data.push((mime_type, blob::blob_bytes_from_object(scope, blob)?));
+    }
+    Some(data)
 }
 
 fn clipboard_item_data_promise<'s>(
