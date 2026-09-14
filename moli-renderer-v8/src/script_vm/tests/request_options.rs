@@ -5,66 +5,85 @@ use tokio::{
 };
 
 #[derive(Clone, Copy)]
-enum FetchOption {
+enum RequestCase {
     RedirectError,
     NoReferrer,
     OriginReferrer,
     DocumentReferrer,
+    CspReport,
 }
 
 #[tokio::test]
 async fn continued_window_fetch_retains_redirect_error() {
-    window_fetch_option(FetchOption::RedirectError, true, false).await;
+    request_option(RequestCase::RedirectError, true, false).await;
 }
 
 #[tokio::test]
 async fn authenticated_window_fetch_retains_redirect_error() {
-    window_fetch_option(FetchOption::RedirectError, true, true).await;
+    request_option(RequestCase::RedirectError, true, true).await;
 }
 
 #[tokio::test]
 async fn continued_window_fetch_retains_no_referrer() {
-    window_fetch_option(FetchOption::NoReferrer, true, false).await;
+    request_option(RequestCase::NoReferrer, true, false).await;
 }
 
 #[tokio::test]
 async fn authenticated_window_fetch_retains_no_referrer() {
-    window_fetch_option(FetchOption::NoReferrer, true, true).await;
+    request_option(RequestCase::NoReferrer, true, true).await;
 }
 
 #[tokio::test]
 async fn continued_window_fetch_retains_origin_referrer() {
-    window_fetch_option(FetchOption::OriginReferrer, true, false).await;
+    request_option(RequestCase::OriginReferrer, true, false).await;
 }
 
 #[tokio::test]
 async fn authenticated_window_fetch_retains_origin_referrer() {
-    window_fetch_option(FetchOption::OriginReferrer, true, true).await;
+    request_option(RequestCase::OriginReferrer, true, true).await;
 }
 
 #[tokio::test]
 async fn continued_window_fetch_retains_original_document_referrer_policy() {
-    window_fetch_option(FetchOption::DocumentReferrer, true, false).await;
+    request_option(RequestCase::DocumentReferrer, true, false).await;
 }
 
 #[tokio::test]
 async fn authenticated_window_fetch_retains_original_document_referrer_policy() {
-    window_fetch_option(FetchOption::DocumentReferrer, true, true).await;
+    request_option(RequestCase::DocumentReferrer, true, true).await;
 }
 
 #[tokio::test]
 async fn ordinary_window_fetch_applies_original_options() {
     for option in [
-        FetchOption::RedirectError,
-        FetchOption::NoReferrer,
-        FetchOption::OriginReferrer,
-        FetchOption::DocumentReferrer,
+        RequestCase::RedirectError,
+        RequestCase::NoReferrer,
+        RequestCase::OriginReferrer,
+        RequestCase::DocumentReferrer,
     ] {
-        window_fetch_option(option, false, false).await;
+        request_option(option, false, false).await;
     }
 }
 
-async fn window_fetch_option(option: FetchOption, intercepted: bool, authenticate: bool) {
+#[tokio::test]
+async fn ordinary_csp_report_does_not_follow_redirects() {
+    request_option(RequestCase::CspReport, false, false).await;
+}
+
+#[tokio::test]
+async fn continued_csp_report_does_not_follow_redirects() {
+    request_option(RequestCase::CspReport, true, false).await;
+}
+
+#[tokio::test]
+async fn authenticated_csp_report_does_not_follow_redirects() {
+    request_option(RequestCase::CspReport, true, true).await;
+}
+
+async fn request_option(option: RequestCase, intercepted: bool, authenticate: bool) {
+    let csp_report = matches!(option, RequestCase::CspReport);
+    let redirect_error = matches!(option, RequestCase::RedirectError | RequestCase::CspReport);
+    let method = if csp_report { "POST" } else { "GET" };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
@@ -80,12 +99,18 @@ async fn window_fetch_option(option: FetchOption, intercepted: bool, authenticat
                 bytes.push(stream.read_u8().await.unwrap());
             }
             let head = String::from_utf8(bytes).unwrap();
+            let length =
+                request_header(&head, "content-length").map_or(0, |length| length.parse().unwrap());
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            if csp_report {
+                let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(report["csp-report"]["effective-directive"], "connect-src");
+            }
             let authorized = request_header(&head, "authorization") == Some("Basic dXNlcjpwYXNz");
             let response = if authenticate && !authorized {
                 "401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"test\""
-            } else if matches!(option, FetchOption::RedirectError)
-                && head.starts_with("GET /probe ")
-            {
+            } else if redirect_error && head.starts_with(&format!("{method} /probe ")) {
                 "307 Temporary Redirect\r\nLocation: /must-not-follow"
             } else {
                 "200 OK"
@@ -108,22 +133,45 @@ async fn window_fetch_option(option: FetchOption, intercepted: bool, authenticat
         &loader,
     );
     let output = NativeResourceOutput::observe(&vm);
-    if matches!(option, FetchOption::DocumentReferrer) {
+    if matches!(option, RequestCase::DocumentReferrer) {
         vm.set_response_referrer_policy(Some("origin".into()));
     }
     vm.set_fetch_subresource_interception(intercepted, None);
-    let options = match option {
-        FetchOption::RedirectError => "{redirect:'error'}",
-        FetchOption::NoReferrer => "{referrer:''}",
-        FetchOption::OriginReferrer => "{referrerPolicy:'origin'}",
-        FetchOption::DocumentReferrer => "{}",
-    };
-    vm.exec(&format!("globalThis.result='pending'; fetch('/probe',{options}).then(()=>result='resolved',error=>result=error.name);"), None).unwrap();
+    if csp_report {
+        let document_url = Url::parse(&format!("{origin}/source/path?private=value")).unwrap();
+        let violation = test_window_csp_report_violation(
+            &document_url,
+            &Url::parse(&format!("{origin}/probe")).unwrap(),
+        );
+        vm.with_default_context_scope_and_checkpoint_for_test(|scope, host_ptr| {
+            let host = unsafe { &mut *host_ptr };
+            let context = crate::network_host::capture_window_csp_report_request_context(
+                scope,
+                host,
+                crate::native_bridge::OwnerDispatchScope::Top,
+            )
+            .unwrap();
+            crate::network_host::send_content_security_policy_violation_report_from_window_context(
+                host, &context, &violation,
+            );
+            Ok(())
+        })
+        .unwrap();
+    } else {
+        let options = match option {
+            RequestCase::RedirectError => "{redirect:'error'}",
+            RequestCase::NoReferrer => "{referrer:''}",
+            RequestCase::OriginReferrer => "{referrerPolicy:'origin'}",
+            RequestCase::DocumentReferrer => "{}",
+            RequestCase::CspReport => unreachable!(),
+        };
+        vm.exec(&format!("globalThis.result='pending'; fetch('/probe',{options}).then(()=>result='resolved',error=>result=error.name);"), None).unwrap();
+    }
     let request_id = if intercepted {
         let pending = vm.take_pending_subresource_fetch_infos();
         assert_eq!(pending.len(), 1);
         let id = pending[0].internal_id;
-        if matches!(option, FetchOption::DocumentReferrer) {
+        if matches!(option, RequestCase::DocumentReferrer) {
             vm.set_response_referrer_policy(Some("unsafe-url".into()));
         }
         vm.continue_pending_subresource_fetch(id, None, None, None, None, false, authenticate)
@@ -164,8 +212,8 @@ async fn window_fetch_option(option: FetchOption, intercepted: bool, authenticat
             vm.with_default_context_scope_and_checkpoint_for_test(|_, _| Ok(()))
                 .unwrap();
             observations.extend(output.take());
-            let result = vm.eval("globalThis.result").unwrap();
-            if result != "pending"
+            let result = (!csp_report).then(|| vm.eval("globalThis.result").unwrap());
+            if result.as_deref() != Some("pending")
                 && observations.iter().any(|item| {
                     matches!(
                         item,
@@ -188,26 +236,39 @@ async fn window_fetch_option(option: FetchOption, intercepted: bool, authenticat
     assert!(requests.len() > usize::from(authenticate));
     for head in &requests {
         assert!(
-            head.starts_with("GET /probe HTTP/1.1\r\n"),
+            head.starts_with(&format!("{method} /probe HTTP/1.1\r\n")),
             "redirect:error must never follow: {head}"
         );
         match option {
-            FetchOption::RedirectError => {}
-            FetchOption::NoReferrer => assert_eq!(request_header(head, "referer"), None),
-            FetchOption::OriginReferrer | FetchOption::DocumentReferrer => assert_eq!(
+            RequestCase::RedirectError | RequestCase::CspReport => {}
+            RequestCase::NoReferrer => assert_eq!(request_header(head, "referer"), None),
+            RequestCase::OriginReferrer | RequestCase::DocumentReferrer => assert_eq!(
                 request_header(head, "referer"),
                 Some(format!("{origin}/").as_str())
             ),
         }
     }
     assert_eq!(
-        result,
-        if matches!(option, FetchOption::RedirectError) {
+        result.as_deref(),
+        (!csp_report).then_some(if redirect_error {
             "TypeError"
         } else {
             "resolved"
-        }
+        })
     );
+    if redirect_error {
+        let heads: Vec<_> = observations
+            .iter()
+            .filter_map(|item| match item {
+                crate::types::ScriptNetworkOutputItem::SubresourceResponseStarted(head) => {
+                    Some(head)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heads.len(), 1, "retain the original redirect response");
+        assert_eq!(heads[0].status(), 307);
+    }
     assert_eq!(
         observations
             .iter()

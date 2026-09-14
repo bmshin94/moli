@@ -61,7 +61,6 @@ fn pending_subresource_request(
         | SubresourceResourceType::Media
         | SubresourceResourceType::TextTrack
         | SubresourceResourceType::Ping
-        | SubresourceResourceType::CspReport
         | SubresourceResourceType::Dictionary => {
             match crate::network::request_resource_type_for_subresource(pending.info.resource_type)
             {
@@ -72,6 +71,9 @@ fn pending_subresource_request(
         SubresourceResourceType::Fetch => {
             request.with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Fetch)
         }
+        SubresourceResourceType::CspReport => request
+            .with_resource_type(moli_fetch::RequestResourceType::CspReport)
+            .with_redirect_mode(moli_fetch::RequestRedirectMode::Error),
         SubresourceResourceType::Manifest => request
             .with_resource_type(moli_fetch::RequestResourceType::Manifest)
             .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Manifest),
@@ -597,11 +599,6 @@ impl ScriptVm {
             PendingSubresourceContinuation::CspReport { client_id } => {
                 let request_url = url.unwrap_or_else(|| info.url.clone());
                 let request_method = method.unwrap_or_else(|| info.method.clone());
-                let request_body_bytes = match &body {
-                    Some(Some(body)) => Some(body.as_bytes().to_vec()),
-                    Some(None) => None,
-                    None => info.request_body_bytes.clone(),
-                };
                 let request_body = body.unwrap_or_else(|| info.request_body.clone());
                 let request_headers = headers.unwrap_or_else(|| info.request_headers.clone());
                 let pending = PendingSubresourceFetchState {
@@ -623,7 +620,6 @@ impl ScriptVm {
                         request_method.clone(),
                         request_headers.clone(),
                         request_body.clone(),
-                        request_body_bytes,
                         intercept_response,
                         handle_auth_requests,
                     )?;
@@ -744,7 +740,6 @@ impl ScriptVm {
         request_method: String,
         request_headers: Vec<(String, String)>,
         request_body: Option<String>,
-        request_body_bytes: Option<Vec<u8>>,
         intercept_response: bool,
         handle_auth_requests: bool,
     ) -> Result<Option<PendingSubresourceFetchState>> {
@@ -761,20 +756,8 @@ impl ScriptVm {
             return Ok(Some(pending));
         }
 
-        let mut request = moli_fetch::Request::new_bytes(
-            &request_method,
-            request_url.as_str(),
-            request_body_bytes,
-            request_headers.clone(),
-        )?
-        .with_initiator_url(&pending.info.document_url)
-        .with_resource_type(moli_fetch::RequestResourceType::CspReport)
-        .with_request_mode(pending.request_mode)
-        .with_credentials_mode(pending.credentials_mode)
-        .with_network_partition_key(pending.network_partition_key.clone())
-        .with_redirect_mode(moli_fetch::RequestRedirectMode::Error)
-        .with_subframe_context(pending.info.frame_id.is_some());
-        request.priority_hints.fetch_priority = None;
+        let request =
+            pending_subresource_request(&pending, &request_url, &request_method, &request_headers)?;
 
         let cancel_handle = moli_fetch::FetchCancelHandle::new();
         pending.load.attach_cancel_handle(cancel_handle.clone());
