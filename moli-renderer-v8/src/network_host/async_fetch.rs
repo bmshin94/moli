@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// If its Page route retires before delivery, the result itself settles the
 /// native request rather than losing the physical response with the VM.
 pub(crate) struct CompletedResourceFetch {
-    network: Arc<ResourceTransfer>,
+    response: Arc<ResourceResponseStream>,
     completion: Option<AsyncSubresourceFetchCompletion>,
 }
 
@@ -29,11 +29,11 @@ impl std::fmt::Debug for CompletedResourceFetch {
 
 impl CompletedResourceFetch {
     pub(crate) fn new(
-        network: Arc<ResourceTransfer>,
+        response: Arc<ResourceResponseStream>,
         completion: AsyncSubresourceFetchCompletion,
     ) -> Self {
         Self {
-            network,
+            response,
             completion: Some(completion),
         }
     }
@@ -48,7 +48,9 @@ impl CompletedResourceFetch {
     #[cfg(test)]
     pub(crate) fn complete_for_test(mut self) -> AsyncSubresourceFetchCompletion {
         let completion = self.completion.take().expect("single result consumer");
-        completion.publish(&self.network);
+        completion.publish_with(&self.response.network, |item| {
+            self.response.network.observe(item)
+        });
         completion
     }
 
@@ -56,7 +58,7 @@ impl CompletedResourceFetch {
         mut self,
         network: &Arc<ResourceTransfer>,
     ) -> Option<AsyncSubresourceFetchCompletion> {
-        if !Arc::ptr_eq(network, &self.network) {
+        if !Arc::ptr_eq(network, &self.response.network) {
             return None;
         }
         self.completion.take()
@@ -66,18 +68,49 @@ impl CompletedResourceFetch {
 impl Drop for CompletedResourceFetch {
     fn drop(&mut self) {
         if let Some(completion) = self.completion.take() {
-            completion.publish(&self.network);
+            self.response.network.complete_with(
+                |request| {
+                    let result = completion.network_result();
+                    let head = match &result {
+                        Ok((head, _)) => Some(head),
+                        Err(ResourceResponseFailure::PartialBody { response, .. }) => {
+                            Some(response.as_ref())
+                        }
+                        Err(ResourceResponseFailure::Request(_)) => None,
+                    };
+                    let failure = self
+                        .response
+                        .window_fetch_policy()
+                        .zip(head)
+                        .filter(|(_, head)| !head.head.redirect_chain.is_empty())
+                        .and_then(|(policy, head)| {
+                            policy.check_unclaimed_response(request, &head.head.final_url)
+                        });
+                    match (result, failure) {
+                        (Ok((head, body)), Some(message)) => {
+                            Err(ResourceResponseFailure::PartialBody {
+                                message,
+                                response: Arc::new(head),
+                                body,
+                            })
+                        }
+                        (Err(error), Some(message)) => Err(error.with_message(message)),
+                        (result, None) => result,
+                    }
+                },
+                |observation| self.response.network.observe(observation),
+            );
         }
     }
 }
 
 pub(crate) fn send_resource_completion(
     sender: &RendererResourceCompletionSender,
-    network: Arc<ResourceTransfer>,
+    response: Arc<ResourceResponseStream>,
     completion: AsyncSubresourceFetchCompletion,
 ) {
     let _ = sender.send_async_subresource_event(AsyncSubresourceFetchEvent::TransportCompletion(
-        Box::new(CompletedResourceFetch::new(network, completion)),
+        Box::new(CompletedResourceFetch::new(response, completion)),
     ));
 }
 
@@ -662,13 +695,13 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
                 AsyncSubresourceFetchEvent::TransportStreamingFinished {
                     body_source_id,
                     completion: Box::new(super::CompletedResourceFetch::new(
-                        resource.network.clone(),
+                        resource.clone(),
                         completion,
                     )),
                 },
             );
         } else {
-            super::send_resource_completion(&completion_tx, resource.network.clone(), completion);
+            super::send_resource_completion(&completion_tx, resource.clone(), completion);
         }
     });
 }
@@ -772,6 +805,18 @@ mod tests {
     use url::Url;
 
     #[test]
+    fn cancelled_resource_does_not_run_late_response_policy() {
+        let response = ResourceResponseStream::unobserved_for_test();
+        response
+            .network
+            .failed(&ResourceResponseFailure::Request("cancelled".into()));
+        response.network.complete_with(
+            |_| panic!("a losing response must not admit CSP reports"),
+            |_| panic!("cancellation already published the terminal"),
+        );
+    }
+
+    #[test]
     fn buffered_report_result_survives_a_closed_route_and_a_claim_defers_completion() {
         use moli_page_types::{
             NavigationResponse, ScriptNetworkOutputItem, SubresourceBodyFinishedResult,
@@ -826,19 +871,22 @@ mod tests {
             if closed_route {
                 send_resource_completion(
                     &RendererResourceCompletionSender::closed_for_test(),
-                    network.clone(),
+                    ResourceResponseStream::new(network.clone()),
                     completion,
                 );
             } else {
-                let completion = CompletedResourceFetch::new(network.clone(), completion)
-                    .claim(&network)
-                    .unwrap();
+                let completion = CompletedResourceFetch::new(
+                    ResourceResponseStream::new(network.clone()),
+                    completion,
+                )
+                .claim(&network)
+                .unwrap();
                 assert_eq!(
                     records.lock().len(),
                     1,
                     "the claim transfers the decision to its pending request"
                 );
-                completion.publish(&network);
+                completion.publish_with(&network, |item| network.observe(item));
             }
             drop(network);
             let records = records.lock();

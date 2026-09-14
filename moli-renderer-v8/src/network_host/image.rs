@@ -346,7 +346,7 @@ pub(crate) fn start_image_element_resource_fetch(
         if !host.dispatch_service_worker_fetch(dispatch) {
             crate::network_host::send_resource_completion(
                 &host.resource_completion_sender(),
-                host.pending_subresource_network(internal_id),
+                host.pending_subresource_response_stream(internal_id),
                 AsyncSubresourceFetchCompletion {
                     network_request_headers: None,
                     internal_id,
@@ -366,7 +366,7 @@ pub(crate) fn start_image_element_resource_fetch(
     if let Some(scanned_preload) = scanned_preload {
         debug_assert_eq!(scanned_preload.request_key().url(), request_url.as_str());
         let completion_tx = host.resource_completion_sender();
-        let network = host.pending_subresource_network(internal_id);
+        let network = host.pending_subresource_response_stream(internal_id);
         resource_loader.task_runner().spawn(async move {
             let outcome = scanned_preload.wait_outcome().await;
             crate::network_host::send_resource_completion(

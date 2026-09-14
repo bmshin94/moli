@@ -14,6 +14,7 @@ use tokio::{
 use url::Url;
 
 mod document_network_stages;
+mod late_csp_reports;
 mod network_stages;
 
 #[derive(Default)]

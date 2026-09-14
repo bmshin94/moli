@@ -66,7 +66,8 @@ pub(crate) use self::body_source::{
 pub(in crate::network_host) use self::browser_response::http_status_text;
 pub(crate) use self::browser_response::{local_url_response, local_url_response_result};
 pub(crate) use self::csp_reports::{
-    WindowCspReportRequestContext, capture_window_csp_report_request_context,
+    WindowCspReportRequestContext, WindowFetchResponsePolicy,
+    capture_window_csp_report_request_context,
     send_content_security_policy_reports_for_lightweight_popup,
     send_content_security_policy_reports_for_window,
     send_content_security_policy_violation_report_from_window_context,

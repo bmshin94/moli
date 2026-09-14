@@ -141,26 +141,9 @@ impl ResourceTransfer {
         &self,
         head: ResourceResponseHead,
         body: SubresourceResponseBody,
-        mut observer: impl FnMut(RendererNetworkObservation),
+        observer: impl FnMut(RendererNetworkObservation),
     ) {
-        let previous = std::mem::replace(&mut *self.state.lock(), ResourceTransferState::Finished);
-        let (network, body) = match previous {
-            ResourceTransferState::Requested(network) => {
-                Self::record_response(&network, head, &mut observer);
-                let body = SubresourceBodyFinished::ready(network.handle(), body);
-                (network, body)
-            }
-            ResourceTransferState::Responding(network) => {
-                let body = SubresourceBodyFinished::ready_after_streaming(network.handle(), body);
-                (network, body)
-            }
-            ResourceTransferState::Finished => return,
-        };
-        observer(
-            network.report(ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(
-                body,
-            ))),
-        );
+        self.complete_with(|_| Ok((head, body)), observer);
     }
 
     pub(crate) fn failed(&self, error: &ResourceResponseFailure) {
@@ -170,29 +153,53 @@ impl ResourceTransfer {
     pub(crate) fn failed_with(
         &self,
         error: &ResourceResponseFailure,
+        observer: impl FnMut(RendererNetworkObservation),
+    ) {
+        self.complete_with(|_| Err(error.clone()), observer);
+    }
+
+    /// Claim terminal permission before checking the result. A winning response
+    /// can admit dependent work before publishing its terminal; a late response
+    /// cannot run policy side effects after cancellation has already won.
+    pub(crate) fn complete_with(
+        &self,
+        result: impl FnOnce(
+            &RendererNetworkRequest,
+        ) -> Result<
+            (ResourceResponseHead, SubresourceResponseBody),
+            ResourceResponseFailure,
+        >,
         mut observer: impl FnMut(RendererNetworkObservation),
     ) {
         let previous = std::mem::replace(&mut *self.state.lock(), ResourceTransferState::Finished);
-        let network = match previous {
-            ResourceTransferState::Requested(network) => {
-                if let ResourceResponseFailure::PartialBody { response, .. } = error {
-                    Self::record_response(&network, response.as_ref().clone(), &mut observer);
-                }
-                network
-            }
-            ResourceTransferState::Responding(network) => network,
+        let network = match &previous {
+            ResourceTransferState::Requested(network)
+            | ResourceTransferState::Responding(network) => network,
             ResourceTransferState::Finished => return,
         };
-        let body = match error {
-            ResourceResponseFailure::Request(message) => {
-                SubresourceBodyFinished::failed(network.handle(), message.clone())
+        let body = match result(network) {
+            Ok((head, body)) => match previous {
+                ResourceTransferState::Requested(_) => {
+                    Self::record_response(network, head, &mut observer);
+                    SubresourceBodyFinished::ready(network.handle(), body)
+                }
+                ResourceTransferState::Responding(_) => {
+                    SubresourceBodyFinished::ready_after_streaming(network.handle(), body)
+                }
+                ResourceTransferState::Finished => unreachable!(),
+            },
+            Err(ResourceResponseFailure::Request(message)) => {
+                SubresourceBodyFinished::failed(network.handle(), message)
             }
-            ResourceResponseFailure::PartialBody { message, body, .. } => {
-                SubresourceBodyFinished::failed_with_partial_body(
-                    network.handle(),
-                    message.clone(),
-                    body.clone(),
-                )
+            Err(ResourceResponseFailure::PartialBody {
+                message,
+                response,
+                body,
+            }) => {
+                if matches!(previous, ResourceTransferState::Requested(_)) {
+                    Self::record_response(network, response.as_ref().clone(), &mut observer);
+                }
+                SubresourceBodyFinished::failed_with_partial_body(network.handle(), message, body)
             }
         };
         observer(

@@ -181,8 +181,6 @@ impl PendingSubresourceContinuation {
 pub(super) struct PendingWindowFetchContinuation {
     promise: PendingWindowFetchPromise,
     keepalive: bool,
-    connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
-    csp_report_context: crate::network_host::WindowCspReportRequestContext,
 }
 
 enum PendingWindowFetchPromise {
@@ -191,17 +189,10 @@ enum PendingWindowFetchPromise {
 }
 
 impl PendingWindowFetchContinuation {
-    pub(super) fn new(
-        resolver: v8::Global<v8::PromiseResolver>,
-        keepalive: bool,
-        connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
-        csp_report_context: crate::network_host::WindowCspReportRequestContext,
-    ) -> Self {
+    pub(super) fn new(resolver: v8::Global<v8::PromiseResolver>, keepalive: bool) -> Self {
         Self {
             promise: PendingWindowFetchPromise::Active(resolver),
             keepalive,
-            connect_policy,
-            csp_report_context,
         }
     }
 
@@ -233,14 +224,6 @@ impl PendingWindowFetchContinuation {
             PendingWindowFetchPromise::Active(resolver) => Some(resolver),
             PendingWindowFetchPromise::DetachedKeepalive => None,
         }
-    }
-
-    pub(super) fn connect_policy(&self) -> &crate::document_runtime::DocumentConnectPolicySnapshot {
-        &self.connect_policy
-    }
-
-    pub(super) fn csp_report_context(&self) -> &crate::network_host::WindowCspReportRequestContext {
-        &self.csp_report_context
     }
 }
 
@@ -579,32 +562,36 @@ pub(super) struct AsyncSubresourceFetchCompletion {
 }
 
 impl AsyncSubresourceFetchCompletion {
-    pub(crate) fn publish(&self, network: &crate::network::ResourceTransfer) {
-        self.publish_with(network, |observation| network.observe(observation));
-    }
-
     pub(crate) fn publish_with(
         &self,
         network: &crate::network::ResourceTransfer,
         observer: impl FnMut(crate::runtime::RendererNetworkObservation),
     ) {
+        network.complete_with(|_| self.network_result(), observer);
+    }
+
+    pub(crate) fn network_result(
+        &self,
+    ) -> Result<
+        (
+            crate::network::ResourceResponseHead,
+            SubresourceResponseBody,
+        ),
+        crate::network::ResourceResponseFailure,
+    > {
         match &self.result {
-            Ok(response) => network.body_completed_with(
+            Ok(response) => Ok((
                 crate::network::ResourceResponseHead {
                     status_text: self.response_status_text.clone(),
                     head: response.head.clone(),
                     network_request_headers: self.network_request_headers.clone(),
                 },
                 response.body.clone(),
-                observer,
-            ),
-            Err(error) => {
-                let error = match &self.network_error_text {
-                    Some(message) => error.clone().with_message(message.clone()),
-                    None => error.clone(),
-                };
-                network.failed_with(&error, observer);
-            }
+            )),
+            Err(error) => Err(match &self.network_error_text {
+                Some(message) => error.clone().with_message(message.clone()),
+                None => error.clone(),
+            }),
         }
     }
 }

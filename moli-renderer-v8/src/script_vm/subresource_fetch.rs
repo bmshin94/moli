@@ -49,36 +49,14 @@ fn document_connect_csp_redirect_failure_message<'s>(
         return None;
     }
 
-    if let Some(fetch) = pending.continuation.window_fetch() {
-        let redirect_status = ContentSecurityPolicyRedirectStatus::FollowedRedirect;
-        if let Some(violation) = fetch.connect_policy().report_only_violation(
-            &pending.info.document_url,
-            final_url,
-            redirect_status,
-        ) {
-            report_window_fetch_csp_redirect_violation(
-                scope,
-                context_host,
-                fetch.csp_report_context(),
-                &violation,
-            );
-        }
-        let violation = fetch.connect_policy().enforce_violation(
-            &pending.info.document_url,
-            final_url,
-            redirect_status,
-        )?;
-        report_window_fetch_csp_redirect_violation(
-            scope,
-            context_host,
-            fetch.csp_report_context(),
-            &violation,
-        );
-        return Some(
-            crate::document_runtime::document_content_security_policy_error_message(
-                &violation, "fetch",
-            ),
-        );
+    if pending.continuation.window_fetch().is_some() {
+        return pending
+            .response_stream()
+            .window_fetch_policy()
+            .expect("Window fetch retains its response policy")
+            .check_redirect(final_url, |context, violation| {
+                report_window_fetch_csp_redirect_violation(scope, context_host, context, violation);
+            });
     }
 
     let redirect_status = ContentSecurityPolicyRedirectStatus::FollowedRedirect;
@@ -131,34 +109,18 @@ fn detached_window_fetch_csp_redirect_failure_message(
     pending: &PendingSubresourceFetchState,
     final_url: &Url,
 ) -> Option<String> {
-    let fetch = pending.continuation.window_fetch()?;
-    let redirect_status = ContentSecurityPolicyRedirectStatus::FollowedRedirect;
-    if let Some(violation) = fetch.connect_policy().report_only_violation(
-        &pending.info.document_url,
-        final_url,
-        redirect_status,
-    ) {
-        crate::network_host::send_content_security_policy_violation_report_from_window_context(
-            &mut context_host.borrow_mut(),
-            fetch.csp_report_context(),
-            &violation,
-        );
-    }
-    let violation = fetch.connect_policy().enforce_violation(
-        &pending.info.document_url,
-        final_url,
-        redirect_status,
-    )?;
-    crate::network_host::send_content_security_policy_violation_report_from_window_context(
-        &mut context_host.borrow_mut(),
-        fetch.csp_report_context(),
-        &violation,
-    );
-    Some(
-        crate::document_runtime::document_content_security_policy_error_message(
-            &violation, "fetch",
-        ),
-    )
+    pending.continuation.window_fetch()?;
+    pending
+        .response_stream()
+        .window_fetch_policy()
+        .expect("Window fetch retains its response policy")
+        .check_redirect(final_url, |context, violation| {
+            crate::network_host::send_content_security_policy_violation_report_from_window_context(
+                &mut context_host.borrow_mut(),
+                context,
+                violation,
+            );
+        })
 }
 
 fn apply_media_subresource_terminal(
@@ -809,7 +771,7 @@ impl ScriptVm {
         let document_url = pending.info.document_url.clone();
         let frame_id = pending.info.frame_id.clone();
         let completion_tx = self._context_host.borrow().resource_completion_sender();
-        let network = pending.network().clone();
+        let response_stream = pending.response_stream().clone();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let fallback = request.clone();
         let request_client = pending.load.request_client();
@@ -874,7 +836,7 @@ impl ScriptVm {
                         &request_client,
                         fallback,
                         cancel_handle,
-                        &network,
+                        &response_stream.network,
                     )
                     .await,
                 ),
@@ -887,7 +849,7 @@ impl ScriptVm {
             };
             crate::network_host::send_resource_completion(
                 &completion_tx,
-                network,
+                response_stream,
                 AsyncSubresourceFetchCompletion {
                     internal_id,
                     response_status_text: None,
@@ -2180,7 +2142,7 @@ impl ScriptVm {
             };
             crate::network_host::send_resource_completion(
                 &completion_tx,
-                response_stream.network.clone(),
+                response_stream.clone(),
                 completion,
             );
         });

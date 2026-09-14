@@ -247,7 +247,7 @@ pub(crate) fn start_event_source_request<'s>(
         set_event_source_active_request_id(scope, event_source, Some(registered.internal_id));
         crate::network_host::send_resource_completion(
             &host.resource_completion_sender(),
-            host.pending_subresource_network(registered.internal_id),
+            host.pending_subresource_response_stream(registered.internal_id),
             crate::types::AsyncSubresourceFetchCompletion {
                 network_request_headers: None,
                 internal_id: registered.internal_id,
@@ -418,7 +418,7 @@ fn dispatch_service_worker_event_source<'s>(
     if !host.dispatch_service_worker_fetch(dispatch) {
         crate::network_host::send_resource_completion(
             &host.resource_completion_sender(),
-            host.pending_subresource_network(registered.internal_id),
+            host.pending_subresource_response_stream(registered.internal_id),
             crate::types::AsyncSubresourceFetchCompletion {
                 network_request_headers: None,
                 internal_id: registered.internal_id,

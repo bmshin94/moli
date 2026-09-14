@@ -502,15 +502,6 @@ impl JsContextHost {
             .expect("a new Document request needs an active source")
     }
 
-    pub(crate) fn pending_subresource_network(
-        &self,
-        internal_id: u64,
-    ) -> std::sync::Arc<crate::network::ResourceTransfer> {
-        self.pending_subresource_fetches[&internal_id]
-            .network()
-            .clone()
-    }
-
     pub(crate) fn pending_subresource_response_stream(
         &self,
         internal_id: u64,
@@ -525,7 +516,9 @@ impl JsContextHost {
         &self,
         internal_id: u64,
     ) -> crate::runtime::RendererNetworkRequest {
-        self.pending_subresource_network(internal_id).request()
+        self.pending_subresource_response_stream(internal_id)
+            .network
+            .request()
     }
 
     pub(crate) fn subresource_network(
@@ -666,7 +659,11 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             info.internal_id,
             PendingSubresourceFetchState {
-                network: Some(crate::network::ResourceResponseStream::new(network)),
+                network: Some(crate::network::ResourceResponseStream::for_window_fetch(
+                    network,
+                    connect_policy,
+                    csp_report_context,
+                )),
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window_fetch(fetch_context),
@@ -675,12 +672,7 @@ impl JsContextHost {
                 network_partition_key,
                 policy_context,
                 continuation: PendingSubresourceContinuation::Fetch(
-                    crate::types::PendingWindowFetchContinuation::new(
-                        resolver,
-                        keepalive,
-                        connect_policy,
-                        csp_report_context,
-                    ),
+                    crate::types::PendingWindowFetchContinuation::new(resolver, keepalive),
                 ),
             },
         );
@@ -723,7 +715,11 @@ impl JsContextHost {
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                network: Some(crate::network::ResourceResponseStream::new(network)),
+                network: Some(crate::network::ResourceResponseStream::for_window_fetch(
+                    network,
+                    connect_policy,
+                    csp_report_context,
+                )),
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window_fetch(fetch_context),
@@ -732,12 +728,7 @@ impl JsContextHost {
                 network_partition_key,
                 policy_context,
                 continuation: PendingSubresourceContinuation::Fetch(
-                    crate::types::PendingWindowFetchContinuation::new(
-                        resolver,
-                        keepalive,
-                        connect_policy,
-                        csp_report_context,
-                    ),
+                    crate::types::PendingWindowFetchContinuation::new(resolver, keepalive),
                 ),
             },
         );

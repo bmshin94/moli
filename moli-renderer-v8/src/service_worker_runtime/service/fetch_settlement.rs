@@ -665,7 +665,7 @@ impl ServiceWorkerRuntimeService {
         };
         send_page_fetch_result(
             &completion_tx,
-            network.network.clone(),
+            network.clone(),
             job.body_stream
                 .as_ref()
                 .and_then(ServiceWorkerFetchBodyStream::js_body_source_id),
@@ -723,7 +723,7 @@ impl ServiceWorkerRuntimeService {
         };
         send_page_fetch_result(
             &completion_tx,
-            network.network.clone(),
+            network.clone(),
             job.body_stream
                 .as_ref()
                 .and_then(ServiceWorkerFetchBodyStream::js_body_source_id),
@@ -734,7 +734,7 @@ impl ServiceWorkerRuntimeService {
 
 fn send_page_fetch_result(
     sender: &crate::page_task_queue::RendererResourceCompletionSender,
-    network: std::sync::Arc<crate::network::ResourceTransfer>,
+    network: std::sync::Arc<crate::network::ResourceResponseStream>,
     body_source_id: Option<crate::types::NetworkBodySourceId>,
     completion: AsyncSubresourceFetchCompletion,
 ) {

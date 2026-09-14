@@ -2864,7 +2864,7 @@ fn main_document_open_fetch_redirect_uses_source_document_csp_report_context() {
     let registered_handle = vm
         ._context_host
         .borrow()
-        .pending_subresource_network(registered.0)
+        .pending_subresource_network_request(registered.0)
         .handle();
     let source_document_owner = registered.4.owner();
 
@@ -3008,7 +3008,7 @@ async fn child_navigation_aborts_fetch_and_detaches_keepalive() {
     let keepalive_handle = vm
         ._context_host
         .borrow()
-        .pending_subresource_network(keepalive.0)
+        .pending_subresource_network_request(keepalive.0)
         .handle();
     vm.eval("__ownerBoundFetchFrame.srcdoc = '<p>replacement</p>'; 'queued'")
         .expect("child replacement should queue");
@@ -3187,12 +3187,12 @@ async fn detached_keepalive_redirect_reports_source_document_csp_without_v8() {
     let report_only_fetch_handle = vm
         ._context_host
         .borrow()
-        .pending_subresource_network(report_only_fetch.0)
+        .pending_subresource_network_request(report_only_fetch.0)
         .handle();
     let enforce_fetch_handle = vm
         ._context_host
         .borrow()
-        .pending_subresource_network(enforce_fetch.0)
+        .pending_subresource_network_request(enforce_fetch.0)
         .handle();
     assert_eq!(report_only_fetch.4, enforce_fetch.4);
 
@@ -3821,7 +3821,7 @@ fn isolated_realm_destruction_aborts_fetch_and_detaches_keepalive() {
     let keepalive_handle = vm
         ._context_host
         .borrow()
-        .pending_subresource_network(keepalive.0)
+        .pending_subresource_network_request(keepalive.0)
         .handle();
     vm.destroy_isolated_world_context(isolated_context_id);
 

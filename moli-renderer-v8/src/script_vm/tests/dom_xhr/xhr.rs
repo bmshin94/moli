@@ -6,6 +6,7 @@ fn install_native_stream_fixture(
     host: &mut crate::native_bridge::JsContextHost,
     mut state: StreamingSubresourceFetchState,
     body: crate::types::SubresourceResponseBodyWriter,
+    scope: &mut v8::PinScope<'_, '_>,
 ) {
     let info = &mut state.pending.info;
     let handle = *info
@@ -30,7 +31,22 @@ fn install_native_stream_fixture(
         },
     );
     host.record_native_resource_observation(started);
-    let stream = crate::network::ResourceResponseStream::new(network);
+    let stream = if state.pending.continuation.window_fetch().is_some() {
+        crate::network::ResourceResponseStream::for_window_fetch(
+            network,
+            crate::document_runtime::DocumentConnectPolicySnapshot::from_policy_container(
+                &crate::document_runtime::DocumentPolicyContainer::default(),
+            ),
+            crate::network_host::capture_window_csp_report_request_context(
+                scope,
+                host,
+                crate::native_bridge::OwnerDispatchScope::Top,
+            )
+            .expect("test Fetch retains its CSP report context"),
+        )
+    } else {
+        crate::network::ResourceResponseStream::new(network)
+    };
     stream.response_started(crate::network::ResourceResponseHead {
         status_text: None,
         head: state.head.clone(),
@@ -171,29 +187,6 @@ async fn same_origin_window_fetch_and_xhr_post_send_origin_on_wire() {
             request.target
         );
     }
-}
-
-fn pending_fetch_continuation<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    resolver: v8::Local<'s, v8::PromiseResolver>,
-    host: &crate::native_bridge::JsContextHost,
-) -> crate::types::PendingSubresourceContinuation {
-    let dispatch_scope = crate::native_bridge::OwnerDispatchScope::Top;
-    crate::types::PendingSubresourceContinuation::Fetch(
-        crate::types::PendingWindowFetchContinuation::new(
-            v8::Global::new(scope, resolver),
-            false,
-            crate::document_runtime::DocumentConnectPolicySnapshot::from_policy_container(
-                &crate::document_runtime::DocumentPolicyContainer::default(),
-            ),
-            crate::network_host::capture_window_csp_report_request_context(
-                scope,
-                host,
-                dispatch_scope,
-            )
-            .expect("test Fetch should capture its CSP report context"),
-        ),
-    )
 }
 
 #[test]
@@ -2094,6 +2087,7 @@ async fn streaming_subresource_finish_preserves_response_head_cache_state() {
                         xhr_response: None,
                     },
                     body_writer,
+                    scope,
                 );
                 Ok(())
             }
@@ -2329,7 +2323,12 @@ fn install_streaming_fetch_response_fixture(
                 );
             let global = context.global(scope);
             let _ = global.set(scope, v8str(scope, global_name).into(), response.into());
-            let continuation = pending_fetch_continuation(scope, resolver, &context_host.borrow());
+            let continuation = crate::types::PendingSubresourceContinuation::Fetch(
+                crate::types::PendingWindowFetchContinuation::new(
+                    v8::Global::new(scope, resolver),
+                    false,
+                ),
+            );
 
             install_native_stream_fixture(
                 &mut context_host.borrow_mut(),
@@ -2381,6 +2380,7 @@ fn install_streaming_fetch_response_fixture(
                     xhr_response: None,
                 },
                 Default::default(),
+                scope,
             );
             Ok(())
         })
@@ -2425,8 +2425,12 @@ async fn streaming_fetch_body_cancel_aborts_streaming_subresource() {
                     v8str(scope, "__streamingFetchBody").into(),
                     stream.into(),
                 );
-                let continuation =
-                    pending_fetch_continuation(scope, resolver, &context_host.borrow());
+                let continuation = crate::types::PendingSubresourceContinuation::Fetch(
+                    crate::types::PendingWindowFetchContinuation::new(
+                        v8::Global::new(scope, resolver),
+                        false,
+                    ),
+                );
 
                 install_native_stream_fixture(
                     &mut context_host.borrow_mut(),
@@ -2481,6 +2485,7 @@ async fn streaming_fetch_body_cancel_aborts_streaming_subresource() {
                         xhr_response: None,
                     },
                     Default::default(),
+                    scope,
                 );
                 Ok(())
             }
@@ -3042,6 +3047,7 @@ async fn streaming_xhr_materialization_failure_errors_body_source_before_close()
                     xhr_response: None,
                 },
                 body_writer,
+                scope,
             );
             Ok(())
         })

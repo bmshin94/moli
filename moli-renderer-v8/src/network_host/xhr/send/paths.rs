@@ -133,7 +133,7 @@ pub(super) fn dispatch_service_worker_xhr(
 
     crate::network_host::send_resource_completion(
         &host.resource_completion_sender(),
-        host.pending_subresource_network(internal_id),
+        host.pending_subresource_response_stream(internal_id),
         AsyncSubresourceFetchCompletion {
             network_request_headers: None,
             internal_id,

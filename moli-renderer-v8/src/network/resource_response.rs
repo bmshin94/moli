@@ -192,6 +192,7 @@ impl ResourceBodyResponse {
 pub(crate) struct ResourceResponseStream {
     pub(crate) network: Arc<ResourceTransfer>,
     response: parking_lot::Mutex<ResourceStreamBody>,
+    window_fetch_policy: Option<Box<crate::network_host::WindowFetchResponsePolicy>>,
 }
 
 enum ResourceStreamBody {
@@ -208,7 +209,28 @@ impl ResourceResponseStream {
         Arc::new(Self {
             network,
             response: parking_lot::Mutex::new(ResourceStreamBody::Pending),
+            window_fetch_policy: None,
         })
+    }
+
+    pub(crate) fn for_window_fetch(
+        network: Arc<ResourceTransfer>,
+        connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
+        report_context: crate::network_host::WindowCspReportRequestContext,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            network,
+            response: parking_lot::Mutex::new(ResourceStreamBody::Pending),
+            window_fetch_policy: Some(Box::new(
+                crate::network_host::WindowFetchResponsePolicy::new(connect_policy, report_context),
+            )),
+        })
+    }
+
+    pub(crate) fn window_fetch_policy(
+        &self,
+    ) -> Option<&crate::network_host::WindowFetchResponsePolicy> {
+        self.window_fetch_policy.as_deref()
     }
 
     #[cfg(test)]
