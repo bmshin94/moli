@@ -2050,6 +2050,11 @@ impl ScriptVm {
     ) {
         let task_runner = state.pending.load.task_runner();
         let internal_id = state.pending.info.internal_id;
+        let request_url = state.request_url.clone();
+        let intercept_response = state.intercept_response;
+        let handle_auth_requests = state.handle_auth_requests;
+        let initial_auth_headers = state.initial_auth_network_request_headers.clone();
+        let stream_to_js = crate::network_host::can_stream_subresource_response(&request);
         let response_stream = state.pending.response_stream().clone();
         let completion_tx = self._context_host.borrow().resource_completion_sender();
         let preflight_observer = state.pending.preflight_observer(completion_tx.clone());
@@ -2067,27 +2072,48 @@ impl ScriptVm {
                 preflight_headers,
                 Some(&preflight_observer),
             ).await;
-            let mut network_request_headers = None;
-            let result = match observed {
-                Ok(observed) => {
-                    network_request_headers = observed.request_observation()
-                        .map(|request| request.headers().to_vec());
-                    let (mut response, _) = observed.into_parts();
-                    response_stream.buffer_head(std::sync::Arc::new(ResourceResponseHead {
-                        head: response.head(),
-                        status_text: None,
-                        network_request_headers: network_request_headers.clone(),
-                    }));
-                    while let Some(bytes) = response.next_chunk().await {
-                        response_stream.buffer_data(&bytes);
+            let observed = match observed {
+                Ok(observed) if intercept_response || (handle_auth_requests
+                    && matches!(observed.response().status, 401 | 407)
+                    && crate::network_host::extract_subresource_auth_challenge(&observed.response().headers).is_some()) => observed,
+                mut result => {
+                    // Auth rounds share one browser request. Preserve its first
+                    // wire header block before publishing the accepted response.
+                    if let Some(headers) = initial_auth_headers {
+                        result = match result {
+                            Ok(observed) => Ok(moli_fetch::NetworkFetchResult::new(
+                                observed.into_response(),
+                                Some(moli_fetch::NetworkRequestObservation::new(headers)),
+                            )),
+                            Err(ResourceResponseFailure::PartialBody { message, mut response, body }) => {
+                                std::sync::Arc::make_mut(&mut response).network_request_headers = Some(headers);
+                                Err(ResourceResponseFailure::PartialBody { message, response, body })
+                            }
+                            result => result,
+                        };
                     }
-                    match response.finish().await {
-                        Ok(()) => Ok(response_stream.finish_response()
-                            .expect("buffered response retains its head")),
-                        Err(error) => Err(response_stream.failure(format!("{error:#}"))),
-                    }
+                    crate::network_host::receive_async_subresource_response(
+                        completion_tx, internal_id, response_stream, request_url,
+                        result, stream_to_js, Vec::new(),
+                    ).await;
+                    return;
                 }
-                Err(error) => Err(error),
+            };
+            let network_request_headers = observed.request_observation()
+                .map(|request| request.headers().to_vec());
+            let (mut response, _) = observed.into_parts();
+            response_stream.buffer_head(std::sync::Arc::new(ResourceResponseHead {
+                head: response.head(),
+                status_text: None,
+                network_request_headers: network_request_headers.clone(),
+            }));
+            while let Some(bytes) = response.next_chunk().await {
+                response_stream.buffer_data(&bytes);
+            }
+            let result = match response.finish().await {
+                Ok(()) => Ok(response_stream.finish_response()
+                    .expect("buffered response retains its head")),
+                Err(error) => Err(response_stream.failure(format!("{error:#}"))),
             };
             let completion = AsyncSubresourceFetchCompletion {
                 internal_id,
@@ -2593,11 +2619,16 @@ impl ScriptVm {
             trace_fields,
             trace_started,
         );
-        let Some(pending) = self
-            ._context_host
-            .borrow_mut()
-            .take_pending_subresource_fetch(started.internal_id)
-        else {
+        let pending = {
+            let mut host = self._context_host.borrow_mut();
+            host.take_pending_subresource_fetch(started.internal_id)
+                .or_else(|| {
+                    let running = host.take_running_subresource_fetch(started.internal_id)?;
+                    host.finish_active_subresource_request();
+                    Some(running.pending)
+                })
+        };
+        let Some(pending) = pending else {
             trace_async_subresource_stage(
                 "async_subresource_streaming_start_missing",
                 trace_fields,

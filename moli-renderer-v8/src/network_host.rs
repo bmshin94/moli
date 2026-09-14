@@ -29,11 +29,11 @@ use moli_webapi_declare::WebApiObject;
 use crate::network::ResourceRequestClient;
 
 pub(crate) use self::async_fetch::{
-    CompletedResourceFetch,
+    CompletedResourceFetch, can_stream_subresource_response,
     fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer,
-    fetch_browser_subresource_with_preflight_headers_and_observer, resource_request_started,
-    send_resource_completion, spawn_async_subresource_fetch,
-    spawn_async_subresource_fetch_with_redirect_chain,
+    fetch_browser_subresource_with_preflight_headers_and_observer,
+    receive_async_subresource_response, resource_request_started, send_resource_completion,
+    spawn_async_subresource_fetch, spawn_async_subresource_fetch_with_redirect_chain,
 };
 pub(crate) use self::beacon::{navigator_send_beacon_callback, send_link_audit_ping};
 pub(super) use self::bindings::install_window_network_bindings;

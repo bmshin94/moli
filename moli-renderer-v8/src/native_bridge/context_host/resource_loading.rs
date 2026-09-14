@@ -1308,7 +1308,10 @@ impl JsContextHost {
             AsyncSubresourceFetchEventTarget::StreamingStart {
                 internal_id,
                 body_source_id: _,
-            } => self.pending_subresource_fetches.contains_key(&internal_id),
+            } => {
+                self.pending_subresource_fetches.contains_key(&internal_id)
+                    || self.running_subresource_fetches.contains_key(&internal_id)
+            }
             AsyncSubresourceFetchEventTarget::StreamingChunk { body_source_id } => self
                 .streaming_subresource_fetches
                 .values()
