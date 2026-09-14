@@ -79,6 +79,12 @@ pub(super) fn construct_parser_created_custom_element_direct(
     with_custom_element_reaction_scope(scope, host_ptr, |scope| {
         let invocation: CustomElementConstructorInvocation =
             invoke_custom_element_constructor(scope, host_ptr, constructor);
+        // The parser invokes the constructor from a stack-empty boundary. Run
+        // the microtasks it queued before validating the constructed element,
+        // matching the HTML parser's custom-element construction algorithm.
+        // In particular, a constructor microtask can add an attribute and make
+        // the subsequent construction-result validation fail.
+        perform_microtask_checkpoint_and_report_pending_promise_rejections(scope);
         let constructed_handle = handle_parser_direct_constructor_invocation(
             scope,
             host_ptr,

@@ -4,7 +4,9 @@ use super::construction_invocation::{
     CustomElementConstructorInvocation, invoke_custom_element_constructor,
 };
 use super::construction_result::{
-    set_wrapper_custom_element_constructor_prototype, validate_custom_element_construction_result,
+    finalize_wrapper_custom_element_prototype,
+    synchronize_custom_element_prototype_between_wrappers,
+    validate_custom_element_construction_result,
 };
 use super::element_state::{
     create_element_with_owner_document, set_dom_custom_element_is_name,
@@ -15,7 +17,6 @@ use super::{
     dispatch_form_association_callback_if_needed, dispatch_form_disabled_callback_if_needed,
 };
 use crate::dom::native::CustomElementState;
-use crate::script_vm::perform_microtask_checkpoint_and_report_pending_promise_rejections;
 
 use super::super::{document_runtime::DomHandle, native_bridge::JsContextHost};
 
@@ -79,14 +80,42 @@ pub(super) fn create_custom_element_for_registry_key<'s>(
             if let Some(prefix) = post_construction_prefix {
                 set_dom_element_prefix(host_ptr, handle, Some(prefix.to_owned()));
             }
+            finalize_wrapper_custom_element_prototype(scope, created, constructor);
+            if let Some(canonical) = unsafe { &mut *host_ptr }
+                .native_bridge_mut()
+                .wrap_handle(scope, host_ptr, handle)
+            {
+                if canonical.strict_equals(created.into()) {
+                    synchronize_custom_element_prototype_between_wrappers(
+                        scope, created, canonical,
+                    );
+                } else {
+                    super::construction_result::set_wrapper_custom_element_constructor_prototype(
+                        scope,
+                        canonical,
+                        constructor,
+                    );
+                }
+            }
             unsafe { &mut *host_ptr }
                 .custom_elements_mut_for_registry_key(registry_key)
                 .mark_upgraded_handle(handle, definition_name);
-            set_wrapper_custom_element_constructor_prototype(scope, created, constructor);
             set_dom_custom_element_state(host_ptr, handle, CustomElementState::Custom);
             unsafe { &mut *host_ptr }
                 .custom_elements_mut_for_registry_key(registry_key)
                 .finish_construction(handle);
+            finalize_wrapper_custom_element_prototype(scope, created, constructor);
+            if let Some(canonical) = unsafe { &mut *host_ptr }
+                .native_bridge_mut()
+                .wrap_handle(scope, host_ptr, handle)
+                && !canonical.strict_equals(created.into())
+            {
+                super::construction_result::set_wrapper_custom_element_constructor_prototype(
+                    scope,
+                    canonical,
+                    constructor,
+                );
+            }
             dispatch_form_association_callback_if_needed(scope, host_ptr, handle);
             dispatch_form_disabled_callback_if_needed(scope, host_ptr, handle);
             Some(created)
@@ -125,10 +154,6 @@ pub(super) fn construct_custom_element_directly<'s>(
 ) -> std::result::Result<DomHandle, ConstructionFailure<'s>> {
     match invoke_custom_element_constructor(scope, host_ptr, constructor) {
         CustomElementConstructorInvocation::Created(created) => {
-            // Parser-created construction runs a checkpoint before validation so
-            // constructor-scheduled microtasks can still invalidate the result
-            // before parser attributes or children are transferred.
-            perform_microtask_checkpoint_and_report_pending_promise_rejections(scope);
             let created = v8::Local::new(scope, &created);
             validate_custom_element_construction_result(
                 scope,

@@ -1314,6 +1314,89 @@ fn child_custom_elements_upgrade_accepts_child_document_node_root() {
 }
 
 #[test]
+fn existing_upgrade_preserves_prototype_selected_by_wrapping_constructor() {
+    let mut vm = new_storage_test_vm("https://example.com/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const html = document.documentElement || document.appendChild(document.createElement("html"));
+              const body = document.body || html.appendChild(document.createElement("body"));
+              const element = document.createElement("wrapped-upgrade-element");
+              body.appendChild(element);
+              const log = [];
+
+              class RealElement extends HTMLElement {
+                polymerMethod() { return "available"; }
+              }
+              class WrappingElement extends HTMLElement {
+                constructor() {
+                  super();
+                  Object.setPrototypeOf(this, RealElement.prototype);
+                }
+                connectedCallback() {
+                  log.push(this.polymerMethod());
+                }
+              }
+
+              customElements.define("wrapped-upgrade-element", WrappingElement);
+              return JSON.stringify({
+                realPrototype: Object.getPrototypeOf(element) === RealElement.prototype,
+                wrapperPrototype: Object.getPrototypeOf(element) === WrappingElement.prototype,
+                realInstance: element instanceof RealElement,
+                method: element.polymerMethod(),
+                log
+              });
+            })()
+            "#,
+        )
+        .expect("wrapping constructor prototype probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"realPrototype":true,"wrapperPrototype":false,"realInstance":true,"method":"available","log":["available"]}"#
+    );
+}
+
+#[test]
+fn synchronous_creation_preserves_prototype_selected_by_constructor() {
+    let mut vm = new_storage_test_vm("https://example.com/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              class RealElement extends HTMLElement {
+                polymerMethod() { return "available"; }
+              }
+              class WrappingElement extends HTMLElement {
+                constructor() {
+                  super();
+                  Object.setPrototypeOf(this, RealElement.prototype);
+                }
+              }
+
+              customElements.define("wrapped-created-element", WrappingElement);
+              const element = document.createElement("wrapped-created-element");
+              return JSON.stringify({
+                realPrototype: Object.getPrototypeOf(element) === RealElement.prototype,
+                wrapperPrototype: Object.getPrototypeOf(element) === WrappingElement.prototype,
+                realInstance: element instanceof RealElement,
+                method: element.polymerMethod()
+              });
+            })()
+            "#,
+        )
+        .expect("synchronous wrapping constructor prototype probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"realPrototype":true,"wrapperPrototype":false,"realInstance":true,"method":"available"}"#
+    );
+}
+
+#[test]
 fn detached_custom_elements_upgrade_uses_owner_document_registry() {
     let mut vm = new_storage_test_vm("https://example.com/");
 

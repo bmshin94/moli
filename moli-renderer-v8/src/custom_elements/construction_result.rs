@@ -113,6 +113,64 @@ pub(crate) fn set_wrapper_custom_element_constructor_prototype<'s>(
     }
 }
 
+pub(super) fn synchronize_wrapper_custom_element_prototype<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    wrapper: v8::Local<'s, v8::Object>,
+) {
+    synchronize_custom_element_prototype_between_wrappers(scope, wrapper, wrapper);
+}
+
+pub(super) fn synchronize_custom_element_prototype_between_wrappers<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: v8::Local<'s, v8::Object>,
+    target: v8::Local<'s, v8::Object>,
+) {
+    let Some(prototype) = source
+        .get_prototype(scope)
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    else {
+        return;
+    };
+    set_wrapper_custom_element_prototype(scope, target, prototype);
+    if let Some(foreign) = get_private_object(scope, target, DOM_PARSER_FOREIGN_NODE_SLOT) {
+        set_wrapper_custom_element_prototype(scope, foreign, prototype);
+    }
+}
+
+pub(super) fn finalize_wrapper_custom_element_prototype<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    wrapper: v8::Local<'s, v8::Object>,
+    constructor: v8::Local<'s, v8::Function>,
+) {
+    let current = wrapper.get_prototype(scope);
+    let definition_prototype = custom_element_constructor_prototype(scope, constructor).ok();
+    let definition_parent =
+        definition_prototype.and_then(|prototype| prototype.get_prototype(scope));
+    let uses_definition_chain = current.is_some_and(|current| {
+        definition_prototype.is_some_and(|prototype| current.strict_equals(prototype.into()))
+            || definition_parent.is_some_and(|parent| current.strict_equals(parent))
+    });
+    let prototype_constructor_name = current
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+        .and_then(|prototype| prototype.get(scope, crate::util::v8str(scope, "constructor").into()))
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        .map(|function| function.get_name(scope).to_rust_string_lossy(scope));
+    let constructor_name = constructor.get_name(scope).to_rust_string_lossy(scope);
+    let uses_native_fallback = prototype_constructor_name.as_deref().is_none_or(|name| {
+        name.is_empty()
+            || name == "undefined"
+            || name == "Object"
+            || (name.starts_with("HTML") && name.ends_with("Element"))
+    });
+    let uses_definition_prototype =
+        prototype_constructor_name.as_deref() == Some(constructor_name.as_str());
+    if uses_definition_chain || uses_definition_prototype || uses_native_fallback {
+        set_wrapper_custom_element_constructor_prototype(scope, wrapper, constructor);
+    } else {
+        synchronize_wrapper_custom_element_prototype(scope, wrapper);
+    }
+}
+
 fn set_wrapper_custom_element_prototype<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     wrapper: v8::Local<'s, v8::Object>,
