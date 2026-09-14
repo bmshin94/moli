@@ -1,8 +1,8 @@
 use super::*;
 use crate::service_worker_runtime::{
     ServiceWorkerClientId, ServiceWorkerDirectFetchResult, ServiceWorkerFetchDispatch,
-    ServiceWorkerFetchRequest, ServiceWorkerFetchRequestMetadata, ServiceWorkerRequestDestination,
-    ServiceWorkerRuntimeService,
+    ServiceWorkerFetchRequest, ServiceWorkerFetchRequestMetadata, ServiceWorkerFetchResultSender,
+    ServiceWorkerRequestDestination, ServiceWorkerRuntimeService,
 };
 use crate::types::{AsyncSubresourceNetworkContext, SubresourcePolicyContext};
 use moli_page_types::{
@@ -555,12 +555,10 @@ fn spawn_worker_fetch_service_worker(
             resource_type: SubresourceResourceType::Fetch,
             policy_context,
         },
-        completion_tx:
-            crate::page_task_queue::RendererResourceCompletionSender::direct_completion_only(),
+        result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
         request_client: load.request_client(),
         resource_task_runner: load.task_runner(),
         cancel_handle: cancel_handle.clone(),
-        direct_completion_tx: Some(direct_completion_tx),
     };
 
     if !runtime.dispatch_controlled_fetch(dispatch) {

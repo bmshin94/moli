@@ -1,7 +1,7 @@
 use super::*;
 use crate::service_worker_runtime::{
-    ServiceWorkerDirectFetchResponse, ServiceWorkerFetchRequest, ServiceWorkerRequestDestination,
-    service_worker_fetch_request_metadata,
+    ServiceWorkerDirectFetchResponse, ServiceWorkerFetchRequest, ServiceWorkerFetchResultSender,
+    ServiceWorkerRequestDestination, service_worker_fetch_request_metadata,
 };
 use crate::types::{
     AsyncSubresourceFetchEvent, AsyncSubresourceFetchResponseFilter,
@@ -145,7 +145,7 @@ fn service_worker_fetch_can_forward_stream(
         final_url,
         &response_head.headers,
     )?;
-    Ok(job.direct_completion_tx.is_none()
+    Ok(job.result_tx.page().is_some()
         && !matches!(
             job.network_context.resource_type,
             crate::types::SubresourceResourceType::Audio
@@ -224,8 +224,6 @@ impl ServiceWorkerRuntimeService {
             return Ok(None);
         }
 
-        let completion_tx =
-            crate::page_task_queue::RendererResourceCompletionSender::direct_completion_only();
         let (direct_completion_tx, direct_completion_rx) = tokio::sync::oneshot::channel();
         let request_body_text = request
             .body
@@ -257,11 +255,10 @@ impl ServiceWorkerRuntimeService {
                 resource_type: crate::types::SubresourceResourceType::Script,
                 policy_context: Default::default(),
             },
-            completion_tx,
+            result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
             request_client: request_client.clone(),
             resource_task_runner,
             cancel_handle,
-            direct_completion_tx: Some(direct_completion_tx),
         };
 
         if !self.dispatch_controlled_fetch(dispatch) {
@@ -280,92 +277,78 @@ impl ServiceWorkerRuntimeService {
 
     pub(super) fn dispatch_fetch_fallback(&self, mut job: ServiceWorkerFetchJob) {
         job.cancel_pending_navigation_preload();
-        if let Some(completion_tx) = job.direct_completion_tx.take() {
-            if job.redirect_count != 0 {
-                self.dispatch_direct_fetch_network_fallback(job, completion_tx);
-                return;
-            }
+        if job.redirect_count == 0
+            && let ServiceWorkerFetchResultSender::Direct(completion_tx) = job.result_tx
+        {
             let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Fallback);
             return;
         }
-        let request_client = job.request_client.clone();
-        let request = match moli_fetch::Request::new_bytes(
-            &job.request_method,
-            job.request_url.as_str(),
-            job.request_body_bytes.clone(),
-            job.request_headers.clone(),
-        ) {
-            Ok(request) => configure_service_worker_network_fallback_request(&job, request),
-            Err(error) => {
-                self.complete_fetch_with_failure(job, error.to_string());
-                return;
-            }
-        };
-        crate::network_host::spawn_async_subresource_fetch_with_redirect_chain(
-            job.resource_task_runner.clone(),
-            job.completion_tx,
-            request_client,
-            request,
-            Some(job.cancel_handle),
-            job.cors_preflight_request_headers,
-            job.redirect_chain,
-            job.internal_id,
-            job.network_context,
-            job.request_url,
-            job.request_method,
-            job.request_headers,
-            job.request_body,
-        );
-    }
-
-    fn dispatch_direct_fetch_network_fallback(
-        &self,
-        job: ServiceWorkerFetchJob,
-        completion_tx: tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>,
-    ) {
-        let request_client = job.request_client.clone();
         let request = match service_worker_network_fallback_request_for_job(&job) {
             Ok(request) => request,
             Err(message) => {
-                let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Failure(message));
+                self.complete_fetch_with_failure(job, message);
                 return;
             }
         };
-        let cancel_handle = job.cancel_handle.clone();
-        let redirect_chain = job.redirect_chain.clone();
-        job.resource_task_runner.spawn(async move {
-            let result = match request_client
-                .fetch_raw_stream_with_cancel(request, cancel_handle)
-                .await
-            {
-                Ok(response) => response.into_materialized_raw_response().await,
-                Err(error) => Err(error),
-            };
-            let result = match result {
-                Ok(response) => {
-                    let mut head = response.head();
-                    if !redirect_chain.is_empty() {
-                        let mut combined_redirect_chain = redirect_chain;
-                        combined_redirect_chain.extend(head.redirect_chain);
-                        head.redirect_chain = combined_redirect_chain;
-                        head.redirected = true;
-                    }
-                    let body = response.clone_body_bytes();
-                    let navigation_response =
-                        crate::protocol_types::NavigationResponse::from_head_and_body(
-                            head,
-                            String::from_utf8_lossy(&body).into_owned(),
-                            body,
-                        );
-                    ServiceWorkerDirectFetchResult::Response(ServiceWorkerDirectFetchResponse {
-                        response: Box::new(navigation_response),
-                        response_filter: None,
-                    })
-                }
-                Err(error) => ServiceWorkerDirectFetchResult::Failure(error.to_string()),
-            };
-            let _ = completion_tx.send(result);
-        });
+        match job.result_tx {
+            ServiceWorkerFetchResultSender::Page(completion_tx) => {
+                crate::network_host::spawn_async_subresource_fetch_with_redirect_chain(
+                    job.resource_task_runner,
+                    completion_tx,
+                    job.request_client,
+                    request,
+                    Some(job.cancel_handle),
+                    job.cors_preflight_request_headers,
+                    job.redirect_chain,
+                    job.internal_id,
+                    job.network_context,
+                    job.request_url,
+                    job.request_method,
+                    job.request_headers,
+                    job.request_body,
+                );
+            }
+            ServiceWorkerFetchResultSender::Direct(completion_tx) => {
+                let request_client = job.request_client;
+                let cancel_handle = job.cancel_handle;
+                let redirect_chain = job.redirect_chain;
+                job.resource_task_runner.spawn(async move {
+                    let result = match request_client
+                        .fetch_raw_stream_with_cancel(request, cancel_handle)
+                        .await
+                    {
+                        Ok(response) => response.into_materialized_raw_response().await,
+                        Err(error) => Err(error),
+                    };
+                    let result = match result {
+                        Ok(response) => {
+                            let mut head = response.head();
+                            if !redirect_chain.is_empty() {
+                                let mut combined_redirect_chain = redirect_chain;
+                                combined_redirect_chain.extend(head.redirect_chain);
+                                head.redirect_chain = combined_redirect_chain;
+                                head.redirected = true;
+                            }
+                            let body = response.clone_body_bytes();
+                            let navigation_response =
+                                crate::protocol_types::NavigationResponse::from_head_and_body(
+                                    head,
+                                    String::from_utf8_lossy(&body).into_owned(),
+                                    body,
+                                );
+                            ServiceWorkerDirectFetchResult::Response(
+                                ServiceWorkerDirectFetchResponse {
+                                    response: Box::new(navigation_response),
+                                    response_filter: None,
+                                },
+                            )
+                        }
+                        Err(error) => ServiceWorkerDirectFetchResult::Failure(error.to_string()),
+                    };
+                    let _ = completion_tx.send(result);
+                });
+            }
+        }
     }
 
     pub(super) fn finish_fetch_stream_started(&self, started: ServiceWorkerFetchStreamStarted) {
@@ -403,9 +386,12 @@ impl ServiceWorkerRuntimeService {
                     return;
                 }
             }
+            let Some(completion_tx) = job.result_tx.page().cloned() else {
+                return;
+            };
             job.streaming_body_source_id = Some(started.body_source_id);
             Some((
-                job.completion_tx.clone(),
+                completion_tx,
                 AsyncSubresourceFetchEvent::StreamingStarted(Box::new(
                     AsyncSubresourceStreamingStarted {
                         internal_id: job.internal_id,
@@ -516,7 +502,8 @@ impl ServiceWorkerRuntimeService {
                 .get(&chunk.event_id)
                 .and_then(|job| {
                     (job.streaming_body_source_id == Some(chunk.body_source_id))
-                        .then(|| job.completion_tx.clone())
+                        .then(|| job.result_tx.page().cloned())
+                        .flatten()
                 })
         }) else {
             return;
@@ -639,17 +626,20 @@ impl ServiceWorkerRuntimeService {
             String::from_utf8_lossy(&response.body).into_owned(),
             response.body,
         );
-        if let Some(completion_tx) = job.direct_completion_tx.take() {
-            let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Response(
-                ServiceWorkerDirectFetchResponse {
-                    response: Box::new(navigation_response),
-                    response_filter,
-                },
-            ));
-            return;
-        }
+        let completion_tx = match job.result_tx {
+            ServiceWorkerFetchResultSender::Direct(completion_tx) => {
+                let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Response(
+                    ServiceWorkerDirectFetchResponse {
+                        response: Box::new(navigation_response),
+                        response_filter,
+                    },
+                ));
+                return;
+            }
+            ServiceWorkerFetchResultSender::Page(completion_tx) => completion_tx,
+        };
         if let Some(body_source_id) = job.streaming_body_source_id.take() {
-            let _ = job.completion_tx.send_async_subresource_event(
+            let _ = completion_tx.send_async_subresource_event(
                 AsyncSubresourceFetchEvent::StreamingFinished(AsyncSubresourceStreamingFinished {
                     internal_id: job.internal_id,
                     body_source_id,
@@ -658,20 +648,18 @@ impl ServiceWorkerRuntimeService {
             );
             return;
         }
-        let _ = job
-            .completion_tx
-            .send_async_subresource(AsyncSubresourceFetchCompletion {
-                internal_id: job.internal_id,
-                request_url: job.request_url,
-                request_method: job.request_method,
-                request_headers: job.request_headers,
-                request_body: job.request_body,
-                response_status_text: Some(response.status_text),
-                skip_fetch_security_validation: true,
-                response_filter,
-                network_error_text: None,
-                result: Ok(navigation_response),
-            });
+        let _ = completion_tx.send_async_subresource(AsyncSubresourceFetchCompletion {
+            internal_id: job.internal_id,
+            request_url: job.request_url,
+            request_method: job.request_method,
+            request_headers: job.request_headers,
+            request_body: job.request_body,
+            response_status_text: Some(response.status_text),
+            skip_fetch_security_validation: true,
+            response_filter,
+            network_error_text: None,
+            result: Ok(navigation_response),
+        });
     }
 
     pub(super) fn complete_fetch_with_failure(&self, job: ServiceWorkerFetchJob, message: String) {
@@ -697,12 +685,15 @@ impl ServiceWorkerRuntimeService {
         if network_error_text.is_none() {
             network_error_text = service_worker_fetch_failure_network_error_text(&message);
         }
-        if let Some(completion_tx) = job.direct_completion_tx.take() {
-            let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Failure(message));
-            return;
-        }
+        let completion_tx = match job.result_tx {
+            ServiceWorkerFetchResultSender::Direct(completion_tx) => {
+                let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Failure(message));
+                return;
+            }
+            ServiceWorkerFetchResultSender::Page(completion_tx) => completion_tx,
+        };
         if let Some(body_source_id) = job.streaming_body_source_id.take() {
-            let _ = job.completion_tx.send_async_subresource_event(
+            let _ = completion_tx.send_async_subresource_event(
                 AsyncSubresourceFetchEvent::StreamingFinished(AsyncSubresourceStreamingFinished {
                     internal_id: job.internal_id,
                     body_source_id,
@@ -711,20 +702,18 @@ impl ServiceWorkerRuntimeService {
             );
             return;
         }
-        let _ = job
-            .completion_tx
-            .send_async_subresource(AsyncSubresourceFetchCompletion {
-                internal_id: job.internal_id,
-                request_url: job.request_url,
-                request_method: job.request_method,
-                request_headers: job.request_headers,
-                request_body: job.request_body,
-                response_status_text: None,
-                skip_fetch_security_validation: false,
-                response_filter: None,
-                network_error_text,
-                result: Err(message),
-            });
+        let _ = completion_tx.send_async_subresource(AsyncSubresourceFetchCompletion {
+            internal_id: job.internal_id,
+            request_url: job.request_url,
+            request_method: job.request_method,
+            request_headers: job.request_headers,
+            request_body: job.request_body,
+            response_status_text: None,
+            skip_fetch_security_validation: false,
+            response_filter: None,
+            network_error_text,
+            result: Err(message),
+        });
     }
 }
 
@@ -1177,13 +1166,12 @@ mod tests {
                     resource_type,
                     policy_context: Default::default(),
                 },
-                completion_tx,
+                result_tx: ServiceWorkerFetchResultSender::Page(completion_tx),
                 request_client: test_request_client(service),
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
                 navigation_preload_cancel_handle: None,
                 streaming_body_source_id: None,
-                direct_completion_tx: None,
             },
         );
         request_url
@@ -1919,13 +1907,12 @@ mod tests {
                 resource_type: crate::types::SubresourceResourceType::Fetch,
                 policy_context: Default::default(),
             },
-            completion_tx: completion_queue.sender(),
+            result_tx: ServiceWorkerFetchResultSender::Page(completion_queue.sender()),
             request_client: test_request_client(&service),
             resource_task_runner: test_resource_task_runner(),
             cancel_handle: moli_fetch::FetchCancelHandle::new(),
             navigation_preload_cancel_handle: None,
             streaming_body_source_id: None,
-            direct_completion_tx: None,
         };
         let response = ServiceWorkerFetchResponse {
             final_url: Some(request_url.clone()),
@@ -3242,7 +3229,7 @@ mod tests {
             .pending_fetch_jobs
             .get_mut(&event_id)
             .expect("active fetch job")
-            .direct_completion_tx = Some(direct_completion_tx);
+            .result_tx = ServiceWorkerFetchResultSender::Direct(direct_completion_tx);
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
@@ -3297,7 +3284,7 @@ mod tests {
         job.network_context.document_url =
             Url::parse(&format!("http://{address}/page")).expect("fallback document URL");
         job.redirect_count = 1;
-        job.direct_completion_tx = Some(direct_completion_tx);
+        job.result_tx = ServiceWorkerFetchResultSender::Direct(direct_completion_tx);
 
         // This test intentionally calls from a plain test thread. The
         // fallback must use the runner captured by the original resource

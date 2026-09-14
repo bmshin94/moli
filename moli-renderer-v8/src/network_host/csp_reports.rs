@@ -5,7 +5,7 @@ use crate::content_security_policy::{
 use crate::document_runtime::DomHandle;
 use crate::native_bridge::WorkerOwnerScope;
 use crate::service_worker_runtime::{
-    ServiceWorkerFetchDispatch, ServiceWorkerRequestDestination,
+    ServiceWorkerFetchDispatch, ServiceWorkerFetchResultSender, ServiceWorkerRequestDestination,
     service_worker_fetch_request_metadata,
 };
 use moli_fetch::{
@@ -320,11 +320,10 @@ fn dispatch_service_worker_content_security_policy_report(
             resource_type: SubresourceResourceType::CspReport,
             policy_context: request_context.policy_context,
         },
-        completion_tx: host.resource_completion_sender(),
+        result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
         request_client: request_context.request_client.clone(),
         resource_task_runner: request_context.resource_loader.task_runner(),
         cancel_handle,
-        direct_completion_tx: None,
     };
     if host.dispatch_service_worker_fetch(dispatch) {
         return true;

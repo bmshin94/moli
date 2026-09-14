@@ -2,7 +2,7 @@ use super::*;
 use crate::document_runtime::DocumentSubresourceCspKind;
 use crate::native_bridge::{JsContextHost, OwnerDispatchScope, TextTrackLoadSequenceId};
 use crate::service_worker_runtime::{
-    ServiceWorkerFetchDispatch, ServiceWorkerRequestDestination,
+    ServiceWorkerFetchDispatch, ServiceWorkerFetchResultSender, ServiceWorkerRequestDestination,
     service_worker_fetch_request_metadata,
 };
 use crate::types::{
@@ -189,11 +189,10 @@ pub(crate) fn start_text_track_resource_fetch(
                 resource_type: SubresourceResourceType::TextTrack,
                 policy_context,
             },
-            completion_tx: host.resource_completion_sender(),
+            result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
             request_client: loader,
             resource_task_runner: resource_loader.task_runner(),
             cancel_handle,
-            direct_completion_tx: None,
         };
         if !host.dispatch_service_worker_fetch(dispatch) {
             let _ = host.resource_completion_sender().send_async_subresource(

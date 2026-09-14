@@ -7,7 +7,8 @@ use crate::network_host::{
     subresource_request_scope_for_owner,
 };
 use crate::service_worker_runtime::{
-    ServiceWorkerFetchDispatch, ServiceWorkerFetchRequestMetadata, ServiceWorkerRequestDestination,
+    ServiceWorkerFetchDispatch, ServiceWorkerFetchRequestMetadata, ServiceWorkerFetchResultSender,
+    ServiceWorkerRequestDestination,
 };
 use crate::types::{
     PendingSubresourceFetchInfo, SubresourceNetworkRecord, SubresourceResourceType,
@@ -414,11 +415,10 @@ fn dispatch_service_worker_event_source<'s>(
             resource_type: SubresourceResourceType::EventSource,
             policy_context: prepared.policy_context,
         },
-        completion_tx: host.resource_completion_sender(),
+        result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
         request_client: registered.load.request_client(),
         resource_task_runner: registered.load.task_runner(),
         cancel_handle,
-        direct_completion_tx: None,
     };
     if !host.dispatch_service_worker_fetch(dispatch) {
         let _ = host.resource_completion_sender().send_async_subresource(

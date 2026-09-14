@@ -724,10 +724,22 @@ pub(crate) struct ServiceWorkerFetchDispatch {
     pub(crate) cors_preflight_request_headers: Vec<(String, String)>,
     pub(crate) request_cookie_report: Option<moli_cookie_jar::StoredCookieQueryReport>,
     pub(crate) network_context: AsyncSubresourceNetworkContext,
-    pub(crate) completion_tx: RendererResourceCompletionSender,
+    pub(crate) result_tx: ServiceWorkerFetchResultSender,
     pub(crate) request_client: ResourceRequestClient,
     pub(crate) resource_task_runner: crate::network::RendererResourceTaskRunner,
     pub(crate) cancel_handle: moli_fetch::FetchCancelHandle,
-    pub(crate) direct_completion_tx:
-        Option<tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>>,
+}
+
+pub(crate) enum ServiceWorkerFetchResultSender {
+    Page(RendererResourceCompletionSender),
+    Direct(tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>),
+}
+
+impl ServiceWorkerFetchResultSender {
+    pub(super) fn page(&self) -> Option<&RendererResourceCompletionSender> {
+        match self {
+            Self::Page(sender) => Some(sender),
+            Self::Direct(_) => None,
+        }
+    }
 }

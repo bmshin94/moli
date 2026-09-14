@@ -1,4 +1,5 @@
 use super::*;
+use crate::service_worker_runtime::ServiceWorkerFetchResultSender;
 use crate::{
     css_resource_urls::{
         CompletedStylesheetWebFont, StylesheetLoadBlockingResource,
@@ -232,11 +233,10 @@ pub(crate) fn start_stylesheet_subresource_fetch(
                 resource_type,
                 policy_context,
             },
-            completion_tx: host.resource_completion_sender(),
+            result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
             request_client: loader,
             resource_task_runner: resource_loader.task_runner(),
             cancel_handle,
-            direct_completion_tx: None,
         };
         if !host.dispatch_service_worker_fetch(dispatch) {
             let _ = host.resource_completion_sender().send_async_subresource(

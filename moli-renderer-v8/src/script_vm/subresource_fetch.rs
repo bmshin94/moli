@@ -1,3 +1,4 @@
+use crate::service_worker_runtime::ServiceWorkerFetchResultSender;
 use anyhow::{Result, anyhow, bail};
 use std::cell::RefCell;
 use std::pin::pin;
@@ -801,11 +802,10 @@ impl ScriptVm {
                 resource_type: SubresourceResourceType::CspReport,
                 policy_context,
             },
-            completion_tx,
+            result_tx: ServiceWorkerFetchResultSender::Page(completion_tx),
             request_client,
             resource_task_runner,
             cancel_handle,
-            direct_completion_tx: None,
         };
 
         self._context_host

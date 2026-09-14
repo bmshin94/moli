@@ -19,7 +19,8 @@ use crate::network::loads::{ResourceLoadDisposition, ResourceLoadKind};
 use crate::protocol_types::{PendingSubresourceFetchInfo, SubresourceRequestStarted};
 use crate::service_worker_runtime::{
     ServiceWorkerDirectFetchResult, ServiceWorkerFetchDispatch, ServiceWorkerFetchRequest,
-    ServiceWorkerRequestDestination, service_worker_fetch_request_metadata,
+    ServiceWorkerFetchResultSender, ServiceWorkerRequestDestination,
+    service_worker_fetch_request_metadata,
 };
 use crate::types::{AsyncSubresourceNetworkContext, SubresourceResourceType};
 use crate::worker::WorkerPendingFetchContinue;
@@ -285,12 +286,10 @@ impl WorkerCspReport {
                 resource_type: SubresourceResourceType::CspReport,
                 policy_context: self.policy_context,
             },
-            completion_tx:
-                crate::page_task_queue::RendererResourceCompletionSender::direct_completion_only(),
+            result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
             request_client: self.load.request_client(),
             resource_task_runner: self.load.task_runner(),
             cancel_handle,
-            direct_completion_tx: Some(direct_completion_tx),
         };
         if !runtime.dispatch_controlled_fetch(dispatch) {
             self.fail("service worker csp report fetch dispatch failed".into());

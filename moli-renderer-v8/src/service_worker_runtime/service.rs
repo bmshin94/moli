@@ -611,7 +611,7 @@ mod tests {
         ServiceWorkerRegistrationKey, ServiceWorkerUnregisterJobPhase,
     };
     use crate::service_worker_runtime::{
-        ServiceWorkerFetchRequest, ServiceWorkerRequestDestination,
+        ServiceWorkerFetchRequest, ServiceWorkerFetchResultSender, ServiceWorkerRequestDestination,
     };
 
     fn url(value: &str) -> Url {
@@ -945,13 +945,12 @@ mod tests {
                 resource_type: crate::types::SubresourceResourceType::Fetch,
                 policy_context: Default::default(),
             },
-            completion_tx,
+            result_tx: ServiceWorkerFetchResultSender::Page(completion_tx),
             request_client: test_request_client(service),
             resource_task_runner: test_resource_task_runner(),
             cancel_handle,
             navigation_preload_cancel_handle: None,
             streaming_body_source_id: None,
-            direct_completion_tx: None,
         }
     }
 
@@ -1750,7 +1749,7 @@ mod tests {
             queue.sender(),
             cancel.clone(),
         );
-        job.direct_completion_tx = Some(completion_tx);
+        job.result_tx = ServiceWorkerFetchResultSender::Direct(completion_tx);
         job.navigation_preload_cancel_handle = Some(preload_cancel.clone());
         service
             .inner
@@ -4342,13 +4341,12 @@ mod tests {
                             resource_type: crate::types::SubresourceResourceType::Fetch,
                             policy_context: Default::default(),
                         },
-                        completion_tx,
+                        result_tx: ServiceWorkerFetchResultSender::Page(completion_tx),
                         request_client: test_request_client(&service),
                         resource_task_runner: test_resource_task_runner(),
                         cancel_handle: moli_fetch::FetchCancelHandle::new(),
                         navigation_preload_cancel_handle: None,
                         streaming_body_source_id: None,
-                        direct_completion_tx: None,
                     },
                 );
             }
@@ -4809,13 +4807,12 @@ self.addEventListener("message", event => {
                         resource_type: crate::types::SubresourceResourceType::Fetch,
                         policy_context: Default::default(),
                     },
-                    completion_tx: completion_queue.sender(),
+                    result_tx: ServiceWorkerFetchResultSender::Page(completion_queue.sender()),
                     request_client: test_request_client(&service),
                     resource_task_runner: test_resource_task_runner(),
                     cancel_handle: moli_fetch::FetchCancelHandle::new(),
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
-                    direct_completion_tx: None,
                 },
             );
             state.versions.insert(
@@ -7496,11 +7493,10 @@ self.addEventListener("message", event => {
                     resource_type: crate::types::SubresourceResourceType::Fetch,
                     policy_context: Default::default(),
                 },
-                completion_tx: completion_queue.sender(),
+                result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
                 request_client: test_request_client(&second_service),
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
-                direct_completion_tx: Some(direct_completion_tx),
             })
         );
 
@@ -8748,13 +8744,12 @@ self.addEventListener("message", event => {
                         resource_type: crate::types::SubresourceResourceType::Fetch,
                         policy_context: Default::default(),
                     },
-                    completion_tx: completion_queue.sender(),
+                    result_tx: ServiceWorkerFetchResultSender::Page(completion_queue.sender()),
                     request_client: test_request_client(&service),
                     resource_task_runner: test_resource_task_runner(),
                     cancel_handle: moli_fetch::FetchCancelHandle::new(),
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
-                    direct_completion_tx: None,
                 },
             );
             state.versions.insert(
@@ -8957,7 +8952,7 @@ self.addEventListener("message", event => {
             .pending_fetch_jobs
             .get_mut(&event_id)
             .expect("pending navigation preload fetch job")
-            .direct_completion_tx = Some(direct_completion_tx);
+            .result_tx = ServiceWorkerFetchResultSender::Direct(direct_completion_tx);
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
@@ -9322,7 +9317,7 @@ self.addEventListener("message", event => {
                 completion_queue.sender(),
                 cancel_handle.clone(),
             );
-            job.direct_completion_tx = Some(direct_completion_tx);
+            job.result_tx = ServiceWorkerFetchResultSender::Direct(direct_completion_tx);
             state.pending_fetch_jobs.insert(event_id, job);
         }
 
@@ -9538,11 +9533,10 @@ self.addEventListener("message", event => {
                     resource_type: crate::types::SubresourceResourceType::Fetch,
                     policy_context: Default::default(),
                 },
-                completion_tx: completion_queue.sender(),
+                result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
                 request_client: test_request_client(&service),
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
-                direct_completion_tx: Some(direct_completion_tx),
             })
         );
 
@@ -9631,11 +9625,10 @@ self.addEventListener("message", event => {
                     resource_type: crate::types::SubresourceResourceType::Fetch,
                     policy_context: Default::default(),
                 },
-                completion_tx: completion_queue.sender(),
+                result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
                 request_client: test_request_client(&service),
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
-                direct_completion_tx: Some(direct_completion_tx),
             })
         );
 
@@ -9803,11 +9796,10 @@ self.addEventListener("message", event => {
                     resource_type: crate::types::SubresourceResourceType::Fetch,
                     policy_context: Default::default(),
                 },
-                completion_tx: completion_queue.sender(),
+                result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
                 request_client: test_request_client(&service),
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
-                direct_completion_tx: Some(direct_completion_tx),
             }),
             "controlled worker client fetch should dispatch to the active worker"
         );
@@ -9912,11 +9904,10 @@ self.addEventListener("message", event => {
                     resource_type: crate::types::SubresourceResourceType::Fetch,
                     policy_context: Default::default(),
                 },
-                completion_tx: completion_queue.sender(),
+                result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
                 request_client: test_request_client(&service),
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
-                direct_completion_tx: Some(direct_completion_tx),
             })
         );
 
@@ -10013,13 +10004,12 @@ self.addEventListener("message", event => {
                         resource_type: crate::types::SubresourceResourceType::Fetch,
                         policy_context: Default::default(),
                     },
-                    completion_tx: completion_queue.sender(),
+                    result_tx: ServiceWorkerFetchResultSender::Direct(direct_completion_tx),
                     request_client: test_request_client(&service),
                     resource_task_runner: test_resource_task_runner(),
                     cancel_handle: moli_fetch::FetchCancelHandle::new(),
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
-                    direct_completion_tx: Some(direct_completion_tx),
                 },
             );
             let version = state.versions.get_mut(&version_id).unwrap();
@@ -10144,13 +10134,12 @@ self.addEventListener("message", event => {
                         resource_type: crate::types::SubresourceResourceType::Fetch,
                         policy_context: Default::default(),
                     },
-                    completion_tx: completion_queue.sender(),
+                    result_tx: ServiceWorkerFetchResultSender::Page(completion_queue.sender()),
                     request_client: test_request_client(&service),
                     resource_task_runner: test_resource_task_runner(),
                     cancel_handle: moli_fetch::FetchCancelHandle::new(),
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
-                    direct_completion_tx: None,
                 },
             );
             state.versions.insert(
@@ -10681,13 +10670,12 @@ self.addEventListener("message", event => {
                         resource_type: crate::types::SubresourceResourceType::Fetch,
                         policy_context: Default::default(),
                     },
-                    completion_tx: completion_queue.sender(),
+                    result_tx: ServiceWorkerFetchResultSender::Page(completion_queue.sender()),
                     request_client: test_request_client(&service),
                     resource_task_runner: test_resource_task_runner(),
                     cancel_handle: moli_fetch::FetchCancelHandle::new(),
                     navigation_preload_cancel_handle: None,
                     streaming_body_source_id: None,
-                    direct_completion_tx: None,
                 },
             );
             state.versions.insert(
@@ -12298,13 +12286,12 @@ self.addEventListener("message", event => {
                             resource_type: crate::types::SubresourceResourceType::Fetch,
                             policy_context: Default::default(),
                         },
-                        completion_tx: completion_queue.sender(),
+                        result_tx: ServiceWorkerFetchResultSender::Page(completion_queue.sender()),
                         request_client: test_request_client(&service),
                         resource_task_runner: test_resource_task_runner(),
                         cancel_handle: moli_fetch::FetchCancelHandle::new(),
                         navigation_preload_cancel_handle: None,
                         streaming_body_source_id: None,
-                        direct_completion_tx: None,
                     },
                 );
             }

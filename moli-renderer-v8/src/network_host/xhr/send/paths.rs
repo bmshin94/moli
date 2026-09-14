@@ -2,7 +2,8 @@ use super::super::delivery::{queue_xhr_failure_delivery, queue_xhr_response_deli
 use super::super::*;
 use super::request::PreparedXhrSendRequest;
 use crate::service_worker_runtime::{
-    ServiceWorkerFetchDispatch, ServiceWorkerFetchRequestMetadata, ServiceWorkerRequestDestination,
+    ServiceWorkerFetchDispatch, ServiceWorkerFetchRequestMetadata, ServiceWorkerFetchResultSender,
+    ServiceWorkerRequestDestination,
 };
 use moli_fetch::{
     BrowserRequestMetadata, FetchCancelHandle, RequestRedirectMode,
@@ -118,11 +119,10 @@ pub(super) fn dispatch_service_worker_xhr(
         cors_preflight_request_headers: prepared.cors_preflight_request_headers.clone(),
         request_cookie_report,
         network_context,
-        completion_tx: host.resource_completion_sender(),
+        result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
         request_client: prepared.resource_loader.request_client().clone(),
         resource_task_runner: prepared.resource_loader.task_runner(),
         cancel_handle,
-        direct_completion_tx: None,
     };
     if host.dispatch_service_worker_fetch(dispatch) {
         return Some(internal_id);
