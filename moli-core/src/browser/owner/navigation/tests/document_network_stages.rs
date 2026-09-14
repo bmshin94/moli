@@ -18,7 +18,7 @@ macro_rules! csp_stage_tests {
     ($($name:ident: $child:literal, $finish:ident, $controlled:literal;)*) => {
         $(#[tokio::test]
         async fn $name() {
-            document_csp_stages($child, Finish::$finish, $controlled).await;
+            document_keepalive_stages($child, Finish::$finish, RequestKind::CspReport, $controlled).await;
         })*
     };
 }
@@ -41,7 +41,39 @@ csp_stage_tests! {
     native_document_csp_stages_service_child_page_closed: true, PageClosed, true;
 }
 
-async fn document_csp_stages(child: bool, finish: Finish, controlled: bool) {
+#[derive(Clone, Copy, Debug)]
+enum RequestKind {
+    CspReport,
+    Beacon,
+    Ping,
+}
+
+macro_rules! ping_stage_tests {
+    ($($name:ident: $child:literal, $finish:ident, $kind:ident;)*) => {
+        $(#[tokio::test]
+        async fn $name() {
+            document_keepalive_stages($child, Finish::$finish, RequestKind::$kind, false).await;
+        })*
+    };
+}
+
+ping_stage_tests! {
+    native_document_ping_stages_beacon: false, Complete, Beacon;
+    native_document_ping_stages_beacon_partial: false, PartialFailure, Beacon;
+    native_document_ping_stages_beacon_closed: false, PageClosed, Beacon;
+    native_document_ping_stages_beacon_child_removed: true, ChildRemoved, Beacon;
+    native_document_ping_stages_beacon_child_opened: true, DocumentOpened, Beacon;
+    native_document_ping_stages_link: false, Complete, Ping;
+    native_document_ping_stages_link_partial: false, PartialFailure, Ping;
+    native_document_ping_stages_link_closed: false, PageClosed, Ping;
+}
+
+async fn document_keepalive_stages(
+    child: bool,
+    finish: Finish,
+    kind: RequestKind,
+    controlled: bool,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let report_url = format!("{origin}/report");
@@ -131,8 +163,14 @@ async fn document_csp_stages(child: bool, finish: Finish, controlled: bool) {
                     .expect("CSP report body length");
                 let mut body = vec![0; length];
                 stream.read_exact(&mut body).await.unwrap();
-                let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(report["csp-report"]["effective-directive"], "connect-src");
+                match kind {
+                    RequestKind::CspReport => {
+                        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(report["csp-report"]["effective-directive"], "connect-src");
+                    }
+                    RequestKind::Beacon => assert_eq!(body, [0, 128, 255, 65]),
+                    RequestKind::Ping => assert_eq!(body, b"PING"),
+                }
                 requested.take().unwrap().send(()).unwrap();
                 if release_headers.take().unwrap().await.is_err() {
                     return;
@@ -158,11 +196,21 @@ async fn document_csp_stages(child: bool, finish: Finish, controlled: bool) {
             let html = if report_document && controlled {
                 "<!doctype html><script>(async()=>{await navigator.serviceWorker.register('/sw.js');await navigator.serviceWorker.ready;if(!navigator.serviceWorker.controller)await new Promise(resolve=>navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));fetch('/blocked').catch(()=>{})})()</script>"
             } else if report_document {
-                "<!doctype html><script>fetch('/blocked').catch(()=>{})</script>"
+                match kind {
+                    RequestKind::CspReport => {
+                        "<!doctype html><script>fetch('/blocked').catch(()=>{})</script>"
+                    }
+                    RequestKind::Beacon => {
+                        "<!doctype html><script>navigator.sendBeacon('/report',new Uint8Array([0,128,255,65]))</script>"
+                    }
+                    RequestKind::Ping => {
+                        "<!doctype html><a href='#pinged' ping='/report'>ping</a><script>document.querySelector('a').click()</script>"
+                    }
+                }
             } else {
                 "<!doctype html><iframe src='/child'></iframe>"
             };
-            let csp = if report_document {
+            let csp = if report_document && matches!(kind, RequestKind::CspReport) {
                 "Content-Security-Policy: connect-src 'none'; report-uri /report\r\n"
             } else {
                 ""
@@ -191,7 +239,14 @@ async fn document_csp_stages(child: bool, finish: Finish, controlled: bool) {
                     && request.url().as_str() == report_url
                 {
                     assert_eq!(request.method(), "POST");
-                    assert_eq!(request.resource_type(), SubresourceResourceType::CspReport);
+                    assert_eq!(
+                        request.resource_type(),
+                        match kind {
+                            RequestKind::CspReport => SubresourceResourceType::CspReport,
+                            RequestKind::Beacon | RequestKind::Ping =>
+                                SubresourceResourceType::Ping,
+                        }
+                    );
                     assert!(request.keepalive());
                     break (
                         occurrence.renderer.source.clone(),
@@ -279,7 +334,7 @@ async fn document_csp_stages(child: bool, finish: Finish, controlled: bool) {
                 };
                 if matched { break event; }
             }
-        }).await.unwrap_or_else(|_| panic!("CSP child={child} {finish:?}: native stage {stage} must precede the next transport gate"));
+        }).await.unwrap_or_else(|_| panic!("{kind:?} child={child} {finish:?}: native stage {stage} must precede the next transport gate"));
         assert!(event.sequence > sequence);
         sequence = event.sequence;
         let occurrence = match event.event {

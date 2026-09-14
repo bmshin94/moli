@@ -735,7 +735,7 @@ pub(crate) enum ServiceWorkerFetchResultSender {
         completion_tx: RendererResourceCompletionSender,
         network: crate::runtime::RendererNetworkRequest,
     },
-    CspReport(std::sync::Arc<crate::network_host::CspReportResource>),
+    CspReport(std::sync::Arc<crate::network_host::KeepaliveResource>),
     Direct(tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>),
 }
 
@@ -755,7 +755,7 @@ impl ServiceWorkerFetchResultSender {
 
 pub(super) enum ServiceWorkerFetchStreamSender {
     Page(RendererResourceCompletionSender),
-    CspReport(std::sync::Arc<crate::network_host::CspReportResource>),
+    CspReport(std::sync::Arc<crate::network_host::KeepaliveResource>),
 }
 
 impl ServiceWorkerFetchStreamSender {

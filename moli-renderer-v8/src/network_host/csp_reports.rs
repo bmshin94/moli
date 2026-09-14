@@ -1,9 +1,3 @@
-mod completion;
-pub(crate) use completion::{
-    CompletedCspReport, CspReportResource, fetch_buffered_csp_report, finish_report_result,
-    send_report_completion,
-};
-
 use super::*;
 use crate::content_security_policy::{
     ContentSecurityPolicyViolationEventFields, content_security_policy_report_requests,
@@ -226,7 +220,7 @@ fn send_content_security_policy_report_request(
                 AsyncSubresourceFetchEvent::NativeNetwork(observation),
             );
         },
-        |network| csp_report_request_started(network, &info),
+        |network| keepalive_request_started(network, &info),
     );
     if request_context
         .request_client
@@ -279,7 +273,7 @@ fn send_content_security_policy_report_request(
 
     let cancel_handle = FetchCancelHandle::new();
     let load = request_context.register_report_load(Some(cancel_handle.clone()));
-    let resource = CspReportResource::new(network, load);
+    let resource = KeepaliveResource::new(network, load);
     if host
         .service_worker_controller_for_fetch(
             request_context.client_id,
@@ -416,24 +410,4 @@ fn report_request_body_text(request: &Request) -> Option<String> {
         .body
         .as_ref()
         .map(|body| String::from_utf8_lossy(body).into_owned())
-}
-
-pub(crate) fn csp_report_request_started(
-    network: &crate::runtime::RendererNetworkRequest,
-    info: &PendingSubresourceFetchInfo,
-) -> moli_page_types::SubresourceRequestStarted {
-    moli_page_types::SubresourceRequestStarted::new(
-        network.handle(),
-        info.frame_id.clone(),
-        info.document_url.clone(),
-        info.url.clone(),
-        info.method.clone(),
-        info.request_headers.clone(),
-        info.request_body.clone(),
-        info.resource_type,
-        moli_page_types::SubresourceRequestInitiatorType::Script,
-        info.request_cookie_report.clone(),
-    )
-    .with_request_body_bytes(info.request_body_bytes.clone())
-    .with_keepalive(true)
 }

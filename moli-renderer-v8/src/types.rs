@@ -64,7 +64,7 @@ pub use crate::protocol_types::{
 };
 
 pub(super) enum PendingSubresourceContinuation {
-    Beacon,
+    Beacon(std::sync::Arc<crate::network::ResourceTransfer>),
     CspReport {
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
         network: std::sync::Arc<crate::network::ResourceTransfer>,
@@ -656,7 +656,7 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
 #[derive(Debug)]
 pub(super) enum AsyncSubresourceFetchEvent {
     Completion(Box<AsyncSubresourceFetchCompletion>),
-    CspReport(Box<crate::network_host::CompletedCspReport>),
+    Keepalive(Box<crate::network_host::CompletedKeepaliveFetch>),
     NativeNetwork(crate::runtime::RendererNetworkObservation),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
     StreamingChunk(AsyncSubresourceStreamingChunk),
@@ -669,7 +669,7 @@ impl AsyncSubresourceFetchEvent {
             Self::Completion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id,
             },
-            Self::CspReport(completion) => AsyncSubresourceFetchEventTarget::Completion {
+            Self::Keepalive(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id(),
             },
             Self::NativeNetwork(_) => AsyncSubresourceFetchEventTarget::NativeNetwork,
@@ -1618,6 +1618,5 @@ mod tests {
         assert!(media.delays_document_load_event());
         assert!(text_track.delays_document_load_event());
         assert!(stylesheet_subresource.delays_document_load_event());
-        assert!(!PendingSubresourceContinuation::Beacon.delays_document_load_event());
     }
 }

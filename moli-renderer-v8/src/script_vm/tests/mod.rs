@@ -3222,7 +3222,11 @@ async fn detached_keepalive_redirect_reports_source_document_csp_without_v8() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn child_navigation_keeps_accepted_beacon_network_only_and_rejects_stale_sender() {
-    let mut vm = new_storage_test_vm("https://child-owner-beacon.test/");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+    let (mut vm, mut completions) = new_storage_test_vm_with_loader_and_resource_completion_queue(
+        "https://child-owner-beacon.test/",
+        &loader,
+    );
     vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Ping));
     vm.eval(
         r#"
@@ -3345,35 +3349,29 @@ async fn child_navigation_keeps_accepted_beacon_network_only_and_rejects_stale_s
         "old child realm must not bind a new Beacon to the replacement LocalWindow"
     );
 
-    let request_url = Url::parse("https://beacon-execution-context.test/accepted").unwrap();
-    let body_source_id = 60_000 + internal_id;
-    vm.start_streaming_async_subresource_fetch(crate::types::AsyncSubresourceStreamingStarted {
+    let handle = vm
+        ._context_host
+        .borrow()
+        .pending_subresource_network_request(internal_id)
+        .handle();
+    vm.fulfill_pending_subresource_fetch(
         internal_id,
-        request_url: request_url.clone(),
-        request_method: "POST".to_owned(),
-        request_headers: Vec::new(),
-        request_body: Some("payload".to_owned()),
-        body_source_id,
-        network_request_headers: None,
-        head: moli_fetch::ResponseHead {
-            final_url: request_url,
-            status: 204,
-            headers: Vec::new(),
-            request_cookie_report: None,
-            cookie_set_reports: Vec::new(),
-            redirected: false,
-            redirect_chain: Vec::new(),
-            from_cache: false,
-            negotiated_http_version: None,
-        },
-    })
-    .expect("accepted Beacon should start streaming without its retired V8 context");
-    vm.append_streaming_async_subresource_fetch_chunk(
-        body_source_id,
-        b"unobservable response body".to_vec(),
+        204,
+        Vec::new(),
+        crate::runtime::RendererSyntheticResponseBody::from_bytes(
+            b"unobservable response body".to_vec(),
+        ),
+    )
+    .expect(
+        "accepted request must complete after its original Document retires without entering V8",
     );
-    vm.finish_streaming_async_subresource_fetch(internal_id, body_source_id, Ok(()))
-        .expect("accepted Beacon should finish streaming without its retired V8 context");
+    for _ in 0..2 {
+        let event = completions
+            .pop_next_async_subresource_event()
+            .expect("native response and terminal receipts");
+        assert!(matches!(vm.complete_async_subresource_fetch_event_body(event).unwrap(),
+            crate::script_vm::subresource_fetch::AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered));
+    }
     assert!(
         vm._context_host
             .borrow()
@@ -3386,9 +3384,8 @@ async fn child_navigation_keeps_accepted_beacon_network_only_and_rejects_stale_s
             .into_items()
             .filter(|item| matches!(
                 item,
-                crate::types::ScriptNetworkOutputItem::SubresourceNetworkRecord(record)
-                    if record.url().as_str()
-                        == "https://beacon-execution-context.test/accepted"
+                crate::types::ScriptNetworkOutputItem::SubresourceBodyFinished(body)
+                    if body.handle() == handle && matches!(body.result(), crate::types::SubresourceBodyFinishedResult::Ready(body) if body.clone_body_bytes() == b"unobservable response body")
             ))
             .count(),
         1,
@@ -3412,6 +3409,12 @@ fn main_document_open_preserves_accepted_beacon_without_rebind() {
         )
         .expect("main Beacon should be accepted"),
         "true"
+    );
+    assert!(
+        !vm._context_host
+            .borrow()
+            .has_pending_load_event_delaying_subresource_requests(),
+        "an admitted Beacon must not delay the Document load event"
     );
     let accepted = vm
         ._context_host
@@ -3471,7 +3474,11 @@ fn main_document_open_preserves_accepted_beacon_without_rebind() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn child_csp_report_keeps_exact_violation_document_without_v8_after_navigation() {
-    let mut vm = new_storage_test_vm("https://child-owner-csp-report.test/");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+    let (mut vm, mut completions) = new_storage_test_vm_with_loader_and_resource_completion_queue(
+        "https://child-owner-csp-report.test/",
+        &loader,
+    );
     vm.set_fetch_subresource_interception(
         true,
         Some(crate::types::SubresourceResourceType::CspReport),
@@ -3584,37 +3591,29 @@ async fn child_csp_report_keeps_exact_violation_document_without_v8_after_naviga
         "retired Document owner must not bind a new report to the replacement child"
     );
 
-    let body_source_id = 70_000 + internal_id;
-    vm.start_streaming_async_subresource_fetch(crate::types::AsyncSubresourceStreamingStarted {
+    let handle = vm
+        ._context_host
+        .borrow()
+        .pending_subresource_network_request(internal_id)
+        .handle();
+    vm.fulfill_pending_subresource_fetch(
         internal_id,
-        request_url: report_url.clone(),
-        request_method: "POST".to_owned(),
-        request_headers: vec![(
-            "Content-Type".to_owned(),
-            "application/csp-report".to_owned(),
-        )],
-        request_body: Some("report".to_owned()),
-        body_source_id,
-        network_request_headers: None,
-        head: moli_fetch::ResponseHead {
-            final_url: report_url.clone(),
-            status: 204,
-            headers: Vec::new(),
-            request_cookie_report: None,
-            cookie_set_reports: Vec::new(),
-            redirected: false,
-            redirect_chain: Vec::new(),
-            from_cache: false,
-            negotiated_http_version: None,
-        },
-    })
-    .expect("accepted CSP report should stream without its retired V8 context");
-    vm.append_streaming_async_subresource_fetch_chunk(
-        body_source_id,
-        b"unobservable report response".to_vec(),
+        204,
+        Vec::new(),
+        crate::runtime::RendererSyntheticResponseBody::from_bytes(
+            b"unobservable report response".to_vec(),
+        ),
+    )
+    .expect(
+        "accepted request must complete after its original Document retires without entering V8",
     );
-    vm.finish_streaming_async_subresource_fetch(internal_id, body_source_id, Ok(()))
-        .expect("accepted CSP report should finish without its retired V8 context");
+    for _ in 0..2 {
+        let event = completions
+            .pop_next_async_subresource_event()
+            .expect("native response and terminal receipts");
+        assert!(matches!(vm.complete_async_subresource_fetch_event_body(event).unwrap(),
+            crate::script_vm::subresource_fetch::AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered));
+    }
     assert!(
         vm._context_host
             .borrow()
@@ -3626,8 +3625,8 @@ async fn child_csp_report_keeps_exact_violation_document_without_v8_after_naviga
             .into_items()
             .filter(|item| matches!(
                 item,
-                crate::types::ScriptNetworkOutputItem::SubresourceNetworkRecord(record)
-                    if record.url() == &report_url
+                crate::types::ScriptNetworkOutputItem::SubresourceBodyFinished(body)
+                    if body.handle() == handle && matches!(body.result(), crate::types::SubresourceBodyFinishedResult::Ready(body) if body.clone_body_bytes() == b"unobservable report response")
             ))
             .count(),
         1,
@@ -15226,6 +15225,7 @@ mod dom_xhr;
 mod http_fixture;
 mod indexed_db;
 mod inspector_unwrap;
+mod keepalive;
 mod lazy_storage;
 mod lazy_window_surfaces;
 mod observer_callbacks;

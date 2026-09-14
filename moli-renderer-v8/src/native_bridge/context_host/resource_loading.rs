@@ -1053,62 +1053,21 @@ impl JsContextHost {
         Some(internal_id)
     }
 
-    pub(crate) fn record_async_subresource_beacon(
-        &mut self,
-        execution_context: super::WindowExecutionContextIdentity,
-        cancel_handle: Option<moli_fetch::FetchCancelHandle>,
-        network_partition_key: Option<String>,
-        mut info: PendingSubresourceFetchInfo,
-    ) -> u64 {
-        let network = self.admit_pending_subresource_fetch(&mut info);
-        let internal_id = info.internal_id;
-        let load = self.require_document_resource_load_for_dispatch_scope(
-            execution_context.dispatch_scope(),
-            info.resource_type,
-            ResourceLoadDisposition::Keepalive,
-            cancel_handle.clone(),
-        );
-        self.record_pending_subresource_request_started(&info, load.disposition());
-        self.pending_subresource_fetches.insert(
-            internal_id,
-            PendingSubresourceFetchState {
-                network_request: network,
-                info,
-                load,
-                execution_context: PendingSubresourceExecutionContext::window_network_only(
-                    execution_context,
-                ),
-                credentials_mode: moli_fetch::RequestCredentialsMode::Include,
-                request_mode: moli_fetch::RequestMode::NoCors,
-                network_partition_key,
-                policy_context: Default::default(),
-                continuation: PendingSubresourceContinuation::Beacon,
-            },
-        );
-        self.note_subresource_activity();
-        internal_id
-    }
-
     pub(crate) fn record_pending_subresource_beacon(
         &mut self,
         execution_context: super::WindowExecutionContextIdentity,
+        load: ResourceLoadLease,
+        network: std::sync::Arc<crate::network::ResourceTransfer>,
         network_partition_key: Option<String>,
         mut info: PendingSubresourceFetchInfo,
     ) -> u64 {
-        let network = self.admit_pending_subresource_fetch(&mut info);
+        self.assign_pending_subresource_fetch_identity(&mut info);
         let internal_id = info.internal_id;
-        let load = self.require_document_resource_load_for_dispatch_scope(
-            execution_context.dispatch_scope(),
-            info.resource_type,
-            ResourceLoadDisposition::Keepalive,
-            None,
-        );
         self.push_pending_subresource_fetch_info(info.clone());
-        self.record_pending_subresource_request_started(&info, load.disposition());
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
-                network_request: network,
+                network_request: network.request(),
                 info,
                 load,
                 execution_context: PendingSubresourceExecutionContext::window_network_only(
@@ -1118,7 +1077,7 @@ impl JsContextHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context: Default::default(),
-                continuation: PendingSubresourceContinuation::Beacon,
+                continuation: PendingSubresourceContinuation::Beacon(network),
             },
         );
         self.note_subresource_activity();
@@ -2121,7 +2080,10 @@ impl JsContextHost {
         let mut pending = self
             .subresource_fetch_states()
             .filter(|pending| {
-                matches!(pending.continuation, PendingSubresourceContinuation::Beacon)
+                matches!(
+                    pending.continuation,
+                    PendingSubresourceContinuation::Beacon(_)
+                )
             })
             .filter_map(|pending| {
                 Some((

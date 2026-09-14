@@ -508,11 +508,40 @@ impl ScriptVm {
         intercept_response: bool,
         handle_auth_requests: bool,
     ) -> Result<AsyncSubresourceCommandExecution<PendingSubresourceContinueOutcome>> {
-        let pending = self
+        let mut pending = self
             ._context_host
             .borrow_mut()
             .take_pending_subresource_fetch(internal_id)
             .ok_or_else(|| anyhow!("unknown pending subresource fetch `{internal_id}`"))?;
+        if let PendingSubresourceContinuation::CspReport { network, .. }
+        | PendingSubresourceContinuation::Beacon(network) = &pending.continuation
+        {
+            let info = &mut pending.info;
+            let changed = url.as_ref().is_some_and(|url| url != &info.url)
+                || method.as_ref().is_some_and(|method| method != &info.method)
+                || headers
+                    .as_ref()
+                    .is_some_and(|headers| headers != &info.request_headers)
+                || body.is_some();
+            if let Some(url) = &url {
+                info.url = url.clone();
+            }
+            if let Some(method) = &method {
+                info.method = method.clone();
+            }
+            if let Some(headers) = &headers {
+                info.request_headers = headers.clone();
+            }
+            if let Some(body) = &body {
+                info.request_body = body.clone();
+                info.request_body_bytes = body.as_ref().map(|body| body.as_bytes().to_vec());
+            }
+            if changed {
+                network.update_request(|request| {
+                    crate::network_host::keepalive_request_started(request, info)
+                });
+            }
+        }
         let PendingSubresourceFetchState {
             info,
             load,
@@ -553,21 +582,6 @@ impl ScriptVm {
                 };
                 let request_body = body.unwrap_or_else(|| info.request_body.clone());
                 let request_headers = headers.unwrap_or_else(|| info.request_headers.clone());
-                let mut info = info;
-                if info.url != request_url
-                    || info.method != request_method
-                    || info.request_headers != request_headers
-                    || info.request_body_bytes != request_body_bytes
-                {
-                    info.url = request_url.clone();
-                    info.method = request_method.clone();
-                    info.request_headers = request_headers.clone();
-                    info.request_body = request_body.clone();
-                    info.request_body_bytes = request_body_bytes.clone();
-                    network.update_request(|request| {
-                        crate::network_host::csp_report_request_started(request, &info)
-                    });
-                }
                 let pending = PendingSubresourceFetchState {
                     info,
                     load,
@@ -680,10 +694,15 @@ impl ScriptVm {
         // up the ambient Page loader here would silently rebind policy/backend
         // to a newer Document identity.
         let loader = pending.load.request_client();
-        let mut request = moli_fetch::Request::new(
+        let request_body_bytes = match &pending.continuation {
+            PendingSubresourceContinuation::CspReport { .. }
+            | PendingSubresourceContinuation::Beacon(_) => pending.info.request_body_bytes.clone(),
+            _ => request_body.as_ref().map(|body| body.as_bytes().to_vec()),
+        };
+        let mut request = moli_fetch::Request::new_bytes(
             &request_method,
             request_url.as_str(),
-            request_body.clone(),
+            request_body_bytes,
             request_headers.clone(),
         )?
         .with_initiator_url(&pending.info.document_url)
@@ -860,7 +879,7 @@ impl ScriptVm {
                 Ok(ServiceWorkerDirectFetchResult::Fallback) => (
                     false,
                     None,
-                    crate::network_host::fetch_buffered_csp_report(
+                    crate::network_host::fetch_buffered_keepalive(
                         &request_client,
                         fallback,
                         cancel_handle,
@@ -875,7 +894,7 @@ impl ScriptVm {
                     Err("service worker csp report fetch dispatch closed".into()),
                 ),
             };
-            crate::network_host::send_report_completion(
+            crate::network_host::send_keepalive_completion(
                 &completion_tx,
                 network,
                 AsyncSubresourceFetchCompletion {
@@ -1506,9 +1525,11 @@ impl ScriptVm {
         network_error_text: Option<String>,
         result: std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) -> Result<()> {
-        if let PendingSubresourceContinuation::CspReport { network, .. } = &pending.continuation {
+        if let PendingSubresourceContinuation::CspReport { network, .. }
+        | PendingSubresourceContinuation::Beacon(network) = &pending.continuation
+        {
             let result = result.map_err(|message| network_error_text.unwrap_or(message));
-            crate::network_host::finish_report_result(network, &result);
+            crate::network_host::finish_keepalive_result(network, &result);
             pending.load.finish();
             return Ok(());
         }
@@ -2210,7 +2231,7 @@ impl ScriptVm {
                             }
                             apply_stylesheet_subresource_terminal(&context_host, binding);
                         }
-                        PendingSubresourceContinuation::Beacon
+                        PendingSubresourceContinuation::Beacon(_)
                         | PendingSubresourceContinuation::CspReport { .. }
                         | PendingSubresourceContinuation::EventSource(_)
                         | PendingSubresourceContinuation::WebSocket(_) => {}
@@ -2322,7 +2343,7 @@ impl ScriptVm {
                             }
                             apply_stylesheet_subresource_terminal(&context_host, binding);
                         }
-                        PendingSubresourceContinuation::Beacon
+                        PendingSubresourceContinuation::Beacon(_)
                         | PendingSubresourceContinuation::CspReport { .. }
                         | PendingSubresourceContinuation::EventSource(_)
                         | PendingSubresourceContinuation::WebSocket(_) => {}
@@ -2367,8 +2388,9 @@ impl ScriptVm {
         let request_method = state.request_method.clone();
         let request_headers = state.request_headers.clone();
         let request_body = state.request_body.clone();
-        let report_network = match &state.pending.continuation {
-            PendingSubresourceContinuation::CspReport { network, .. } => Some(network.clone()),
+        let keepalive_network = match &state.pending.continuation {
+            PendingSubresourceContinuation::CspReport { network, .. }
+            | PendingSubresourceContinuation::Beacon(network) => Some(network.clone()),
             _ => None,
         };
         let completion_tx = self._context_host.borrow().resource_completion_sender();
@@ -2379,8 +2401,8 @@ impl ScriptVm {
             host.record_running_subresource_fetch(state);
         }
         task_runner.spawn(async move {
-            let result = if let Some(network) = &report_network {
-                crate::network_host::fetch_buffered_csp_report(
+            let result = if let Some(network) = &keepalive_network {
+                crate::network_host::fetch_buffered_keepalive(
                     &request_client,
                     request,
                     cancel_handle.unwrap_or_default(),
@@ -2417,8 +2439,8 @@ impl ScriptVm {
                 network_error_text: None,
                 result,
             };
-            if let Some(network) = report_network {
-                crate::network_host::send_report_completion(&completion_tx, network, completion);
+            if let Some(network) = keepalive_network {
+                crate::network_host::send_keepalive_completion(&completion_tx, network, completion);
             } else {
                 let _ = completion_tx.send_async_subresource(completion);
             }
@@ -2719,7 +2741,7 @@ impl ScriptVm {
             AsyncSubresourceFetchEvent::Completion(completion) => {
                 self.complete_async_subresource_fetch_body(*completion)
             }
-            AsyncSubresourceFetchEvent::CspReport(completion) => {
+            AsyncSubresourceFetchEvent::Keepalive(completion) => {
                 self.complete_async_subresource_fetch_body(completion.into_completion())
             }
             AsyncSubresourceFetchEvent::NativeNetwork(observation) => {
@@ -2756,15 +2778,15 @@ impl ScriptVm {
             .async_subresource_fetch_event_target_is_current(target)
     }
 
-    fn start_network_only_subresource_stream(
+    fn start_detached_window_fetch_stream(
         &mut self,
         pending: PendingSubresourceFetchState,
         started: crate::types::AsyncSubresourceStreamingStarted,
     ) -> Result<()> {
         let detached_window_fetch = pending.continuation.is_detached_window_fetch();
         debug_assert!(
-            detached_window_fetch || pending.execution_context.is_window_network_only(),
-            "network-only stream must be an accepted fire-and-forget request or detached Fetch"
+            detached_window_fetch,
+            "only a detached Fetch keeps a VM-managed stream without a JS consumer"
         );
 
         let security_error = detached_window_fetch
@@ -2823,10 +2845,6 @@ impl ScriptVm {
         }
 
         let detached_identity = pending.execution_context.detached_window_fetch_identity();
-        let accepted_context = pending.execution_context.window_network_only_identity();
-        let accepted_document = pending
-            .execution_context
-            .window_document_network_only_identity();
         self._context_host
             .borrow_mut()
             .record_streaming_subresource_fetch(StreamingSubresourceFetchState {
@@ -2845,8 +2863,6 @@ impl ScriptVm {
         tracing::debug!(
             internal_id = started.internal_id,
             ?detached_identity,
-            ?accepted_context,
-            ?accepted_document,
             "continued network-only subresource streaming without a V8 body source"
         );
         Ok(())
@@ -2896,11 +2912,9 @@ impl ScriptVm {
             Some(started.body_source_id),
             &pending,
         );
-        if pending.continuation.is_detached_window_fetch()
-            || pending.execution_context.is_window_network_only()
-        {
+        if pending.continuation.is_detached_window_fetch() {
             return self
-                .start_network_only_subresource_stream(pending, started)
+                .start_detached_window_fetch_stream(pending, started)
                 .map(|()| AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered);
         }
         if !window_subresource_owner_is_current(&self._context_host, &pending) {
@@ -3075,7 +3089,7 @@ impl ScriptVm {
                     PendingSubresourceContinuation::StylesheetSubresource { binding, .. } => {
                         apply_stylesheet_subresource_terminal(&self._context_host, *binding);
                     }
-                    PendingSubresourceContinuation::Beacon
+                    PendingSubresourceContinuation::Beacon(_)
                     | PendingSubresourceContinuation::CspReport { .. }
                     | PendingSubresourceContinuation::WebSocket(_) => {}
                 }
@@ -3344,7 +3358,7 @@ impl ScriptVm {
                     ));
                     event_source_to_open = Some(event_source);
                 }
-                PendingSubresourceContinuation::Beacon
+                PendingSubresourceContinuation::Beacon(_)
                 | PendingSubresourceContinuation::CspReport { .. }
                 | PendingSubresourceContinuation::Xhr(_)
                 | PendingSubresourceContinuation::WebSocket(_) => {}
@@ -3612,29 +3626,20 @@ impl ScriptVm {
         activity
     }
 
-    fn finish_network_only_subresource_stream(
+    fn finish_detached_window_fetch_stream(
         &mut self,
         streaming: StreamingSubresourceFetchState,
         internal_id: u64,
         result: std::result::Result<(), String>,
     ) -> Result<()> {
         debug_assert!(
-            streaming.pending.continuation.is_detached_window_fetch()
-                || streaming.pending.execution_context.is_window_network_only(),
-            "network-only stream must be an accepted fire-and-forget request or detached Fetch"
+            streaming.pending.continuation.is_detached_window_fetch(),
+            "only a detached Fetch keeps a VM-managed stream without a JS consumer"
         );
         let detached_identity = streaming
             .pending
             .execution_context
             .detached_window_fetch_identity();
-        let accepted_context = streaming
-            .pending
-            .execution_context
-            .window_network_only_identity();
-        let accepted_document = streaming
-            .pending
-            .execution_context
-            .window_document_network_only_identity();
         match result {
             Ok(()) => {
                 let request_cookie_report = streaming
@@ -3738,8 +3743,6 @@ impl ScriptVm {
         tracing::debug!(
             internal_id,
             ?detached_identity,
-            ?accepted_context,
-            ?accepted_document,
             "finished network-only subresource without entering V8"
         );
         Ok(())
@@ -3797,11 +3800,9 @@ impl ScriptVm {
             Some(body_source_id),
             &streaming.pending,
         );
-        if streaming.pending.continuation.is_detached_window_fetch()
-            || streaming.pending.execution_context.is_window_network_only()
-        {
+        if streaming.pending.continuation.is_detached_window_fetch() {
             return self
-                .finish_network_only_subresource_stream(streaming, internal_id, result)
+                .finish_detached_window_fetch_stream(streaming, internal_id, result)
                 .map(|()| AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered);
         }
         if !window_subresource_owner_is_current(&self._context_host, &streaming.pending) {
@@ -4598,8 +4599,8 @@ fn async_subresource_trace_fields_for_event(
             internal_id: Some(completion.internal_id),
             ..AsyncSubresourceTraceFields::default()
         },
-        AsyncSubresourceFetchEvent::CspReport(completion) => AsyncSubresourceTraceFields {
-            event_kind: Some("csp_report"),
+        AsyncSubresourceFetchEvent::Keepalive(completion) => AsyncSubresourceTraceFields {
+            event_kind: Some("keepalive"),
             internal_id: Some(completion.internal_id()),
             ..AsyncSubresourceTraceFields::default()
         },
@@ -4638,7 +4639,7 @@ fn pending_subresource_continuation_kind(
         PendingSubresourceContinuation::Media { .. } => "media",
         PendingSubresourceContinuation::TextTrack { .. } => "text_track",
         PendingSubresourceContinuation::StylesheetSubresource { .. } => "stylesheet_subresource",
-        PendingSubresourceContinuation::Beacon => "beacon",
+        PendingSubresourceContinuation::Beacon(_) => "beacon",
         PendingSubresourceContinuation::CspReport { .. } => "csp_report",
         PendingSubresourceContinuation::Xhr(_) => "xhr",
         PendingSubresourceContinuation::WebSocket(_) => "websocket",

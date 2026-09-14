@@ -12,9 +12,9 @@ use crate::{
     types::{AsyncSubresourceFetchCompletion, AsyncSubresourceFetchEvent},
 };
 
-/// A report without a JS consumer keeps its request and resource lease until
+/// A keepalive resource without a JS consumer keeps its request and resource lease until
 /// transport completion. The Page is only an observer of its native receipts.
-pub(crate) struct CspReportResource {
+pub(crate) struct KeepaliveResource {
     pub(crate) network: Arc<ResourceTransfer>,
     load: ResourceLoadLease,
     // ServiceWorker streaming failures do not carry a final Response. Retain
@@ -22,7 +22,7 @@ pub(crate) struct CspReportResource {
     stream: Mutex<Option<(Arc<ResourceResponseHead>, SubresourceResponseBodyWriter)>>,
 }
 
-impl CspReportResource {
+impl KeepaliveResource {
     pub(crate) fn new(network: Arc<ResourceTransfer>, load: ResourceLoadLease) -> Arc<Self> {
         Arc::new(Self {
             network,
@@ -48,7 +48,7 @@ impl CspReportResource {
     }
 
     pub(crate) fn response_completed(&self, response: &NavigationResponse) {
-        finish_report_response(&self.network, response);
+        finish_keepalive_response(&self.network, response);
         self.stream.lock().take();
         self.load.finish();
     }
@@ -85,20 +85,20 @@ impl CspReportResource {
 /// Buffered intercepted results still belong to the original pending request.
 /// If its Page route retires before delivery, the result itself settles the
 /// native request rather than losing the physical response with the VM.
-pub(crate) struct CompletedCspReport {
+pub(crate) struct CompletedKeepaliveFetch {
     network: Arc<ResourceTransfer>,
     completion: Option<AsyncSubresourceFetchCompletion>,
 }
 
-impl std::fmt::Debug for CompletedCspReport {
+impl std::fmt::Debug for CompletedKeepaliveFetch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CompletedCspReport")
+        f.debug_struct("CompletedKeepaliveFetch")
             .field("completion", &self.completion)
             .finish_non_exhaustive()
     }
 }
 
-impl CompletedCspReport {
+impl CompletedKeepaliveFetch {
     pub(crate) fn new(
         network: Arc<ResourceTransfer>,
         completion: AsyncSubresourceFetchCompletion,
@@ -112,46 +112,46 @@ impl CompletedCspReport {
     pub(crate) fn internal_id(&self) -> u64 {
         self.completion
             .as_ref()
-            .expect("unclaimed report result")
+            .expect("unclaimed keepalive result")
             .internal_id
     }
 
     pub(crate) fn into_completion(mut self) -> AsyncSubresourceFetchCompletion {
         self.completion
             .take()
-            .expect("report result is claimed once")
+            .expect("keepalive result is claimed once")
     }
 }
 
-impl Drop for CompletedCspReport {
+impl Drop for CompletedKeepaliveFetch {
     fn drop(&mut self) {
         if let Some(completion) = self.completion.take() {
-            finish_report_result(&self.network, &completion.result);
+            finish_keepalive_result(&self.network, &completion.result);
         }
     }
 }
 
-pub(crate) fn send_report_completion(
+pub(crate) fn send_keepalive_completion(
     sender: &RendererResourceCompletionSender,
     network: Arc<ResourceTransfer>,
     completion: AsyncSubresourceFetchCompletion,
 ) {
-    let _ = sender.send_async_subresource_event(AsyncSubresourceFetchEvent::CspReport(Box::new(
-        CompletedCspReport::new(network, completion),
+    let _ = sender.send_async_subresource_event(AsyncSubresourceFetchEvent::Keepalive(Box::new(
+        CompletedKeepaliveFetch::new(network, completion),
     )));
 }
 
-pub(crate) fn finish_report_result(
+pub(crate) fn finish_keepalive_result(
     network: &ResourceTransfer,
     result: &Result<NavigationResponse, String>,
 ) {
     match result {
-        Ok(response) => finish_report_response(network, response),
+        Ok(response) => finish_keepalive_response(network, response),
         Err(message) => network.failed(&ResourceResponseFailure::Request(message.clone())),
     }
 }
 
-fn finish_report_response(network: &ResourceTransfer, response: &NavigationResponse) {
+fn finish_keepalive_response(network: &ResourceTransfer, response: &NavigationResponse) {
     network.body_completed(
         ResourceResponseHead {
             head: response.head(),
@@ -161,7 +161,7 @@ fn finish_report_response(network: &ResourceTransfer, response: &NavigationRespo
     );
 }
 
-pub(crate) async fn fetch_buffered_csp_report(
+pub(crate) async fn fetch_buffered_keepalive(
     loader: &crate::network::ResourceRequestClient,
     request: moli_fetch::Request,
     cancel: moli_fetch::FetchCancelHandle,
@@ -185,6 +185,26 @@ pub(crate) async fn fetch_buffered_csp_report(
             Err(error.to_string())
         }
     }
+}
+
+pub(crate) fn keepalive_request_started(
+    network: &crate::runtime::RendererNetworkRequest,
+    info: &crate::types::PendingSubresourceFetchInfo,
+) -> moli_page_types::SubresourceRequestStarted {
+    moli_page_types::SubresourceRequestStarted::new(
+        network.handle(),
+        info.frame_id.clone(),
+        info.document_url.clone(),
+        info.url.clone(),
+        info.method.clone(),
+        info.request_headers.clone(),
+        info.request_body.clone(),
+        info.resource_type,
+        moli_page_types::SubresourceRequestInitiatorType::Script,
+        info.request_cookie_report.clone(),
+    )
+    .with_request_body_bytes(info.request_body_bytes.clone())
+    .with_keepalive(true)
 }
 
 #[cfg(test)]
@@ -243,20 +263,20 @@ mod tests {
                 result: Ok(response),
             };
             if closed_route {
-                send_report_completion(
+                send_keepalive_completion(
                     &RendererResourceCompletionSender::closed_for_test(),
                     network.clone(),
                     completion,
                 );
             } else {
                 let completion =
-                    CompletedCspReport::new(network.clone(), completion).into_completion();
+                    CompletedKeepaliveFetch::new(network.clone(), completion).into_completion();
                 assert_eq!(
                     records.lock().len(),
                     1,
                     "the claim transfers the decision to its pending request"
                 );
-                finish_report_result(&network, &completion.result);
+                finish_keepalive_result(&network, &completion.result);
             }
             drop(network);
             let records = records.lock();

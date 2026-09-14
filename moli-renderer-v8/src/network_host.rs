@@ -11,6 +11,7 @@ mod fetch_surface;
 mod headers;
 mod image;
 mod js_values;
+mod keepalive;
 mod media;
 mod preflight_events;
 mod request;
@@ -63,12 +64,10 @@ pub(crate) use self::body_source::{
 pub(in crate::network_host) use self::browser_response::http_status_text;
 pub(crate) use self::browser_response::{local_url_response, local_url_response_result};
 pub(crate) use self::csp_reports::{
-    CompletedCspReport, CspReportResource, WindowCspReportRequestContext,
-    capture_window_csp_report_request_context, csp_report_request_started,
-    fetch_buffered_csp_report, finish_report_result,
+    WindowCspReportRequestContext, capture_window_csp_report_request_context,
     send_content_security_policy_reports_for_lightweight_popup,
     send_content_security_policy_reports_for_window,
-    send_content_security_policy_violation_report_from_window_context, send_report_completion,
+    send_content_security_policy_violation_report_from_window_context,
 };
 pub(crate) use self::event_source::{
     EVENT_SOURCE_CLOSED, EventSourceMessage, EventSourceParser, EventSourceTerminalMode,
@@ -115,6 +114,10 @@ pub(crate) use self::image::{
     start_image_element_resource_fetch, start_scanned_image_preload,
 };
 pub(in crate::network_host) use self::js_values::{defined_object_string_property, v8_json_parse};
+pub(crate) use self::keepalive::{
+    CompletedKeepaliveFetch, KeepaliveResource, fetch_buffered_keepalive, finish_keepalive_result,
+    keepalive_request_started, send_keepalive_completion,
+};
 pub(crate) use self::media::{
     MediaElementResourceFetchStart, media_response_status_is_successful,
     start_media_element_resource_fetch,
