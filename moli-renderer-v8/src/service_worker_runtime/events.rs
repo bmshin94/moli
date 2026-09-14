@@ -731,7 +731,10 @@ pub(crate) struct ServiceWorkerFetchDispatch {
 }
 
 pub(crate) enum ServiceWorkerFetchResultSender {
-    Page(RendererResourceCompletionSender),
+    Page {
+        completion_tx: RendererResourceCompletionSender,
+        network: crate::runtime::RendererNetworkRequest,
+    },
     CspReport(std::sync::Arc<crate::network_host::CspReportResource>),
     Direct(tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>),
 }
@@ -739,7 +742,9 @@ pub(crate) enum ServiceWorkerFetchResultSender {
 impl ServiceWorkerFetchResultSender {
     pub(super) fn stream_sender(&self) -> Option<ServiceWorkerFetchStreamSender> {
         match self {
-            Self::Page(sender) => Some(ServiceWorkerFetchStreamSender::Page(sender.clone())),
+            Self::Page { completion_tx, .. } => {
+                Some(ServiceWorkerFetchStreamSender::Page(completion_tx.clone()))
+            }
             Self::CspReport(resource) => {
                 Some(ServiceWorkerFetchStreamSender::CspReport(resource.clone()))
             }

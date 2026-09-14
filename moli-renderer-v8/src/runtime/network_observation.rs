@@ -440,10 +440,18 @@ struct NetworkRequestInner {
 }
 
 impl RendererNetworkRequest {
+    #[cfg(test)]
+    pub(crate) fn unobserved_for_test() -> Self {
+        RendererWorkerNetworkReporter::unobserved_for_test()
+            .start_request()
+            .unwrap()
+    }
+
     fn start(
         reporter: RendererNetworkReporter,
         source: RendererNetworkSource,
         requests: Arc<Mutex<NetworkSourceState>>,
+        handle: moli_page_types::SubresourceNetworkRequestHandle,
     ) -> Option<Self> {
         {
             let mut state = requests.lock();
@@ -454,7 +462,6 @@ impl RendererNetworkRequest {
                 .checked_add(1)
                 .expect("network request count exhausted");
         }
-        let handle = moli_page_types::SubresourceNetworkRequestHandle::allocate();
         Some(Self {
             lease: Arc::new(NetworkRequestInner {
                 reporter,
@@ -601,6 +608,7 @@ impl RendererWorkerNetworkReporter {
             self.reporter.clone(),
             RendererNetworkSource::Worker(self.source.clone()),
             self.requests.clone(),
+            moli_page_types::SubresourceNetworkRequestHandle::allocate(),
         )
     }
 
@@ -631,10 +639,18 @@ pub(crate) struct RendererDocumentNetworkReporter {
 
 impl RendererDocumentNetworkReporter {
     pub(crate) fn start_request(&self) -> Option<RendererNetworkRequest> {
+        self.start_request_with_handle(moli_page_types::SubresourceNetworkRequestHandle::allocate())
+    }
+
+    pub(crate) fn start_request_with_handle(
+        &self,
+        handle: moli_page_types::SubresourceNetworkRequestHandle,
+    ) -> Option<RendererNetworkRequest> {
         RendererNetworkRequest::start(
             self.reporter.clone(),
             self.source.clone(),
             self.requests.clone(),
+            handle,
         )
     }
 }

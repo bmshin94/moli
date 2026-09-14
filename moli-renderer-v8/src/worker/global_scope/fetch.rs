@@ -307,9 +307,12 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
 ) {
     load.task_runner().spawn(async move {
         let loader = load.request_client();
-        let preflight = crate::network_host::CorsPreflightNetworkObserver::Worker {
+        let preflight_observer = observer.clone();
+        let preflight = crate::network_host::CorsPreflightNetworkObserver {
             request: network.clone(),
-            observer: observer.clone(),
+            observer: std::sync::Arc::new(move |event| preflight_observer.publish(event)),
+            frame_id: None,
+            resource_type: SubresourceResourceType::Fetch,
             keepalive: request_metadata.keepalive,
         };
         let (result, network_request_headers) = if matches!(resolved_url.scheme(), "blob" | "data")
@@ -634,9 +637,12 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
 ) {
     load.task_runner().spawn(async move {
         let loader = load.request_client();
-        let preflight = crate::network_host::CorsPreflightNetworkObserver::Worker {
+        let preflight_observer = observer.clone();
+        let preflight = crate::network_host::CorsPreflightNetworkObserver {
             request: network.clone(),
-            observer: observer.clone(),
+            observer: std::sync::Arc::new(move |event| preflight_observer.publish(event)),
+            frame_id: None,
+            resource_type: SubresourceResourceType::Xhr,
             keepalive: false,
         };
         let cors_preflight_request_headers = request

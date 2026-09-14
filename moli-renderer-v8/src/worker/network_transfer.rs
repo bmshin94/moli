@@ -19,43 +19,6 @@ impl ResourceTransfer {
         observer.publish(started);
         Some(transfer)
     }
-
-    pub(crate) fn preflight(
-        parent: &RendererNetworkRequest,
-        observer: WorkerNetworkObserver,
-        request: &moli_fetch::Request,
-        keepalive: bool,
-    ) -> Arc<Self> {
-        let resource_type = match request.browser_request_metadata() {
-            Some(moli_fetch::BrowserRequestMetadata::Xhr) => {
-                moli_page_types::SubresourceResourceType::Xhr
-            }
-            _ => moli_page_types::SubresourceResourceType::Fetch,
-        };
-        let subsequent = observer.clone();
-        let (transfer, started) = Self::start(
-            parent.preflight(),
-            move |event| subsequent.publish(event),
-            |network| {
-                super::global_scope::worker_request_started(
-                    network,
-                    request
-                        .cookie_context
-                        .initiator_url
-                        .as_ref()
-                        .expect("a CORS preflight has an initiator"),
-                    &request.url,
-                    &request.method,
-                    &request.request_headers,
-                    &None,
-                    resource_type,
-                )
-                .with_keepalive(keepalive)
-            },
-        );
-        observer.publish(started);
-        transfer
-    }
 }
 
 #[cfg(test)]

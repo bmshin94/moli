@@ -28,8 +28,8 @@ enum ResourceTransferState {
 }
 
 impl ResourceTransfer {
-    /// Return the first receipt to the admitting owner so it precedes any
-    /// request pause in that owner's turn. Later I/O uses the captured observer.
+    /// Return the first receipt to the admitting owner for its request-admission
+    /// turn. Later I/O uses the captured observer.
     #[must_use]
     pub(crate) fn start(
         network: RendererNetworkRequest,
@@ -75,9 +75,13 @@ impl ResourceTransfer {
     }
 
     pub(crate) fn handle(&self) -> SubresourceNetworkRequestHandle {
+        self.request().handle()
+    }
+
+    pub(crate) fn request(&self) -> RendererNetworkRequest {
         match &*self.state.lock() {
             ResourceTransferState::Requested(network)
-            | ResourceTransferState::Responding(network) => network.handle(),
+            | ResourceTransferState::Responding(network) => network.clone(),
             ResourceTransferState::Finished => {
                 panic!("completed request has no continuation")
             }

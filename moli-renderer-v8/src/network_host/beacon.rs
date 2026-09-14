@@ -143,12 +143,6 @@ pub(crate) fn navigator_send_beacon_callback<'s>(
             }
         };
     let cancel_handle = FetchCancelHandle::new();
-    let network_context = AsyncSubresourceNetworkContext {
-        frame_id: info.frame_id.clone(),
-        document_url: info.document_url.clone(),
-        resource_type: info.resource_type,
-        policy_context: Default::default(),
-    };
     let internal_id = host.record_async_subresource_beacon(
         execution_context,
         Some(cancel_handle.clone()),
@@ -163,7 +157,7 @@ pub(crate) fn navigator_send_beacon_callback<'s>(
         Some(cancel_handle),
         Vec::new(),
         internal_id,
-        network_context,
+        host.pending_subresource_preflight_observer(internal_id),
         resolved_url,
         "POST".to_owned(),
         request_headers,
@@ -274,12 +268,6 @@ pub(crate) fn send_link_audit_ping(
         }
     };
     let cancel_handle = FetchCancelHandle::new();
-    let network_context = AsyncSubresourceNetworkContext {
-        frame_id: info.frame_id.clone(),
-        document_url: info.document_url.clone(),
-        resource_type: info.resource_type,
-        policy_context: Default::default(),
-    };
     let internal_id = host.record_async_subresource_beacon(
         execution_context,
         Some(cancel_handle.clone()),
@@ -294,7 +282,7 @@ pub(crate) fn send_link_audit_ping(
         Some(cancel_handle),
         Vec::new(),
         internal_id,
-        network_context,
+        host.pending_subresource_preflight_observer(internal_id),
         ping_url,
         "POST".to_owned(),
         request_headers,

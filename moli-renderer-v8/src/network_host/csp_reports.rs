@@ -228,20 +228,20 @@ fn send_content_security_policy_report_request(
         },
         |network| csp_report_request_started(network, &info),
     );
-    host.record_native_resource_observation(started);
-
     if request_context
         .request_client
         .page_network_policy()
         .snapshot()
         .blocks_url(&request.url)
     {
+        host.record_native_resource_observation(started);
         network.failed(&crate::network::ResourceResponseFailure::Request(
             BLOCKED_BY_CLIENT_ERROR_TEXT.to_owned(),
         ));
         return;
     }
     if should_request_be_blocked_due_to_bad_port(&request.url) {
+        host.record_native_resource_observation(started);
         network.failed(&crate::network::ResourceResponseFailure::Request(format!(
             "csp report: blocked bad port for `{}`",
             request.url
@@ -260,8 +260,10 @@ fn send_content_security_policy_report_request(
             request_context.policy_context,
             info,
         );
+        host.record_native_resource_observation(started);
         return;
     }
+    host.record_native_resource_observation(started);
 
     if request_context
         .request_client
@@ -388,20 +390,9 @@ fn window_csp_report_request_context_for_identity(
                 popup_id,
             )),
     };
-    let source = host.renderer_network_source();
-    #[cfg(test)]
-    let source = source.or_else(|| {
-        Some((
-            crate::runtime::RendererOwnerLocalHostId::new_for_testing(1),
-            host.root_document_lifecycle_identity()?,
-        ))
-    });
-    let (owner, document) = source?;
     Some(WindowCspReportRequestContext {
         identity,
-        network: host
-            .browser_context_runtime()
-            .network_for_document(owner, document),
+        network: host.document_network_reporter()?,
         completion_tx: host.resource_completion_sender(),
         request_client: resource_loader.frozen_request_client(),
         resource_loader,

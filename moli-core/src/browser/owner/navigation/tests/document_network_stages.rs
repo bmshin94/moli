@@ -354,3 +354,315 @@ async fn document_csp_stages(child: bool, finish: Finish, controlled: bool) {
     .expect("retired Page source releases the completed CSP tail");
     service.shutdown();
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PreflightFinish {
+    Complete,
+    CloseBeforeHead,
+    CloseAfterPrefix,
+    CloseBeforeOptions,
+}
+
+#[tokio::test]
+async fn native_document_preflight_emits_native_stages() {
+    document_preflight_stages(PreflightFinish::Complete).await;
+}
+
+#[tokio::test]
+async fn native_document_preflight_close_before_head_cancels() {
+    document_preflight_stages(PreflightFinish::CloseBeforeHead).await;
+}
+
+#[tokio::test]
+async fn native_document_preflight_close_retains_exact_partial_body() {
+    document_preflight_stages(PreflightFinish::CloseAfterPrefix).await;
+}
+
+#[tokio::test]
+async fn native_document_preflight_keepalive_admitted_after_page_close() {
+    document_preflight_stages(PreflightFinish::CloseBeforeOptions).await;
+}
+
+async fn document_preflight_stages(finish: PreflightFinish) {
+    let page_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_origin = format!("http://{}", page_listener.local_addr().unwrap());
+    let target_origin = format!("http://{}", target_listener.local_addr().unwrap());
+    let page_origin_for_server = page_origin.clone();
+    let (redirect_arrived_tx, redirect_arrived_rx) = tokio::sync::oneshot::channel();
+    let (redirect_release_tx, redirect_release_rx) = tokio::sync::oneshot::channel();
+    let (options_arrived_tx, options_arrived_rx) = tokio::sync::oneshot::channel();
+    let (head_tx, head_rx) = tokio::sync::oneshot::channel();
+    let (chunk_tx, chunk_rx) = tokio::sync::oneshot::channel();
+    let (tail_tx, tail_rx) = tokio::sync::oneshot::channel();
+    let keepalive = finish == PreflightFinish::CloseBeforeOptions;
+    let server = tokio::spawn(async move {
+        let (mut page, _) = page_listener.accept().await.unwrap();
+        read_preflight_request(&mut page).await;
+        let request_url = if keepalive {
+            "/redirect".into()
+        } else {
+            format!("{target_origin}/preflight")
+        };
+        let html = format!(
+            "<!doctype html><script>fetch('{request_url}',{{method:'PUT',headers:{{'X-Test':'1'}},body:'payload',keepalive:{keepalive}}}).catch(()=>{{}})</script>"
+        );
+        page.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{html}", html.len()
+        ).as_bytes()).await.unwrap();
+        if keepalive {
+            let (mut redirect, _) = page_listener.accept().await.unwrap();
+            assert!(
+                read_preflight_request(&mut redirect)
+                    .await
+                    .starts_with("PUT /redirect HTTP/1.1")
+            );
+            redirect_arrived_tx.send(()).unwrap();
+            redirect_release_rx.await.unwrap();
+            redirect.write_all(format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {target_origin}/preflight\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+        }
+        let (mut options, _) = target_listener.accept().await.unwrap();
+        let request = read_preflight_request(&mut options).await;
+        assert!(request.starts_with("OPTIONS /preflight HTTP/1.1"));
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("Access-Control-Request-Method: PUT"))
+        );
+        options_arrived_tx.send(()).unwrap();
+        if head_rx.await.is_err() {
+            return;
+        }
+        let (status, length) = if finish == PreflightFinish::Complete {
+            ("204 No Content", 0)
+        } else {
+            ("200 OK", 4)
+        };
+        options.write_all(format!(
+            "HTTP/1.1 {status}\r\nAccess-Control-Allow-Origin: {page_origin_for_server}\r\nAccess-Control-Allow-Methods: PUT\r\nAccess-Control-Allow-Headers: X-Test\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+        ).as_bytes()).await.unwrap();
+        if length > 0 {
+            chunk_rx.await.unwrap();
+            options.write_all(b"bo").await.unwrap();
+            if tail_rx.await.is_err() {
+                return;
+            }
+            options.write_all(b"dy").await.unwrap();
+        }
+        let (mut put, _) = target_listener.accept().await.unwrap();
+        assert!(
+            read_preflight_request(&mut put)
+                .await
+                .starts_with("PUT /preflight HTTP/1.1")
+        );
+        let mut body = [0; 7];
+        put.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"payload");
+        put.write_all(format!(
+            "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {page_origin_for_server}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+        ).as_bytes()).await.unwrap();
+    });
+
+    let service = BrowserService::start().unwrap();
+    let browser = service.handle();
+    let (context, contents) = context_with_contents(&service);
+    let (_, mut events) = browser.subscribe().unwrap();
+    let document = navigate(&context, contents, &format!("{page_origin}/page")).await;
+    if keepalive {
+        tokio::time::timeout(std::time::Duration::from_secs(5), redirect_arrived_rx)
+            .await
+            .expect("original PUT must precede Page retirement")
+            .unwrap();
+        context
+            .close_web_contents(contents)
+            .unwrap()
+            .close_async()
+            .await;
+        redirect_release_tx.send(()).unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), options_arrived_rx)
+        .await
+        .expect("the physical CORS preflight must reach the server")
+        .unwrap();
+    let (source, handle) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if let BrowserEvent::NetworkRequestStarted(occurrence) = event.event
+                && occurrence.owner == NetworkOwner::Document(document)
+                && let RendererNetworkOutputItem::Resource(item) = &occurrence.renderer.item
+                && let ScriptNetworkOutputItem::SubresourceRequestStarted(request) = item.as_ref()
+                && request.method() == "OPTIONS"
+            {
+                assert_eq!(request.keepalive(), keepalive);
+                return (occurrence.renderer.source.clone(), request.handle());
+            }
+        }
+    })
+    .await
+    .expect("native preflight admission must precede the held response");
+
+    if finish == PreflightFinish::CloseBeforeHead {
+        context
+            .close_web_contents(contents)
+            .unwrap()
+            .close_async()
+            .await;
+        drop(head_tx);
+    } else {
+        head_tx.send(()).unwrap();
+        let (completed, head) = next_preflight_stage(&mut events, document, &source, handle).await;
+        assert!(!completed);
+        let ScriptNetworkOutputItem::SubresourceResponseStarted(head) = head.as_ref() else {
+            panic!("head before body: {head:?}")
+        };
+        assert_eq!(
+            head.status(),
+            if finish == PreflightFinish::Complete {
+                204
+            } else {
+                200
+            }
+        );
+        if finish != PreflightFinish::Complete {
+            chunk_tx.send(()).unwrap();
+            let (completed, chunk) =
+                next_preflight_stage(&mut events, document, &source, handle).await;
+            assert!(!completed);
+            let ScriptNetworkOutputItem::SubresourceDataReceived(chunk) = chunk.as_ref() else {
+                panic!("body prefix before terminal: {chunk:?}")
+            };
+            assert_eq!(chunk.data_length(), 2);
+            if finish == PreflightFinish::CloseAfterPrefix {
+                context
+                    .close_web_contents(contents)
+                    .unwrap()
+                    .close_async()
+                    .await;
+                drop(tail_tx);
+            } else {
+                tail_tx.send(()).unwrap();
+                let (completed, tail) =
+                    next_preflight_stage(&mut events, document, &source, handle).await;
+                assert!(!completed);
+                let ScriptNetworkOutputItem::SubresourceDataReceived(tail) = tail.as_ref() else {
+                    panic!("tail before terminal: {tail:?}")
+                };
+                assert_eq!(tail.data_length(), 2);
+            }
+        }
+    }
+    let (completed, terminal) = next_preflight_stage(&mut events, document, &source, handle).await;
+    assert!(completed, "native terminal must be committed as completed");
+    let ScriptNetworkOutputItem::SubresourceBodyFinished(terminal) = terminal.as_ref() else {
+        panic!("terminal after transport: {terminal:?}")
+    };
+    match (finish, terminal.result()) {
+        (PreflightFinish::Complete, SubresourceBodyFinishedResult::Ready(body)) => {
+            assert!(body.clone_body_bytes().is_empty())
+        }
+        (PreflightFinish::CloseBeforeOptions, SubresourceBodyFinishedResult::Ready(body)) => {
+            assert_eq!(body.clone_body_bytes(), b"body")
+        }
+        (PreflightFinish::CloseBeforeHead, SubresourceBodyFinishedResult::Failed(error)) => {
+            assert!(!error.is_empty())
+        }
+        (
+            PreflightFinish::CloseAfterPrefix,
+            SubresourceBodyFinishedResult::FailedWithPartialBody {
+                error_text,
+                partial_body,
+            },
+        ) => {
+            assert!(!error_text.is_empty());
+            assert_eq!(partial_body.clone_body_bytes(), b"bo");
+        }
+        other => panic!("native preflight must retain its actual outcome: {other:?}"),
+    }
+    server.await.unwrap();
+    if finish == PreflightFinish::Complete {
+        context
+            .close_web_contents(contents)
+            .unwrap()
+            .close_async()
+            .await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if let BrowserEvent::NetworkSourceClosed { source: closed, .. } = &event.event
+                && *closed == source.identity()
+            {
+                break;
+            }
+            if let BrowserEvent::NetworkRequestStarted(ref occurrence)
+            | BrowserEvent::NetworkRequestCompleted(ref occurrence) = event.event
+            {
+                assert_ne!(
+                    crate::browser::network::request_key(&occurrence.renderer),
+                    Some((
+                        source.identity(),
+                        crate::browser::network::NetworkRequestIdentity::Resource(handle.get())
+                    )),
+                    "one admission and terminal per physical preflight"
+                );
+            }
+        }
+    })
+    .await
+    .expect("retired source must release its admitted preflight");
+    service.shutdown();
+}
+
+async fn read_preflight_request(stream: &mut tokio::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut byte = [0];
+    while !request.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).await.unwrap();
+        request.push(byte[0]);
+    }
+    String::from_utf8(request).unwrap()
+}
+
+async fn next_preflight_stage(
+    events: &mut crate::browser::BrowserEventReceiver,
+    document: DocumentHandle,
+    source: &crate::page::RendererNetworkSource,
+    handle: crate::page::SubresourceNetworkRequestHandle,
+) -> (bool, std::sync::Arc<ScriptNetworkOutputItem>) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if let BrowserEvent::NetworkSourceClosed { source: closed, .. } = &event.event {
+                assert_ne!(
+                    *closed,
+                    source.identity(),
+                    "source must retain its admitted preflight"
+                );
+            }
+            let completed = matches!(event.event, BrowserEvent::NetworkRequestCompleted(_));
+            let occurrence = match event.event {
+                BrowserEvent::NetworkActivity(occurrence)
+                | BrowserEvent::NetworkRequestCompleted(occurrence)
+                    if occurrence.owner == NetworkOwner::Document(document)
+                        && occurrence.renderer.source == *source =>
+                {
+                    occurrence
+                }
+                _ => continue,
+            };
+            if crate::browser::network::request_key(&occurrence.renderer)
+                == Some((
+                    source.identity(),
+                    crate::browser::network::NetworkRequestIdentity::Resource(handle.get()),
+                ))
+                && let RendererNetworkOutputItem::Resource(item) = &occurrence.renderer.item
+            {
+                return (completed, item.clone());
+            }
+        }
+    })
+    .await
+    .expect("native preflight stage must precede the next transport gate")
+}

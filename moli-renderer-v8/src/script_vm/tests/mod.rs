@@ -339,7 +339,6 @@ fn register_pending_window_fetch_for_test(
             resource_type: crate::types::SubresourceResourceType::Fetch,
             request_cookie_report: None,
         },
-        false,
     );
 
     if !matches!(stage, PendingWindowFetchTestStage::Pending) {
@@ -488,7 +487,6 @@ fn register_pending_window_fetch_with_connect_policy_for_test(
             resource_type: crate::types::SubresourceResourceType::Fetch,
             request_cookie_report: None,
         },
-        false,
     );
     (
         internal_id,
@@ -14148,6 +14146,11 @@ fn new_parsed_test_vm_with_loader_and_resource_completion_queue(
         .expect("script vm bootstrap should succeed")
         .finish()
         .map(|mut vm| {
+            vm.set_root_document_lifecycle(
+                crate::runtime::RendererDocumentLifecycleJournalHandle::new_initial(
+                    page_runtime_task_source.root_document().page_id,
+                ),
+            );
             vm.install_page_task_residence_for_executor_test(page_runtime_task_source);
             install_test_trusted_key_dispatcher(&mut vm);
             vm

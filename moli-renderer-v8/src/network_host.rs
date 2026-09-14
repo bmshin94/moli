@@ -30,7 +30,6 @@ use crate::network::ResourceRequestClient;
 pub(crate) use self::async_fetch::{
     fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer,
     fetch_browser_subresource_with_preflight_and_network_metadata,
-    fetch_browser_subresource_with_preflight_headers,
     fetch_browser_subresource_with_preflight_headers_and_observer, spawn_async_subresource_fetch,
     spawn_async_subresource_fetch_with_redirect_chain,
 };

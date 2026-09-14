@@ -34,6 +34,7 @@ pub(crate) async fn fetch_browser_subresource_with_preflight_and_network_metadat
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn fetch_browser_subresource_with_preflight_headers(
     loader: ResourceRequestClient,
     request: Request,
@@ -448,7 +449,7 @@ pub(crate) fn spawn_async_subresource_fetch(
     cancel_handle: Option<FetchCancelHandle>,
     preflight_request_headers: Vec<(String, String)>,
     internal_id: u64,
-    network_context: AsyncSubresourceNetworkContext,
+    preflight_observer: CorsPreflightNetworkObserver,
     request_url: url::Url,
     request_method: String,
     request_headers: Vec<(String, String)>,
@@ -463,7 +464,7 @@ pub(crate) fn spawn_async_subresource_fetch(
         preflight_request_headers,
         Vec::new(),
         internal_id,
-        network_context,
+        preflight_observer,
         request_url,
         request_method,
         request_headers,
@@ -480,15 +481,13 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
     preflight_request_headers: Vec<(String, String)>,
     initial_redirect_chain: Vec<RedirectInfo>,
     internal_id: u64,
-    network_context: AsyncSubresourceNetworkContext,
+    preflight_observer: CorsPreflightNetworkObserver,
     request_url: url::Url,
     request_method: String,
     request_headers: Vec<(String, String)>,
     request_body: Option<String>,
 ) {
     task_runner.spawn(async move {
-        let preflight_observer =
-            CorsPreflightNetworkObserver::new(completion_tx.clone(), network_context);
         let auth_requires_buffered_transport = request.auth_requires_buffered_transport();
         let requires_manual_preflight_redirects =
             browser_request_needs_manual_preflight_redirects(&request, &preflight_request_headers);
@@ -1021,8 +1020,54 @@ mod tests {
         Ok(())
     }
 
+    async fn expect_native_preflight(
+        queue: &mut RendererResourceCompletionTestHarness,
+        document_url: &Url,
+        request_url: &Url,
+        frame_id: Option<&str>,
+        status: u16,
+        resource_type: SubresourceResourceType,
+    ) -> Result<()> {
+        use crate::runtime::RendererNetworkOutputItem;
+        use moli_page_types::{ScriptNetworkOutputItem, SubresourceBodyFinishedResult};
+        let mut preflight_handle = None;
+        for stage in 0..3 {
+            let AsyncSubresourceFetchEvent::NativeNetwork(event) =
+                next_async_subresource_event(queue).await?
+            else {
+                anyhow::bail!("preflight must publish native request, response and terminal first");
+            };
+            let RendererNetworkOutputItem::Resource(item) = event.item() else {
+                anyhow::bail!("expected resource stage");
+            };
+            match (stage, item.as_ref()) {
+                (0, ScriptNetworkOutputItem::SubresourceRequestStarted(request)) => {
+                    assert_eq!(request.frame_id(), frame_id);
+                    assert_eq!(request.document_url(), document_url);
+                    assert_eq!(request.url(), request_url);
+                    assert_eq!(request.method(), "OPTIONS");
+                    assert_eq!(request.resource_type(), resource_type);
+                    preflight_handle = Some(request.handle());
+                }
+                (1, ScriptNetworkOutputItem::SubresourceResponseStarted(response)) => {
+                    assert_eq!(Some(response.handle()), preflight_handle);
+                    assert_eq!(response.status(), status);
+                }
+                (2, ScriptNetworkOutputItem::SubresourceBodyFinished(body)) => {
+                    assert_eq!(Some(body.handle()), preflight_handle);
+                    assert!(
+                        matches!(body.result(), SubresourceBodyFinishedResult::Ready(body) if body.clone_body_bytes().is_empty())
+                    );
+                }
+                _ => anyhow::bail!("unexpected native preflight stage {stage}: {item:?}"),
+            }
+        }
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn cors_preflight_emits_observed_record_before_actual_completion() -> Result<()> {
+    async fn cors_preflight_emits_native_stages_before_actual_completion() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let server = tokio::spawn(async move {
@@ -1093,11 +1138,12 @@ mod tests {
             Some(FetchCancelHandle::new()),
             request_headers.clone(),
             73,
-            AsyncSubresourceNetworkContext {
+            CorsPreflightNetworkObserver {
+                request: crate::runtime::RendererNetworkRequest::unobserved_for_test(),
+                observer: queue.sender().network_observer(),
                 frame_id: Some("FRAME-1".to_owned()),
-                document_url: document_url.clone(),
                 resource_type: SubresourceResourceType::Fetch,
-                policy_context: Default::default(),
+                keepalive: false,
             },
             request_url.clone(),
             "GET".to_owned(),
@@ -1105,20 +1151,15 @@ mod tests {
             None,
         );
 
-        match next_async_subresource_event(&mut queue).await? {
-            AsyncSubresourceFetchEvent::ObservedNetworkRecord(record) => {
-                assert_eq!(record.frame_id(), Some("FRAME-1"));
-                assert_eq!(record.document_url(), &document_url);
-                assert_eq!(record.url(), &request_url);
-                assert_eq!(record.method(), "OPTIONS");
-                assert_eq!(record.resource_type(), SubresourceResourceType::Fetch);
-                assert!(matches!(
-                    record.outcome(),
-                    crate::types::SubresourceNetworkOutcome::Success { status: 200, .. }
-                ));
-            }
-            other => anyhow::bail!("expected observed preflight record first, got {other:?}"),
-        }
+        expect_native_preflight(
+            &mut queue,
+            &document_url,
+            &request_url,
+            Some("FRAME-1"),
+            200,
+            SubresourceResourceType::Fetch,
+        )
+        .await?;
 
         let body_source_id = match next_async_subresource_event(&mut queue).await? {
             AsyncSubresourceFetchEvent::StreamingStarted(started) => {
@@ -1218,11 +1259,12 @@ mod tests {
             Vec::new(),
             initial_redirect_chain,
             74,
-            AsyncSubresourceNetworkContext {
+            CorsPreflightNetworkObserver {
+                request: crate::runtime::RendererNetworkRequest::unobserved_for_test(),
+                observer: queue.sender().network_observer(),
                 frame_id: None,
-                document_url: Url::parse(&format!("http://{addr}/page"))?,
                 resource_type: SubresourceResourceType::Fetch,
-                policy_context: Default::default(),
+                keepalive: false,
             },
             target_url.clone(),
             "GET".to_owned(),
@@ -1306,11 +1348,12 @@ mod tests {
             Some(FetchCancelHandle::new()),
             Vec::new(),
             41,
-            AsyncSubresourceNetworkContext {
+            CorsPreflightNetworkObserver {
+                request: crate::runtime::RendererNetworkRequest::unobserved_for_test(),
+                observer: queue.sender().network_observer(),
                 frame_id: None,
-                document_url: Url::parse("http://origin.test/page")?,
                 resource_type: SubresourceResourceType::Xhr,
-                policy_context: Default::default(),
+                keepalive: false,
             },
             request_url,
             "GET".to_owned(),
@@ -1413,11 +1456,12 @@ mod tests {
             Some(FetchCancelHandle::new()),
             request_headers.clone(),
             42,
-            AsyncSubresourceNetworkContext {
+            CorsPreflightNetworkObserver {
+                request: crate::runtime::RendererNetworkRequest::unobserved_for_test(),
+                observer: queue.sender().network_observer(),
                 frame_id: None,
-                document_url,
                 resource_type: SubresourceResourceType::Xhr,
-                policy_context: Default::default(),
+                keepalive: false,
             },
             request_url,
             "POST".to_owned(),
@@ -1574,11 +1618,12 @@ mod tests {
             Some(FetchCancelHandle::new()),
             request_headers.clone(),
             43,
-            AsyncSubresourceNetworkContext {
+            CorsPreflightNetworkObserver {
+                request: crate::runtime::RendererNetworkRequest::unobserved_for_test(),
+                observer: queue.sender().network_observer(),
                 frame_id: None,
-                document_url: document_url.clone(),
                 resource_type: SubresourceResourceType::Xhr,
-                policy_context: Default::default(),
+                keepalive: false,
             },
             request_url.clone(),
             "POST".to_owned(),
@@ -1589,18 +1634,15 @@ mod tests {
         head_sent_rx
             .await
             .expect("server should publish the redirected final response head");
-        match next_async_subresource_event(&mut queue).await? {
-            AsyncSubresourceFetchEvent::ObservedNetworkRecord(record) => {
-                assert_eq!(record.document_url(), &document_url);
-                assert_eq!(record.url().as_str(), target_url);
-                assert_eq!(record.method(), "OPTIONS");
-                assert!(matches!(
-                    record.outcome(),
-                    crate::types::SubresourceNetworkOutcome::Success { status: 204, .. }
-                ));
-            }
-            other => anyhow::bail!("expected redirected-hop preflight first, got {other:?}"),
-        }
+        expect_native_preflight(
+            &mut queue,
+            &document_url,
+            &Url::parse(&target_url)?,
+            None,
+            204,
+            SubresourceResourceType::Xhr,
+        )
+        .await?;
         let body_source_id = match next_async_subresource_event(&mut queue).await? {
             AsyncSubresourceFetchEvent::StreamingStarted(started) => {
                 assert_eq!(started.internal_id, 43);

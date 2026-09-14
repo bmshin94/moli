@@ -119,7 +119,10 @@ pub(super) fn dispatch_service_worker_xhr(
         cors_preflight_request_headers: prepared.cors_preflight_request_headers.clone(),
         request_cookie_report,
         network_context,
-        result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
+        result_tx: ServiceWorkerFetchResultSender::Page {
+            completion_tx: host.resource_completion_sender(),
+            network: host.pending_subresource_network_request(internal_id),
+        },
         request_client: prepared.resource_loader.request_client().clone(),
         resource_task_runner: prepared.resource_loader.task_runner(),
         cancel_handle,
@@ -315,12 +318,6 @@ pub(super) fn spawn_network_xhr_fetch(
         &prepared.method,
         prepared.credentials_mode,
     );
-    let network_context = AsyncSubresourceNetworkContext {
-        frame_id: prepared.frame_id.clone(),
-        document_url: prepared.document_url.clone(),
-        resource_type: SubresourceResourceType::Xhr,
-        policy_context: prepared.policy_context,
-    };
     let cancel_handle = moli_fetch::FetchCancelHandle::new();
     let internal_id = host.record_async_subresource_xhr(
         prepared.execution_context,
@@ -352,7 +349,7 @@ pub(super) fn spawn_network_xhr_fetch(
         Some(cancel_handle),
         prepared.cors_preflight_request_headers,
         internal_id,
-        network_context,
+        host.pending_subresource_preflight_observer(internal_id),
         prepared.resolved_url,
         prepared.method,
         prepared.request_headers,

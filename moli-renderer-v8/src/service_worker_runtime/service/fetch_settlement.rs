@@ -296,17 +296,26 @@ impl ServiceWorkerRuntimeService {
             ServiceWorkerFetchResultSender::CspReport(resource) => {
                 resource.fetch(job.request_client, request, job.cancel_handle);
             }
-            ServiceWorkerFetchResultSender::Page(completion_tx) => {
+            ServiceWorkerFetchResultSender::Page {
+                completion_tx,
+                network,
+            } => {
                 crate::network_host::spawn_async_subresource_fetch_with_redirect_chain(
                     job.resource_task_runner,
-                    completion_tx,
+                    completion_tx.clone(),
                     job.request_client,
                     request,
                     Some(job.cancel_handle),
                     job.cors_preflight_request_headers,
                     job.redirect_chain,
                     job.internal_id,
-                    job.network_context,
+                    crate::network_host::CorsPreflightNetworkObserver {
+                        request: network,
+                        observer: completion_tx.network_observer(),
+                        frame_id: job.network_context.frame_id,
+                        resource_type: job.network_context.resource_type,
+                        keepalive: job.metadata.keepalive,
+                    },
                     job.request_url,
                     job.request_method,
                     job.request_headers,
@@ -638,7 +647,7 @@ impl ServiceWorkerRuntimeService {
                 ));
                 return;
             }
-            ServiceWorkerFetchResultSender::Page(completion_tx) => completion_tx,
+            ServiceWorkerFetchResultSender::Page { completion_tx, .. } => completion_tx,
         };
         if let Some(body_source_id) = job.streaming_body_source_id.take() {
             let _ = completion_tx.send_async_subresource_event(
@@ -696,7 +705,7 @@ impl ServiceWorkerRuntimeService {
                 let _ = completion_tx.send(ServiceWorkerDirectFetchResult::Failure(message));
                 return;
             }
-            ServiceWorkerFetchResultSender::Page(completion_tx) => completion_tx,
+            ServiceWorkerFetchResultSender::Page { completion_tx, .. } => completion_tx,
         };
         if let Some(body_source_id) = job.streaming_body_source_id.take() {
             let _ = completion_tx.send_async_subresource_event(
@@ -1172,7 +1181,10 @@ mod tests {
                     resource_type,
                     policy_context: Default::default(),
                 },
-                result_tx: ServiceWorkerFetchResultSender::Page(completion_tx),
+                result_tx: ServiceWorkerFetchResultSender::Page {
+                    completion_tx,
+                    network: crate::runtime::RendererNetworkRequest::unobserved_for_test(),
+                },
                 request_client: test_request_client(service),
                 resource_task_runner: test_resource_task_runner(),
                 cancel_handle: moli_fetch::FetchCancelHandle::new(),
@@ -1913,7 +1925,10 @@ mod tests {
                 resource_type: crate::types::SubresourceResourceType::Fetch,
                 policy_context: Default::default(),
             },
-            result_tx: ServiceWorkerFetchResultSender::Page(completion_queue.sender()),
+            result_tx: ServiceWorkerFetchResultSender::Page {
+                completion_tx: completion_queue.sender(),
+                network: crate::runtime::RendererNetworkRequest::unobserved_for_test(),
+            },
             request_client: test_request_client(&service),
             resource_task_runner: test_resource_task_runner(),
             cancel_handle: moli_fetch::FetchCancelHandle::new(),

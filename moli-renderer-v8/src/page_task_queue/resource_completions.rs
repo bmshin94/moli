@@ -370,6 +370,16 @@ impl RendererResourceCompletionSender {
         self.sender.send(make_completion(self.root_document))
     }
 
+    pub(crate) fn network_observer(
+        &self,
+    ) -> std::sync::Arc<dyn Fn(crate::runtime::RendererNetworkObservation) + Send + Sync> {
+        let completion = self.clone();
+        std::sync::Arc::new(move |event| {
+            let _ = completion
+                .send_async_subresource_event(AsyncSubresourceFetchEvent::NativeNetwork(event));
+        })
+    }
+
     pub(crate) fn send_async_subresource(
         &self,
         completion: AsyncSubresourceFetchCompletion,

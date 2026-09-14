@@ -522,7 +522,7 @@ impl ScriptVm {
             network_partition_key,
             policy_context,
             continuation,
-            deferred_request_started,
+            network_request,
         } = pending;
         let pending = match continuation {
             PendingSubresourceContinuation::WebSocket(connection) => {
@@ -577,7 +577,7 @@ impl ScriptVm {
                     network_partition_key,
                     policy_context,
                     continuation: PendingSubresourceContinuation::CspReport { client_id, network },
-                    deferred_request_started,
+                    network_request,
                 };
                 if !self._context_host.borrow().network_offline() {
                     let maybe_pending = self.continue_csp_report_via_service_worker(
@@ -625,7 +625,7 @@ impl ScriptVm {
                 network_partition_key,
                 policy_context,
                 continuation,
-                deferred_request_started,
+                network_request,
             },
         };
         let request_url = url.unwrap_or_else(|| pending.info.url.clone());
@@ -1112,7 +1112,7 @@ impl ScriptVm {
             network_partition_key,
             policy_context,
             continuation,
-            deferred_request_started,
+            network_request,
         } = pending;
         let pending = match continuation {
             PendingSubresourceContinuation::WebSocket(connection) => {
@@ -1131,7 +1131,7 @@ impl ScriptVm {
                 network_partition_key,
                 policy_context,
                 continuation,
-                deferred_request_started,
+                network_request,
             },
         };
         let info = pending.info.clone();
@@ -1171,7 +1171,7 @@ impl ScriptVm {
             network_partition_key,
             policy_context,
             continuation,
-            deferred_request_started,
+            network_request,
         } = pending;
         let pending = match continuation {
             PendingSubresourceContinuation::WebSocket(connection) => {
@@ -1211,7 +1211,7 @@ impl ScriptVm {
                 network_partition_key,
                 policy_context,
                 continuation,
-                deferred_request_started,
+                network_request,
             },
         };
         let info = pending.info.clone();
@@ -1496,7 +1496,7 @@ impl ScriptVm {
 
     fn resolve_network_only_subresource_fetch(
         &mut self,
-        mut pending: PendingSubresourceFetchState,
+        pending: PendingSubresourceFetchState,
         request_url: Url,
         request_method: String,
         request_headers: Vec<(String, String)>,
@@ -1517,9 +1517,6 @@ impl ScriptVm {
             detached_window_fetch || pending.execution_context.is_window_network_only(),
             "network-only completion must be an accepted fire-and-forget request or detached Fetch"
         );
-        self._context_host
-            .borrow_mut()
-            .record_deferred_pending_subresource_request_started(&mut pending);
 
         let result = if detached_window_fetch {
             result.and_then(|response| {
@@ -1625,7 +1622,7 @@ impl ScriptVm {
     #[allow(clippy::too_many_arguments)]
     fn resolve_pending_event_source_fetch(
         &mut self,
-        mut pending: PendingSubresourceFetchState,
+        pending: PendingSubresourceFetchState,
         request_url: Url,
         request_method: String,
         request_headers: Vec<(String, String)>,
@@ -1635,9 +1632,6 @@ impl ScriptVm {
         network_error_text: Option<String>,
         result: std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) -> Result<AsyncSubresourceFetchBodyActivity> {
-        self._context_host
-            .borrow_mut()
-            .record_deferred_pending_subresource_request_started(&mut pending);
         let context_host = self._context_host.clone();
         self.renderer_document_isolate
             .with_entered_renderer_document_isolate(|isolate| {
@@ -1870,7 +1864,7 @@ impl ScriptVm {
 
     fn resolve_pending_subresource_fetch_body(
         &mut self,
-        mut pending: PendingSubresourceFetchState,
+        pending: PendingSubresourceFetchState,
         request_url: Url,
         request_method: String,
         request_headers: Vec<(String, String)>,
@@ -1930,9 +1924,6 @@ impl ScriptVm {
                 result,
             );
         }
-        self._context_host
-            .borrow_mut()
-            .record_deferred_pending_subresource_request_started(&mut pending);
         let context_host = self._context_host.clone();
         let mut completed_web_font = None;
         let result = self.renderer_document_isolate.with_entered_renderer_document_isolate(|isolate| {
@@ -2381,6 +2372,7 @@ impl ScriptVm {
             _ => None,
         };
         let completion_tx = self._context_host.borrow().resource_completion_sender();
+        let preflight_observer = state.pending.preflight_observer(completion_tx.clone());
         {
             let mut host = self._context_host.borrow_mut();
             host.begin_active_subresource_request();
@@ -2396,10 +2388,13 @@ impl ScriptVm {
                 )
                 .await
             } else {
-                crate::network_host::fetch_browser_subresource_with_preflight_and_network_metadata(
+                let preflight_headers = request.request_headers.clone();
+                crate::network_host::fetch_browser_subresource_with_preflight_headers_and_observer(
                     request_client,
                     request,
                     cancel_handle,
+                    preflight_headers,
+                    Some(&preflight_observer),
                 )
                 .await
                 .map(|observed| {
@@ -2733,12 +2728,6 @@ impl ScriptVm {
                     .record_native_resource_observation(observation);
                 Ok(AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered)
             }
-            AsyncSubresourceFetchEvent::ObservedNetworkRecord(record) => {
-                self._context_host
-                    .borrow_mut()
-                    .record_subresource_network(*record);
-                Ok(AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered)
-            }
             AsyncSubresourceFetchEvent::StreamingStarted(started) => {
                 self.start_streaming_async_subresource_fetch_body(*started)
             }
@@ -2769,7 +2758,7 @@ impl ScriptVm {
 
     fn start_network_only_subresource_stream(
         &mut self,
-        mut pending: PendingSubresourceFetchState,
+        pending: PendingSubresourceFetchState,
         started: crate::types::AsyncSubresourceStreamingStarted,
     ) -> Result<()> {
         let detached_window_fetch = pending.continuation.is_detached_window_fetch();
@@ -2777,9 +2766,6 @@ impl ScriptVm {
             detached_window_fetch || pending.execution_context.is_window_network_only(),
             "network-only stream must be an accepted fire-and-forget request or detached Fetch"
         );
-        self._context_host
-            .borrow_mut()
-            .record_deferred_pending_subresource_request_started(&mut pending);
 
         let security_error = detached_window_fetch
             .then(|| {
@@ -2892,7 +2878,7 @@ impl ScriptVm {
             trace_fields,
             trace_started,
         );
-        let Some(mut pending) = self
+        let Some(pending) = self
             ._context_host
             .borrow_mut()
             .take_pending_subresource_fetch(started.internal_id)
@@ -2933,9 +2919,6 @@ impl ScriptVm {
             );
             return Ok(AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered);
         }
-        self._context_host
-            .borrow_mut()
-            .record_deferred_pending_subresource_request_started(&mut pending);
 
         let pending_context_ptr: *const v8::Global<v8::Context> = pending
             .execution_context
@@ -4622,11 +4605,6 @@ fn async_subresource_trace_fields_for_event(
         },
         AsyncSubresourceFetchEvent::NativeNetwork(_) => AsyncSubresourceTraceFields {
             event_kind: Some("native_network"),
-            ..AsyncSubresourceTraceFields::default()
-        },
-        AsyncSubresourceFetchEvent::ObservedNetworkRecord(record) => AsyncSubresourceTraceFields {
-            event_kind: Some("observed_network_record"),
-            resource_type: Some(record.resource_type()),
             ..AsyncSubresourceTraceFields::default()
         },
         AsyncSubresourceFetchEvent::StreamingStarted(started) => AsyncSubresourceTraceFields {

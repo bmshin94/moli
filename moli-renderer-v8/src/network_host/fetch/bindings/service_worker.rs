@@ -41,14 +41,6 @@ pub(super) fn dispatch_service_worker_fetch(
         resource_type: SubresourceResourceType::Fetch,
         policy_context: prepared.policy_context,
     };
-    let requires_preflight = prepared.request_mode != moli_fetch::RequestMode::NoCors
-        && crate::network_host::cors_preflight_request_headers(
-            &prepared.document_url,
-            &prepared.resolved_url,
-            &prepared.method,
-            &prepared.cors_preflight_request_headers,
-        )
-        .is_some();
     let request_body_text = request_body_text(&prepared.body);
     let internal_id = host.record_async_subresource_fetch(
         prepared.fetch_context.duplicate(scope),
@@ -75,7 +67,6 @@ pub(super) fn dispatch_service_worker_fetch(
             resource_type: SubresourceResourceType::Fetch,
             request_cookie_report: request_cookie_report.clone(),
         },
-        requires_preflight,
     );
     let request = host.service_worker_fetch_request(
         client_id,
@@ -103,7 +94,10 @@ pub(super) fn dispatch_service_worker_fetch(
         cors_preflight_request_headers: prepared.cors_preflight_request_headers.clone(),
         request_cookie_report,
         network_context,
-        result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
+        result_tx: ServiceWorkerFetchResultSender::Page {
+            completion_tx: host.resource_completion_sender(),
+            network: host.pending_subresource_network_request(internal_id),
+        },
         request_client: prepared.resource_loader.request_client().clone(),
         resource_task_runner: prepared.resource_loader.task_runner(),
         cancel_handle,

@@ -4745,7 +4745,9 @@ document.body.setAttribute('data-error-state', [
                 .vm()
                 .resource_completion_sender_for_test()
                 .send_async_subresource_event(
-                    crate::types::AsyncSubresourceFetchEvent::ObservedNetworkRecord(Box::new(
+                    crate::types::AsyncSubresourceFetchEvent::NativeNetwork(
+                        crate::runtime::RendererNetworkRequest::unobserved_for_test().report(
+                        crate::types::ScriptNetworkOutputItem::SubresourceNetworkRecord(Box::new(
                         crate::types::SubresourceNetworkRecord::failure(
                             None,
                             Url::parse("https://example.test/").unwrap(),
@@ -4756,7 +4758,7 @@ document.body.setAttribute('data-error-state', [
                             crate::types::SubresourceResourceType::Fetch,
                             "phase-one typed terminal".to_owned(),
                         ),
-                    )),
+                    )))),
                 )
                 .expect("async-subresource terminal should enqueue on Networking");
             let runtime = ConcurrentParseTimeRuntime::new_parser_owner(

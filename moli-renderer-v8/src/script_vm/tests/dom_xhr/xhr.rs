@@ -1976,7 +1976,8 @@ async fn streaming_subresource_finish_preserves_response_head_cache_state() {
                                 load_client,
                                 None,
                             ),
-                            deferred_request_started: false,
+                            network_request:
+                                crate::runtime::RendererNetworkRequest::unobserved_for_test(),
                         },
                         request_url: request_url.clone(),
                         request_method: "GET".to_owned(),
@@ -2150,9 +2151,10 @@ async fn streaming_fetch_body_error_records_response_started_then_body_failed() 
         .into_items()
         .collect();
     assert!(
-        items.is_empty(),
-        "Request-stage interception has not dispatched a request: {items:?}"
+        matches!(items.as_slice(), [crate::types::ScriptNetworkOutputItem::SubresourceRequestStarted(request)] if request.handle() == request_handle),
+        "the request is admitted once before interception: {items:?}"
     );
+    items.clear();
 
     // Exercise the real HEAD transition, not an already-streaming fixture
     // which bypasses response publication and expects it at failure time.
@@ -2318,7 +2320,8 @@ fn install_streaming_fetch_response_fixture(
                             load_client,
                             Some(cancel_handle),
                         ),
-                        deferred_request_started: false,
+                        network_request:
+                            crate::runtime::RendererNetworkRequest::unobserved_for_test(),
                     },
                     request_url: request_url.clone(),
                     request_method: "GET".to_owned(),
@@ -2421,7 +2424,8 @@ async fn streaming_fetch_body_cancel_aborts_streaming_subresource() {
                                 load_client,
                                 Some(cancel_handle_for_state),
                             ),
-                            deferred_request_started: false,
+                            network_request:
+                                crate::runtime::RendererNetworkRequest::unobserved_for_test(),
                         },
                         request_url: request_url.clone(),
                         request_method: "GET".to_owned(),
@@ -3046,7 +3050,8 @@ async fn streaming_xhr_materialization_failure_errors_body_source_before_close()
                             load_client,
                             None,
                         ),
-                        deferred_request_started: false,
+                        network_request:
+                            crate::runtime::RendererNetworkRequest::unobserved_for_test(),
                     },
                     request_url: request_url.clone(),
                     request_method: "GET".to_owned(),

@@ -473,6 +473,7 @@ impl PendingSubresourceExecutionContext {
 
 pub(super) struct PendingSubresourceFetchState {
     pub(super) info: PendingSubresourceFetchInfo,
+    pub(super) network_request: crate::runtime::RendererNetworkRequest,
     pub(super) load: crate::network::loads::ResourceLoadLease,
     pub(super) execution_context: PendingSubresourceExecutionContext,
     pub(super) credentials_mode: moli_fetch::RequestCredentialsMode,
@@ -480,12 +481,23 @@ pub(super) struct PendingSubresourceFetchState {
     pub(super) network_partition_key: Option<String>,
     pub(super) policy_context: SubresourcePolicyContext,
     pub(super) continuation: PendingSubresourceContinuation,
-    // Window fetches that need CORS preflight emit the actual request-start
-    // after the preflight record, not when the pending fetch is registered.
-    pub(super) deferred_request_started: bool,
 }
 
 impl PendingSubresourceFetchState {
+    pub(crate) fn preflight_observer(
+        &self,
+        completion_tx: crate::page_task_queue::RendererResourceCompletionSender,
+    ) -> crate::network_host::CorsPreflightNetworkObserver {
+        crate::network_host::CorsPreflightNetworkObserver {
+            request: self.network_request.clone(),
+            observer: completion_tx.network_observer(),
+            frame_id: self.info.frame_id.clone(),
+            resource_type: self.info.resource_type,
+            keepalive: self.load.disposition()
+                == crate::network::loads::ResourceLoadDisposition::Keepalive,
+        }
+    }
+
     pub(super) fn detach_keepalive_window_fetch(&mut self) -> bool {
         let PendingSubresourceExecutionContext::WindowFetch(context) = &self.execution_context
         else {
@@ -638,7 +650,6 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
     },
     /// A producer-captured network fact has no live JS request owner. It is
     /// still namespaced by the root Document in the Page task envelope.
-    ObservedNetworkRecord,
     NativeNetwork,
 }
 
@@ -646,7 +657,6 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
 pub(super) enum AsyncSubresourceFetchEvent {
     Completion(Box<AsyncSubresourceFetchCompletion>),
     CspReport(Box<crate::network_host::CompletedCspReport>),
-    ObservedNetworkRecord(Box<SubresourceNetworkRecord>),
     NativeNetwork(crate::runtime::RendererNetworkObservation),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
     StreamingChunk(AsyncSubresourceStreamingChunk),
@@ -663,9 +673,6 @@ impl AsyncSubresourceFetchEvent {
                 internal_id: completion.internal_id(),
             },
             Self::NativeNetwork(_) => AsyncSubresourceFetchEventTarget::NativeNetwork,
-            Self::ObservedNetworkRecord(_) => {
-                AsyncSubresourceFetchEventTarget::ObservedNetworkRecord
-            }
             Self::StreamingStarted(started) => AsyncSubresourceFetchEventTarget::StreamingStart {
                 internal_id: started.internal_id,
                 body_source_id: started.body_source_id,
