@@ -1846,11 +1846,16 @@ fn body_materialization_value<'s>(
     kind: PendingBodyMaterializationKind,
 ) -> Result<v8::Local<'s, v8::Value>, v8::Local<'s, v8::Value>> {
     match kind {
-        PendingBodyMaterializationKind::Text => v8_string(scope, &String::from_utf8_lossy(bytes))
-            .map(Into::into)
-            .ok_or_else(|| v8::undefined(scope).into()),
+        PendingBodyMaterializationKind::Text => {
+            // Fetch decodes as UTF-8 while removing exactly one initial BOM,
+            // independent of the body's MIME type or any UTF-16 byte marker.
+            let text = encoding_rs::UTF_8.decode_with_bom_removal(bytes).0;
+            v8_string(scope, &text)
+                .map(Into::into)
+                .ok_or_else(|| v8::undefined(scope).into())
+        }
         PendingBodyMaterializationKind::Json => {
-            let text = String::from_utf8_lossy(bytes).into_owned();
+            let text = encoding_rs::UTF_8.decode_with_bom_removal(bytes).0;
             v8_json_parse(scope, &text).ok_or_else(|| {
                 v8_string(scope, "SyntaxError: JSON parse error")
                     .map(|message| v8::Exception::syntax_error(scope, message))
