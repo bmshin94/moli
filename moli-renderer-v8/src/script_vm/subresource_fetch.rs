@@ -513,6 +513,10 @@ impl ScriptVm {
             .borrow_mut()
             .take_pending_subresource_fetch(internal_id)
             .ok_or_else(|| anyhow!("unknown pending subresource fetch `{internal_id}`"))?;
+        if let Some(body) = &body {
+            pending.info.request_body = body.clone();
+            pending.info.request_body_bytes = body.as_ref().map(|body| body.as_bytes().to_vec());
+        }
         if let PendingSubresourceContinuation::CspReport { network, .. }
         | PendingSubresourceContinuation::Beacon(network) = &pending.continuation
         {
@@ -531,10 +535,6 @@ impl ScriptVm {
             }
             if let Some(headers) = &headers {
                 info.request_headers = headers.clone();
-            }
-            if let Some(body) = &body {
-                info.request_body = body.clone();
-                info.request_body_bytes = body.as_ref().map(|body| body.as_bytes().to_vec());
             }
             if changed {
                 network.update_request(|request| {
@@ -694,15 +694,10 @@ impl ScriptVm {
         // up the ambient Page loader here would silently rebind policy/backend
         // to a newer Document identity.
         let loader = pending.load.request_client();
-        let request_body_bytes = match &pending.continuation {
-            PendingSubresourceContinuation::CspReport { .. }
-            | PendingSubresourceContinuation::Beacon(_) => pending.info.request_body_bytes.clone(),
-            _ => request_body.as_ref().map(|body| body.as_bytes().to_vec()),
-        };
         let mut request = moli_fetch::Request::new_bytes(
             &request_method,
             request_url.as_str(),
-            request_body_bytes,
+            pending.info.request_body_bytes.clone(),
             request_headers.clone(),
         )?
         .with_initiator_url(&pending.info.document_url)
@@ -935,10 +930,10 @@ impl ScriptVm {
             response: _,
         } = pending;
         let loader = pending_fetch.load.request_client();
-        let mut request = moli_fetch::Request::new(
+        let mut request = moli_fetch::Request::new_bytes(
             &request_method,
             request_url.as_str(),
-            request_body.clone(),
+            pending_fetch.info.request_body_bytes.clone(),
             original_request_headers.clone(),
         )?
         .with_initiator_url(&pending_fetch.info.document_url)
