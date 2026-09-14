@@ -374,7 +374,7 @@ async fn fetch_browser_subresource_raw_stream_with_manual_preflight_redirects(
     cancel_handle: Option<FetchCancelHandle>,
     preflight_request_headers: Vec<(String, String)>,
     preflight_observer: Option<&CorsPreflightNetworkObserver>,
-) -> Result<NetworkFetchResult<StreamingRawResponse>, String> {
+) -> Result<NetworkFetchResult<StreamingRawResponse>, ResourceResponseFailure> {
     let mut redirects = ManualCorsRedirectState::new(request, preflight_request_headers);
 
     loop {
@@ -391,15 +391,21 @@ async fn fetch_browser_subresource_raw_stream_with_manual_preflight_redirects(
             .map_err(format_network_error)?;
         let network_extra_info_available = observed.request_observation().is_some();
         let head = observed.response().head();
-        match redirects.advance(head, network_extra_info_available)? {
-            ManualCorsRedirectTransition::FinalResponse => {
+        match redirects.advance(head, network_extra_info_available) {
+            Ok(ManualCorsRedirectTransition::FinalResponse) => {
                 let redirect_chain = redirects.into_redirect_chain();
                 observed.response_mut().redirected = !redirect_chain.is_empty();
                 observed.response_mut().redirect_chain = redirect_chain;
                 return Ok(observed);
             }
-            ManualCorsRedirectTransition::ManualResponse => return Ok(observed),
-            ManualCorsRedirectTransition::FollowedRedirect => {}
+            Ok(ManualCorsRedirectTransition::ManualResponse) => return Ok(observed),
+            Ok(ManualCorsRedirectTransition::FollowedRedirect) => {}
+            Err(message) => {
+                let redirect_chain = redirects.into_redirect_chain();
+                observed.response_mut().redirected = !redirect_chain.is_empty();
+                observed.response_mut().redirect_chain = redirect_chain;
+                return Err(rejected_resource_response(observed, message));
+            }
         }
 
         // Redirect bodies are not exposed to Fetch/XHR. Finish this hop before
@@ -473,7 +479,7 @@ pub(crate) async fn fetch_browser_subresource_raw_stream_with_preflight_headers_
     cancel_handle: Option<FetchCancelHandle>,
     preflight_request_headers: Vec<(String, String)>,
     preflight_observer: Option<&CorsPreflightNetworkObserver>,
-) -> Result<NetworkFetchResult<StreamingRawResponse>, String> {
+) -> Result<NetworkFetchResult<StreamingRawResponse>, ResourceResponseFailure> {
     // Borrow the loader so its fetch runtime stays alive until the caller drains
     // and finishes the returned StreamingRawResponse.
     if browser_request_needs_manual_preflight_redirects(&request, &preflight_request_headers) {
@@ -500,8 +506,35 @@ pub(crate) async fn fetch_browser_subresource_raw_stream_with_preflight_headers_
         .fetch_raw_stream_with_cancel_and_network_metadata(request, cancel_handle)
         .await
         .map_err(format_network_error)?;
-    validate_redirect_mode_response_head(&result.response().head(), redirect_mode)?;
+    if let Err(message) =
+        validate_redirect_mode_response_head(&result.response().head(), redirect_mode)
+    {
+        return Err(rejected_resource_response(result, message));
+    }
     Ok(result)
+}
+
+/// A policy rejection happens at the received head. Preserve those facts and
+/// drop the reader immediately; waiting for a rejected body would delay failure.
+fn rejected_resource_response(
+    observed: NetworkFetchResult<StreamingRawResponse>,
+    message: String,
+) -> ResourceResponseFailure {
+    let (mut response, request) = observed.into_parts();
+    response.cancellation_handle().cancel();
+    let mut body = crate::types::SubresourceResponseBodyWriter::default();
+    while let Some(chunk) = response.try_next_chunk() {
+        body.append(&chunk);
+    }
+    ResourceResponseFailure::PartialBody {
+        message,
+        response: Arc::new(ResourceResponseHead {
+            status_text: None,
+            head: response.head(),
+            network_request_headers: request.map(|request| request.into_headers()),
+        }),
+        body: body.finish(),
+    }
 }
 
 fn format_network_error(error: anyhow::Error) -> String {
@@ -629,7 +662,7 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
         let mut body_source_id = None;
         let mut network_request_headers = None;
         let result = match observed {
-            Err(message) => Err(ResourceResponseFailure::Request(message)),
+            Err(error) => Err(error),
             Ok(observed) => {
                 let (mut response, request_observation) = observed.into_parts();
                 network_request_headers =
@@ -803,6 +836,51 @@ mod tests {
         net::TcpListener,
     };
     use url::Url;
+
+    #[test]
+    fn rejected_response_retains_queued_bytes_without_waiting_for_completion() {
+        let (body, received) = tokio::sync::mpsc::unbounded_channel();
+        body.send(b"prefix".to_vec()).unwrap();
+        body.send(vec![0, 128, 255]).unwrap();
+        let (_complete, completion) = tokio::sync::oneshot::channel();
+        let cancel = FetchCancelHandle::new();
+        let response = StreamingRawResponse::new(
+            Url::parse("https://rejected.test/redirect").unwrap(),
+            302,
+            vec![("location".into(), "/next".into())],
+            None,
+            Vec::new(),
+            false,
+            Vec::new(),
+            received,
+            cancel.clone(),
+            completion,
+        );
+        let failure = rejected_resource_response(
+            NetworkFetchResult::new(response, None),
+            "redirect rejected".into(),
+        );
+        assert!(
+            cancel.is_cancelled(),
+            "reject the open transport before returning"
+        );
+        assert!(
+            body.send(b"late".to_vec()).is_err(),
+            "no late body consumer"
+        );
+        let ResourceResponseFailure::PartialBody {
+            message,
+            response,
+            body,
+        } = failure
+        else {
+            panic!("rejection retains its physical response")
+        };
+        assert_eq!(message, "redirect rejected");
+        assert_eq!(response.head.status, 302);
+        assert_eq!(response.head.headers, [("location".into(), "/next".into())]);
+        assert_eq!(body.clone_body_bytes(), b"prefix\0\x80\xff");
+    }
 
     #[test]
     fn cancelled_resource_does_not_run_late_response_policy() {

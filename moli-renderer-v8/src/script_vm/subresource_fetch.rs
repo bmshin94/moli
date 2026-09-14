@@ -2129,7 +2129,7 @@ impl ScriptVm {
                         Err(error) => Err(response_stream.failure(format!("{error:#}"))),
                     }
                 }
-                Err(message) => Err(ResourceResponseFailure::Request(message)),
+                Err(error) => Err(error),
             };
             let completion = AsyncSubresourceFetchCompletion {
                 internal_id,

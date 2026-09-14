@@ -346,10 +346,10 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                             ));
                             return;
                         }
-                        Err(error) => (
-                            Err(ResourceResponseFailure::from(format!("fetch: {error}"))),
-                            None,
-                        ),
+                        Err(error) => {
+                            let message = format!("fetch: {error}");
+                            (Err(error.with_message(message)), None)
+                        }
                     }
                 }
                 Err(error) => (
@@ -580,10 +580,10 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
                         )
                         .await
                     }
-                    Err(error) => (
-                        Err(ResourceResponseFailure::from(format!("xhr: {error}"))),
-                        None,
-                    ),
+                    Err(error) => {
+                        let message = format!("xhr: {error}");
+                        (Err(error.with_message(message)), None)
+                    }
                 }
             }
             Err(error) => (Err(ResourceResponseFailure::from(error)), None),

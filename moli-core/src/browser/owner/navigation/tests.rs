@@ -16,6 +16,7 @@ use url::Url;
 mod document_network_stages;
 mod late_csp_reports;
 mod network_stages;
+mod rejected_responses;
 
 #[derive(Default)]
 struct NativeWorkerNetworkRecords(
