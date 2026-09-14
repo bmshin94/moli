@@ -1482,9 +1482,7 @@ impl JsContextHost {
             .streaming_subresource_fetches
             .remove(&internal_id)
             .expect("streaming subresource id was selected from the same map");
-        streaming.pending.load.cancel();
-        self.browser_context_runtime
-            .abort_service_worker_fetch(internal_id);
+        self.cancel_subresource_load(&streaming.pending, None);
         self.record_streaming_subresource_fetch_failure(
             streaming,
             crate::network_host::ABORTED_ERROR_TEXT.to_owned(),
@@ -1591,10 +1589,19 @@ impl JsContextHost {
             // queued completion, rather than close(), determines CDP's terminal.
             return true;
         }
-        let _ = self
-            .browser_context_runtime
-            .abort_service_worker_fetch(internal_id);
         self.abort_subresource_fetch(internal_id)
+    }
+
+    fn cancel_subresource_load(
+        &self,
+        pending: &PendingSubresourceFetchState,
+        reason: Option<crate::structured_clone::V8StructuredClonePayload>,
+    ) {
+        pending.load.cancel();
+        if let Some(response) = &pending.network {
+            self.browser_context_runtime
+                .abort_service_worker_fetch_with_reason(response, reason);
+        }
     }
 
     pub(crate) fn abort_subresource_fetch(&mut self, internal_id: u64) -> bool {
@@ -1603,7 +1610,7 @@ impl JsContextHost {
             self.pending_subresource_fetch_infos
                 .retain(|info| info.internal_id != internal_id);
             self.record_observable_abort_before_response(&pending);
-            pending.load.cancel();
+            self.cancel_subresource_load(&pending, None);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
@@ -1612,7 +1619,7 @@ impl JsContextHost {
 
         if let Some(running) = self.running_subresource_fetches.remove(&internal_id) {
             self.record_observable_abort_before_response(&running.pending);
-            running.pending.load.cancel();
+            self.cancel_subresource_load(&running.pending, None);
             self.finish_active_subresource_request();
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
@@ -1621,7 +1628,7 @@ impl JsContextHost {
         }
 
         if let Some(streaming) = self.streaming_subresource_fetches.remove(&internal_id) {
-            streaming.pending.load.cancel();
+            self.cancel_subresource_load(&streaming.pending, None);
             self.record_observable_stream_abort(streaming);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
@@ -1631,7 +1638,7 @@ impl JsContextHost {
 
         if let Some(pending) = self.pending_subresource_auths.remove(&internal_id) {
             self.record_observable_abort_before_response(&pending.pending);
-            pending.pending.load.cancel();
+            self.cancel_subresource_load(&pending.pending, None);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
@@ -1640,7 +1647,7 @@ impl JsContextHost {
 
         if let Some(pending) = self.pending_subresource_responses.remove(&internal_id) {
             self.record_observable_abort_after_response(&pending);
-            pending.pending.load.cancel();
+            self.cancel_subresource_load(&pending.pending, None);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
@@ -1709,9 +1716,6 @@ impl JsContextHost {
 
         let mut aborted = 0;
         for internal_id in ordinary_ids.iter().copied() {
-            let _ = self
-                .browser_context_runtime
-                .abort_service_worker_fetch(internal_id);
             aborted += usize::from(self.abort_subresource_fetch(internal_id));
         }
         #[cfg(test)]
@@ -1738,9 +1742,6 @@ impl JsContextHost {
 
         let mut retired = 0;
         for internal_id in internal_ids.iter().copied() {
-            let _ = self
-                .browser_context_runtime
-                .abort_service_worker_fetch(internal_id);
             retired += usize::from(self.abort_subresource_fetch(internal_id));
         }
         #[cfg(test)]
@@ -1798,9 +1799,6 @@ impl JsContextHost {
 
         let mut aborted = 0;
         for internal_id in abort_ids.iter().copied() {
-            let _ = self
-                .browser_context_runtime
-                .abort_service_worker_fetch(internal_id);
             aborted += usize::from(self.abort_subresource_fetch(internal_id));
         }
         #[cfg(test)]
@@ -2082,9 +2080,6 @@ impl JsContextHost {
 
         let mut retired = 0;
         for internal_id in internal_ids.iter().copied() {
-            let _ = self
-                .browser_context_runtime
-                .abort_service_worker_fetch(internal_id);
             retired += usize::from(self.abort_subresource_fetch(internal_id));
         }
         #[cfg(test)]
@@ -2137,9 +2132,6 @@ impl JsContextHost {
         internal_ids.dedup();
         let mut cancelled = 0;
         for internal_id in internal_ids {
-            let _ = self
-                .browser_context_runtime
-                .abort_service_worker_fetch(internal_id);
             cancelled += usize::from(self.abort_subresource_fetch(internal_id));
         }
         if cancelled != 0 {
@@ -2160,9 +2152,7 @@ impl JsContextHost {
         reason_payload: Option<crate::structured_clone::V8StructuredClonePayload>,
     ) -> bool {
         if let Some(pending) = self.pending_subresource_fetches.remove(&internal_id) {
-            pending.load.cancel();
-            self.browser_context_runtime
-                .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
+            self.cancel_subresource_load(&pending, reason_payload);
             reject_fetch_continuation(scope, pending.continuation, reason);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
@@ -2171,9 +2161,7 @@ impl JsContextHost {
         }
 
         if let Some(running) = self.running_subresource_fetches.remove(&internal_id) {
-            running.pending.load.cancel();
-            self.browser_context_runtime
-                .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
+            self.cancel_subresource_load(&running.pending, reason_payload);
             reject_fetch_continuation(scope, running.pending.continuation, reason);
             self.finish_active_subresource_request();
             self.record_pending_subresource_continue_event(
@@ -2183,9 +2171,7 @@ impl JsContextHost {
         }
 
         if let Some(streaming) = self.streaming_subresource_fetches.remove(&internal_id) {
-            streaming.pending.load.cancel();
-            self.browser_context_runtime
-                .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
+            self.cancel_subresource_load(&streaming.pending, reason_payload);
             // Headers-first fetch may already have resolved the Response. In
             // that state aborting must error the body stream/materialization
             // promise, not only the original fetch continuation.
@@ -2207,9 +2193,7 @@ impl JsContextHost {
 
         if let Some(auth) = self.pending_subresource_auths.remove(&internal_id) {
             let pending = auth.pending;
-            pending.load.cancel();
-            self.browser_context_runtime
-                .abort_service_worker_fetch_with_reason(internal_id, reason_payload.clone());
+            self.cancel_subresource_load(&pending, reason_payload);
             reject_fetch_continuation(scope, pending.continuation, reason);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
@@ -2219,9 +2203,7 @@ impl JsContextHost {
 
         if let Some(response) = self.pending_subresource_responses.remove(&internal_id) {
             let pending = response.pending;
-            pending.load.cancel();
-            self.browser_context_runtime
-                .abort_service_worker_fetch_with_reason(internal_id, reason_payload);
+            self.cancel_subresource_load(&pending, reason_payload);
             reject_fetch_continuation(scope, pending.continuation, reason);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },

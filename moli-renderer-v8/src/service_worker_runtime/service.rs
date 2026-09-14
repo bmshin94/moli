@@ -960,6 +960,19 @@ mod tests {
         }
     }
 
+    fn test_fetch_response(
+        service: &ServiceWorkerRuntimeServiceOwner,
+        event_id: ServiceWorkerEventId,
+    ) -> Arc<crate::network::ResourceResponseStream> {
+        let state = service.inner.state.lock();
+        let ServiceWorkerFetchResultSender::Page { network, .. } =
+            &state.pending_fetch_jobs[&event_id].result_tx
+        else {
+            panic!("test Page request must retain its original response")
+        };
+        network.clone()
+    }
+
     fn insert_pending_navigation_preload_fetch_job(
         service: &ServiceWorkerRuntimeServiceOwner,
         event_id: ServiceWorkerEventId,
@@ -8876,6 +8889,87 @@ self.addEventListener("message", event => {
     }
 
     #[test]
+    fn controlled_fetch_cancellation_uses_response_identity_across_clients() {
+        for selected in [0, 1] {
+            let service = new_service_worker_runtime_service();
+            let registration_id = ServiceWorkerRegistrationId(1);
+            let version_id = ServiceWorkerVersionId(1);
+            let run = RendererServiceWorkerRunIdentity::fresh();
+            let documents = [
+                url("https://example.test/app/one.html"),
+                url("https://example.test/app/two.html"),
+            ];
+            insert_registered_version(
+                &service,
+                registration_id,
+                version_id,
+                url("https://example.test/app/sw.js"),
+                url("https://example.test/app/"),
+                documents.clone(),
+            );
+            let events = [ServiceWorkerEventId(17), ServiceWorkerEventId(18)];
+            let cancels = [
+                moli_fetch::FetchCancelHandle::new(),
+                moli_fetch::FetchCancelHandle::new(),
+            ];
+            let queues = [
+                async_subresource_completion_queue(),
+                async_subresource_completion_queue(),
+            ];
+            let clients = documents
+                .each_ref()
+                .map(|document| client_id_for_document(&service, document));
+            {
+                let mut state = service.inner.state.lock();
+                let version = state.versions.get_mut(&version_id).unwrap();
+                version.run = run.clone();
+                version.running_state = ServiceWorkerVersionRunningState::Running {
+                    host: new_running_test_host(version_id, &run),
+                };
+                version.in_flight_event_count = 2;
+                for index in [0, 1] {
+                    state.pending_fetch_jobs.insert(
+                        events[index],
+                        test_fetch_job(
+                            &service,
+                            1,
+                            version_id,
+                            &run,
+                            clients[index],
+                            documents[index].clone(),
+                            url("https://example.test/app/data.txt"),
+                            queues[index].sender(),
+                            cancels[index].clone(),
+                        ),
+                    );
+                }
+            }
+            let responses = events.map(|event| test_fetch_response(&service, event));
+            let survivor = 1 - selected;
+            assert!(service.abort_controlled_fetch(&responses[selected]));
+            assert!(cancels[selected].is_cancelled());
+            assert!(!cancels[survivor].is_cancelled());
+            assert!(!service.abort_controlled_fetch(&responses[selected]));
+            // A late packet for the canceled service event cannot consume the
+            // surviving request, even though both native hosts used local id 1.
+            service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
+                event_id: events[selected],
+                owner: test_run_owner(version_id, &run),
+                result: ServiceWorkerFetchResult::Fallback,
+            });
+            {
+                let state = service.inner.state.lock();
+                assert_eq!(state.pending_fetch_jobs.len(), 1);
+                assert!(state.pending_fetch_jobs.contains_key(&events[survivor]));
+                assert_eq!(state.versions[&version_id].in_flight_event_count, 1);
+            }
+            assert!(service.abort_controlled_fetch(&responses[survivor]));
+            assert!(cancels[survivor].is_cancelled());
+            assert!(service.inner.state.lock().pending_fetch_jobs.is_empty());
+        }
+    }
+
+    #[test]
     fn abort_controlled_fetch_clears_running_job_and_ignores_late_completion() {
         let service = new_service_worker_runtime_service();
         let registration_id = ServiceWorkerRegistrationId(1);
@@ -8921,7 +9015,7 @@ self.addEventListener("message", event => {
             );
         }
 
-        assert!(service.abort_controlled_fetch(51));
+        assert!(service.abort_controlled_fetch(&test_fetch_response(&service, event_id)));
         assert!(cancel_handle.is_cancelled());
         {
             let state = service.inner.state.lock();
@@ -9134,7 +9228,7 @@ self.addEventListener("message", event => {
             navigation_preload_cancel_handle.clone(),
         );
 
-        assert!(service.abort_controlled_fetch(303));
+        assert!(service.abort_controlled_fetch(&test_fetch_response(&service, event_id)));
 
         assert!(fetch_cancel_handle.is_cancelled());
         assert!(navigation_preload_cancel_handle.is_cancelled());
@@ -9201,7 +9295,7 @@ self.addEventListener("message", event => {
             );
         }
 
-        assert!(service.abort_controlled_fetch(56));
+        assert!(service.abort_controlled_fetch(&test_fetch_response(&service, event_id)));
         assert!(cancel_handle.is_cancelled());
         assert!(!completion_queue.has_ready_completion());
 
@@ -9294,7 +9388,7 @@ self.addEventListener("message", event => {
             state.pending_fetch_jobs.insert(event_id, job);
         }
 
-        assert!(service.abort_controlled_fetch(55));
+        assert!(service.abort_controlled_fetch(&test_fetch_response(&service, event_id)));
         assert!(cancel_handle.is_cancelled());
         match worker_rx.try_recv() {
             Ok(crate::worker::WorkerMessage::ServiceWorkerFetchRequestSignalAbort {
@@ -9370,7 +9464,7 @@ self.addEventListener("message", event => {
             state.pending_fetch_jobs.insert(event_id, job);
         }
 
-        assert!(service.abort_controlled_fetch(53));
+        assert!(service.abort_fetch_matching(|id, _| id == event_id, None));
         assert!(cancel_handle.is_cancelled());
         assert!(matches!(
             direct_completion_rx.try_recv(),
@@ -9465,7 +9559,7 @@ self.addEventListener("message", event => {
             version.in_flight_event_count = 1;
         }
 
-        assert!(service.abort_controlled_fetch(52));
+        assert!(service.abort_controlled_fetch(&test_fetch_response(&service, event_id)));
         assert!(cancel_handle.is_cancelled());
         {
             let state = service.inner.state.lock();

@@ -2,37 +2,36 @@ use super::*;
 use crate::service_worker_runtime::ServiceWorkerFetchResultSender;
 
 impl ServiceWorkerRuntimeService {
-    pub(crate) fn abort_controlled_fetch(&self, internal_id: u64) -> bool {
-        self.abort_controlled_fetch_with_reason(internal_id, None)
+    pub(crate) fn abort_controlled_fetch(
+        &self,
+        response: &Arc<crate::network::ResourceResponseStream>,
+    ) -> bool {
+        self.abort_controlled_fetch_with_reason(response, None)
     }
 
     pub(crate) fn abort_controlled_fetch_with_reason(
         &self,
-        internal_id: u64,
+        response: &Arc<crate::network::ResourceResponseStream>,
         reason: Option<crate::structured_clone::V8StructuredClonePayload>,
     ) -> bool {
-        self.abort_controlled_fetch_matching(|job| job.internal_id == internal_id, reason)
-    }
-
-    pub(crate) fn abort_worker_fetch(
-        &self,
-        response: &std::sync::Arc<crate::network::ResourceResponseStream>,
-    ) -> bool {
-        self.abort_controlled_fetch_matching(
-            |job| {
-                matches!(
-                    &job.result_tx,
-                    ServiceWorkerFetchResultSender::Worker { sender, .. }
-                        if std::sync::Arc::ptr_eq(&sender.response, response)
-                )
+        self.abort_fetch_matching(
+            |_, job| match &job.result_tx {
+                ServiceWorkerFetchResultSender::Page { network, .. } => {
+                    Arc::ptr_eq(network, response)
+                }
+                ServiceWorkerFetchResultSender::Worker { sender, .. } => {
+                    Arc::ptr_eq(&sender.response, response)
+                }
+                ServiceWorkerFetchResultSender::CspReport(_)
+                | ServiceWorkerFetchResultSender::Direct(_) => false,
             },
-            None,
+            reason,
         )
     }
 
-    fn abort_controlled_fetch_matching(
+    pub(super) fn abort_fetch_matching(
         &self,
-        matches: impl Fn(&ServiceWorkerFetchJob) -> bool,
+        matches: impl Fn(ServiceWorkerEventId, &ServiceWorkerFetchJob) -> bool,
         reason: Option<crate::structured_clone::V8StructuredClonePayload>,
     ) -> bool {
         let aborted = {
@@ -40,7 +39,7 @@ impl ServiceWorkerRuntimeService {
             let Some(event_id) = state
                 .pending_fetch_jobs
                 .iter()
-                .find_map(|(event_id, job)| matches(job).then_some(*event_id))
+                .find_map(|(event_id, job)| matches(*event_id, job).then_some(*event_id))
             else {
                 return false;
             };

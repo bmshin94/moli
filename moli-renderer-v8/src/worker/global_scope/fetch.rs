@@ -1941,7 +1941,7 @@ pub(in crate::worker) fn reject_worker_fetches_for_signal(
     for pending in rejected {
         pending.load.cancel();
         if let Some(runtime) = state.borrow().service_worker_runtime.clone() {
-            runtime.abort_worker_fetch(&pending.response);
+            runtime.abort_controlled_fetch(&pending.response);
         }
         record_worker_fetch_failure(&pending, ABORTED_ERROR_TEXT.to_owned());
         if let Some(body_source_id) = pending.streaming_body_source_id {
