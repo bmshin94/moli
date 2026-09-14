@@ -1,4 +1,5 @@
 use super::*;
+use crate::service_worker_runtime::state::ServiceWorkerFetchStreamConsumer;
 use crate::service_worker_runtime::{
     ServiceWorkerDirectFetchResponse, ServiceWorkerFetchRequest, ServiceWorkerFetchResultSender,
     ServiceWorkerRequestDestination, service_worker_fetch_request_metadata,
@@ -299,6 +300,14 @@ impl ServiceWorkerRuntimeService {
             }
         };
         match job.result_tx {
+            ServiceWorkerFetchResultSender::Worker { sender, request } => {
+                sender.fetch_network(
+                    *request,
+                    job.cancel_handle,
+                    job.cors_preflight_request_headers,
+                    job.redirect_chain,
+                );
+            }
             ServiceWorkerFetchResultSender::CspReport(resource) => {
                 resource.fetch(job.request_client, request, job.cancel_handle);
             }
@@ -370,7 +379,7 @@ impl ServiceWorkerRuntimeService {
     }
 
     pub(super) fn finish_fetch_stream_started(&self, started: ServiceWorkerFetchStreamStarted) {
-        let (rejection, delivery) = {
+        let rejection = {
             let mut state = self.inner.state.lock();
             let Some(job) = state.pending_fetch_jobs.get_mut(&started.event_id) else {
                 return;
@@ -382,14 +391,25 @@ impl ServiceWorkerRuntimeService {
             let head = service_worker_fetch_stream_response_head(job, &started.response_head);
             // Followed redirect heads belong to the redirect chain. The final
             // physical head is independent of whether JS can receive a stream.
-            let js_consumer = match (&job.result_tx, &forwarding) {
+            let js_consumer = match (&mut job.result_tx, &forwarding) {
                 (
                     ServiceWorkerFetchResultSender::Page {
                         completion_tx,
                         network,
                     },
                     Ok(true),
-                ) if !network.intercepts_response(&head) => Some(completion_tx.clone()),
+                ) if !network.intercepts_response(&head) => Some(
+                    ServiceWorkerFetchStreamConsumer::Page(completion_tx.clone()),
+                ),
+                (ServiceWorkerFetchResultSender::Worker { sender, .. }, Ok(true))
+                    if job.request_mode != moli_fetch::RequestMode::NoCors
+                        && job.redirect_mode == moli_fetch::RequestRedirectMode::Follow
+                        && !sender.response.intercepts_response(&head) =>
+                {
+                    Some(ServiceWorkerFetchStreamConsumer::Worker(
+                        sender.stream_sender(started.body_source_id),
+                    ))
+                }
                 _ => None,
             };
             if !is_redirect_status(head.status) {
@@ -404,25 +424,20 @@ impl ServiceWorkerRuntimeService {
                     js_consumer: js_consumer.clone(),
                 });
             }
-            let delivery = js_consumer.map(|sender| {
-                (
-                    sender,
-                    AsyncSubresourceStreamingStarted {
-                        internal_id: job.internal_id,
-                        request_url: job.request_url.clone(),
-                        body_source_id: started.body_source_id,
-                        head,
-                    },
-                )
-            });
-            (forwarding.err(), delivery)
+            // These queue writes stay under the job lock so cancellation cannot
+            // deliver a terminal ahead of an already granted head or chunk.
+            if let Some(sender) = js_consumer {
+                sender.started(AsyncSubresourceStreamingStarted {
+                    internal_id: job.internal_id,
+                    request_url: job.request_url.clone(),
+                    body_source_id: started.body_source_id,
+                    head,
+                });
+            }
+            forwarding.err()
         };
         if let Some(message) = rejection {
             self.reject_fetch_stream_started(started, message);
-        } else if let Some((sender, delivery)) = delivery {
-            let _ = sender.send_async_subresource_event(
-                AsyncSubresourceFetchEvent::StreamingStarted(Box::new(delivery)),
-            );
         }
     }
 
@@ -507,27 +522,22 @@ impl ServiceWorkerRuntimeService {
     }
 
     pub(super) fn finish_fetch_stream_chunk(&self, chunk: ServiceWorkerFetchStreamChunk) {
-        let consumer = {
-            let state = self.inner.state.lock();
-            let Some(job) = state.pending_fetch_jobs.get(&chunk.event_id) else {
-                return;
-            };
-            let Some(stream) = &job.body_stream else {
-                return;
-            };
-            if stream.body_source_id != chunk.body_source_id {
-                return;
-            }
-            job.result_tx.data_received(&chunk.bytes);
-            stream.js_consumer.clone()
+        let state = self.inner.state.lock();
+        let Some(job) = state.pending_fetch_jobs.get(&chunk.event_id) else {
+            return;
         };
-        if let Some(consumer) = consumer {
-            let _ = consumer.send_async_subresource_event(
-                AsyncSubresourceFetchEvent::StreamingChunk(AsyncSubresourceStreamingChunk {
-                    body_source_id: chunk.body_source_id,
-                    bytes: chunk.bytes,
-                }),
-            );
+        let Some(stream) = &job.body_stream else {
+            return;
+        };
+        if stream.body_source_id != chunk.body_source_id {
+            return;
+        }
+        job.result_tx.data_received(&chunk.bytes);
+        if let Some(consumer) = &stream.js_consumer {
+            consumer.chunk(AsyncSubresourceStreamingChunk {
+                body_source_id: chunk.body_source_id,
+                bytes: chunk.bytes,
+            });
         }
     }
 
@@ -643,6 +653,14 @@ impl ServiceWorkerRuntimeService {
             response.body,
         );
         let network = match job.result_tx {
+            ServiceWorkerFetchResultSender::Worker { sender, .. } => {
+                let response = sender
+                    .response
+                    .finish_response()
+                    .unwrap_or_else(|| navigation_response.into());
+                sender.complete(Ok(response), None);
+                return;
+            }
             ServiceWorkerFetchResultSender::CspReport(resource) => {
                 resource.response_completed(&navigation_response);
                 return;
@@ -708,6 +726,11 @@ impl ServiceWorkerRuntimeService {
             network_error_text = service_worker_fetch_failure_network_error_text(&message);
         }
         let network = match job.result_tx {
+            ServiceWorkerFetchResultSender::Worker { sender, .. } => {
+                let failure = sender.response.failure(message);
+                sender.complete(Err(failure), None);
+                return;
+            }
             ServiceWorkerFetchResultSender::CspReport(resource) => {
                 resource.fail(network_error_text.unwrap_or(message));
                 return;
@@ -740,6 +763,30 @@ impl ServiceWorkerRuntimeService {
                 .and_then(ServiceWorkerFetchBodyStream::js_body_source_id),
             completion,
         );
+    }
+}
+
+impl ServiceWorkerFetchStreamConsumer {
+    fn started(&self, started: AsyncSubresourceStreamingStarted) {
+        match self {
+            Self::Page(sender) => {
+                let _ = sender.send_async_subresource_event(
+                    AsyncSubresourceFetchEvent::StreamingStarted(Box::new(started)),
+                );
+            }
+            Self::Worker(sender) => sender.streaming_started(started.head),
+        }
+    }
+
+    fn chunk(&self, chunk: AsyncSubresourceStreamingChunk) {
+        match self {
+            Self::Page(sender) => {
+                let _ = sender.send_async_subresource_event(
+                    AsyncSubresourceFetchEvent::StreamingChunk(chunk),
+                );
+            }
+            Self::Worker(sender) => sender.streaming_chunk(chunk.bytes),
+        }
     }
 }
 

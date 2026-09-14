@@ -739,6 +739,10 @@ pub(crate) enum ServiceWorkerFetchResultSender {
         completion_tx: RendererResourceCompletionSender,
         network: std::sync::Arc<crate::network::ResourceResponseStream>,
     },
+    Worker {
+        sender: Box<crate::worker::WorkerFetchCompletionSender>,
+        request: Box<Request>,
+    },
     CspReport(std::sync::Arc<crate::network_host::KeepaliveResource>),
     Direct(tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>),
 }
@@ -747,6 +751,7 @@ impl ServiceWorkerFetchResultSender {
     pub(super) fn response_started(&self, head: crate::network::ResourceResponseHead) {
         match self {
             Self::Page { network, .. } => network.response_started(head),
+            Self::Worker { sender, .. } => sender.response.response_started(head),
             Self::CspReport(resource) => resource.response_started(head),
             Self::Direct(_) => {}
         }
@@ -755,6 +760,7 @@ impl ServiceWorkerFetchResultSender {
     pub(super) fn data_received(&self, bytes: &[u8]) {
         match self {
             Self::Page { network, .. } => network.data_received(bytes),
+            Self::Worker { sender, .. } => sender.response.data_received(bytes),
             Self::CspReport(resource) => resource.data_received(bytes),
             Self::Direct(_) => {}
         }

@@ -9285,7 +9285,11 @@ self.addEventListener("message", event => {
             );
             job.body_stream = Some(ServiceWorkerFetchBodyStream {
                 body_source_id,
-                js_consumer: Some(completion_queue.sender()),
+                js_consumer: Some(
+                    crate::service_worker_runtime::state::ServiceWorkerFetchStreamConsumer::Page(
+                        completion_queue.sender(),
+                    ),
+                ),
             });
             state.pending_fetch_jobs.insert(event_id, job);
         }

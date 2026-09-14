@@ -1,4 +1,5 @@
 use super::*;
+use crate::service_worker_runtime::ServiceWorkerFetchResultSender;
 
 impl ServiceWorkerRuntimeService {
     pub(crate) fn abort_controlled_fetch(&self, internal_id: u64) -> bool {
@@ -10,12 +11,36 @@ impl ServiceWorkerRuntimeService {
         internal_id: u64,
         reason: Option<crate::structured_clone::V8StructuredClonePayload>,
     ) -> bool {
+        self.abort_controlled_fetch_matching(|job| job.internal_id == internal_id, reason)
+    }
+
+    pub(crate) fn abort_worker_fetch(
+        &self,
+        response: &std::sync::Arc<crate::network::ResourceResponseStream>,
+    ) -> bool {
+        self.abort_controlled_fetch_matching(
+            |job| {
+                matches!(
+                    &job.result_tx,
+                    ServiceWorkerFetchResultSender::Worker { sender, .. }
+                        if std::sync::Arc::ptr_eq(&sender.response, response)
+                )
+            },
+            None,
+        )
+    }
+
+    fn abort_controlled_fetch_matching(
+        &self,
+        matches: impl Fn(&ServiceWorkerFetchJob) -> bool,
+        reason: Option<crate::structured_clone::V8StructuredClonePayload>,
+    ) -> bool {
         let aborted = {
             let mut state = self.inner.state.lock();
             let Some(event_id) = state
                 .pending_fetch_jobs
                 .iter()
-                .find_map(|(event_id, job)| (job.internal_id == internal_id).then_some(*event_id))
+                .find_map(|(event_id, job)| matches(job).then_some(*event_id))
             else {
                 return false;
             };

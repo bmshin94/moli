@@ -706,7 +706,13 @@ pub(super) enum ServiceWorkerPeriodicSyncStart {
 /// delivery. Only a recipient that received a JS stream head can consume chunks.
 pub(super) struct ServiceWorkerFetchBodyStream {
     pub(super) body_source_id: crate::types::NetworkBodySourceId,
-    pub(super) js_consumer: Option<crate::page_task_queue::RendererResourceCompletionSender>,
+    pub(super) js_consumer: Option<ServiceWorkerFetchStreamConsumer>,
+}
+
+#[derive(Clone)]
+pub(super) enum ServiceWorkerFetchStreamConsumer {
+    Page(crate::page_task_queue::RendererResourceCompletionSender),
+    Worker(crate::worker::WorkerFetchStreamSender),
 }
 
 impl ServiceWorkerFetchBodyStream {
