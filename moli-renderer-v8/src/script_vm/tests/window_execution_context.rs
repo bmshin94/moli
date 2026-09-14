@@ -510,11 +510,8 @@ fn borrowed_fetch_uses_receiver_realm_and_keeps_reaction_realm_independent() {
     let completion_url = Url::parse("https://borrowed-fetch-context.test/child-base/completion")
         .expect("completion URL");
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: completion_id,
-        request_url: completion_url.clone(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: Some("OK".to_owned()),
         skip_fetch_security_validation: true,
         response_filter: None,
@@ -524,7 +521,8 @@ fn borrowed_fetch_uses_receiver_realm_and_keeps_reaction_realm_independent() {
             200,
             vec![("content-type".to_owned(), "text/plain".to_owned())],
             "borrowed completion".to_owned(),
-        )),
+        )
+        .into()),
     })
     .expect("borrowed Fetch completion should enter the receiver Promise realm");
     vm.eval("0")

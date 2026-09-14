@@ -64,10 +64,9 @@ pub use crate::protocol_types::{
 };
 
 pub(super) enum PendingSubresourceContinuation {
-    Beacon(std::sync::Arc<crate::network::ResourceTransfer>),
+    Beacon,
     CspReport {
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
-        network: std::sync::Arc<crate::network::ResourceTransfer>,
     },
     EventSource(v8::Global<v8::Object>),
     Fetch(PendingWindowFetchContinuation),
@@ -430,6 +429,7 @@ impl PendingSubresourceExecutionContext {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn window_network_only_identity(
         &self,
     ) -> Option<crate::native_bridge::WindowExecutionContextIdentity> {
@@ -439,6 +439,7 @@ impl PendingSubresourceExecutionContext {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn window_document_network_only_identity(
         &self,
     ) -> Option<crate::native_bridge::WindowDocumentNetworkRequestIdentity> {
@@ -473,7 +474,8 @@ impl PendingSubresourceExecutionContext {
 
 pub(super) struct PendingSubresourceFetchState {
     pub(super) info: PendingSubresourceFetchInfo,
-    pub(super) network_request: crate::runtime::RendererNetworkRequest,
+    // WebSocket has its own handshake publisher; every HTTP resource owns a transfer.
+    pub(super) network: Option<std::sync::Arc<crate::network::ResourceResponseStream>>,
     pub(super) load: crate::network::loads::ResourceLoadLease,
     pub(super) execution_context: PendingSubresourceExecutionContext,
     pub(super) credentials_mode: moli_fetch::RequestCredentialsMode,
@@ -484,12 +486,24 @@ pub(super) struct PendingSubresourceFetchState {
 }
 
 impl PendingSubresourceFetchState {
+    pub(crate) fn network(&self) -> &std::sync::Arc<crate::network::ResourceTransfer> {
+        &self.response_stream().network
+    }
+
+    pub(crate) fn response_stream(
+        &self,
+    ) -> &std::sync::Arc<crate::network::ResourceResponseStream> {
+        self.network
+            .as_ref()
+            .expect("HTTP resource owns a response stream")
+    }
+
     pub(crate) fn preflight_observer(
         &self,
         completion_tx: crate::page_task_queue::RendererResourceCompletionSender,
     ) -> crate::network_host::CorsPreflightNetworkObserver {
         crate::network_host::CorsPreflightNetworkObserver {
-            request: self.network_request.clone(),
+            request: self.network().request(),
             observer: completion_tx.network_observer(),
             frame_id: self.info.frame_id.clone(),
             resource_type: self.info.resource_type,
@@ -525,10 +539,6 @@ impl PendingSubresourceFetchState {
 
 pub(super) struct PendingSubresourceResponseState {
     pub(super) pending: PendingSubresourceFetchState,
-    pub(super) request_url: Url,
-    pub(super) request_method: String,
-    pub(super) request_headers: Vec<(String, String)>,
-    pub(super) request_body: Option<String>,
     pub(super) response: NavigationResponse,
 }
 
@@ -556,16 +566,47 @@ pub(super) struct RunningSubresourceFetchState {
 
 #[derive(Debug)]
 pub(super) struct AsyncSubresourceFetchCompletion {
+    pub(super) network_request_headers: Option<Vec<(String, String)>>,
     pub(super) internal_id: u64,
-    pub(super) request_url: Url,
-    pub(super) request_method: String,
-    pub(super) request_headers: Vec<(String, String)>,
-    pub(super) request_body: Option<String>,
     pub(super) response_status_text: Option<String>,
     pub(super) skip_fetch_security_validation: bool,
     pub(super) response_filter: Option<AsyncSubresourceFetchResponseFilter>,
     pub(super) network_error_text: Option<String>,
-    pub(super) result: std::result::Result<NavigationResponse, String>,
+    pub(super) result: std::result::Result<
+        crate::network::ResourceBodyResponse,
+        crate::network::ResourceResponseFailure,
+    >,
+}
+
+impl AsyncSubresourceFetchCompletion {
+    pub(crate) fn publish(&self, network: &crate::network::ResourceTransfer) {
+        self.publish_with(network, |observation| network.observe(observation));
+    }
+
+    pub(crate) fn publish_with(
+        &self,
+        network: &crate::network::ResourceTransfer,
+        observer: impl FnMut(crate::runtime::RendererNetworkObservation),
+    ) {
+        match &self.result {
+            Ok(response) => network.body_completed_with(
+                crate::network::ResourceResponseHead {
+                    status_text: self.response_status_text.clone(),
+                    head: response.head.clone(),
+                    network_request_headers: self.network_request_headers.clone(),
+                },
+                response.body.clone(),
+                observer,
+            ),
+            Err(error) => {
+                let error = match &self.network_error_text {
+                    Some(message) => error.clone().with_message(message.clone()),
+                    None => error.clone(),
+                };
+                network.failed_with(&error, observer);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -604,12 +645,8 @@ pub(super) struct AsyncSubresourceNetworkContext {
 pub(super) struct AsyncSubresourceStreamingStarted {
     pub(super) internal_id: u64,
     pub(super) request_url: Url,
-    pub(super) request_method: String,
-    pub(super) request_headers: Vec<(String, String)>,
-    pub(super) request_body: Option<String>,
     pub(super) body_source_id: NetworkBodySourceId,
     pub(super) head: moli_fetch::ResponseHead,
-    pub(super) network_request_headers: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug)]
@@ -618,6 +655,7 @@ pub(super) struct AsyncSubresourceStreamingChunk {
     pub(super) bytes: Vec<u8>,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub(super) struct AsyncSubresourceStreamingFinished {
     pub(super) internal_id: u64,
@@ -655,21 +693,28 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
 
 #[derive(Debug)]
 pub(super) enum AsyncSubresourceFetchEvent {
+    #[cfg(test)]
     Completion(Box<AsyncSubresourceFetchCompletion>),
-    Keepalive(Box<crate::network_host::CompletedKeepaliveFetch>),
+    TransportCompletion(Box<crate::network_host::CompletedResourceFetch>),
     NativeNetwork(crate::runtime::RendererNetworkObservation),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
     StreamingChunk(AsyncSubresourceStreamingChunk),
+    #[cfg(test)]
     StreamingFinished(AsyncSubresourceStreamingFinished),
+    TransportStreamingFinished {
+        body_source_id: NetworkBodySourceId,
+        completion: Box<crate::network_host::CompletedResourceFetch>,
+    },
 }
 
 impl AsyncSubresourceFetchEvent {
     pub(crate) fn target(&self) -> AsyncSubresourceFetchEventTarget {
         match self {
+            #[cfg(test)]
             Self::Completion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id,
             },
-            Self::Keepalive(completion) => AsyncSubresourceFetchEventTarget::Completion {
+            Self::TransportCompletion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id(),
             },
             Self::NativeNetwork(_) => AsyncSubresourceFetchEventTarget::NativeNetwork,
@@ -680,6 +725,14 @@ impl AsyncSubresourceFetchEvent {
             Self::StreamingChunk(chunk) => AsyncSubresourceFetchEventTarget::StreamingChunk {
                 body_source_id: chunk.body_source_id,
             },
+            Self::TransportStreamingFinished {
+                body_source_id,
+                completion,
+            } => AsyncSubresourceFetchEventTarget::StreamingFinish {
+                internal_id: completion.internal_id(),
+                body_source_id: *body_source_id,
+            },
+            #[cfg(test)]
             Self::StreamingFinished(finished) => {
                 AsyncSubresourceFetchEventTarget::StreamingFinish {
                     internal_id: finished.internal_id,
@@ -825,14 +878,8 @@ pub(super) struct ServiceWorkerControllerChangeCompletion {
 
 pub(super) struct StreamingSubresourceFetchState {
     pub(super) pending: PendingSubresourceFetchState,
-    pub(super) request_url: Url,
-    pub(super) request_method: String,
-    pub(super) request_headers: Vec<(String, String)>,
-    pub(super) request_body: Option<String>,
     pub(super) body_source_id: NetworkBodySourceId,
     pub(super) head: moli_fetch::ResponseHead,
-    pub(super) network_request_headers: Option<Vec<(String, String)>>,
-    pub(super) body_writer: SubresourceResponseBodyWriter,
     pub(super) event_source_parser: Option<crate::network_host::EventSourceParser>,
     pub(super) xhr_response: Option<XhrStreamingResponseState>,
 }
@@ -904,7 +951,6 @@ pub(super) struct XhrStreamingChunkDelivery<'s> {
     pub(super) dispatch_scope: crate::native_bridge::OwnerDispatchScope,
     pub(super) realm_token: Option<crate::native_bridge::RuntimeObservableContextToken>,
     pub(super) internal_id: u64,
-    pub(super) request_handle: Option<SubresourceNetworkRequestHandle>,
     pub(super) decoded_text: String,
     pub(super) loaded: usize,
     pub(super) total: Option<usize>,

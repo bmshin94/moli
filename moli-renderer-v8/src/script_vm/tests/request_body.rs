@@ -193,8 +193,8 @@ async fn intercepted_beacon_preserves_binary_body_and_explicit_override() {
             actual,
             replacement.map_or_else(|| vec![0, 128, 255, 65], |body| body.as_bytes().to_vec())
         );
-        // The claimed result publishes its native response and terminal. None
-        // of those receipts needs the sending realm to consume a response body.
+        // Claim the exact transport result without entering the sending realm.
+        // Its native terminal must be recorded before that application returns.
         loop {
             assert!(
                 tokio::time::timeout(
@@ -206,10 +206,8 @@ async fn intercepted_beacon_preserves_binary_body_and_explicit_override() {
             );
             let event = completions.pop_next_async_subresource_event().unwrap();
             let terminal = matches!(&event,
-                crate::types::AsyncSubresourceFetchEvent::NativeNetwork(observation)
-                    if matches!(observation.item(), crate::runtime::RendererNetworkOutputItem::Resource(item)
-                        if matches!(item.as_ref(), crate::types::ScriptNetworkOutputItem::SubresourceBodyFinished(body)
-                            if Some(body.handle()) == request.network_request_handle)));
+                crate::types::AsyncSubresourceFetchEvent::TransportCompletion(completion)
+                    if completion.internal_id() == request.internal_id);
             assert!(matches!(vm.complete_async_subresource_fetch_event_body(event).unwrap(),
                 crate::script_vm::subresource_fetch::AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered));
             if terminal {

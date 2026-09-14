@@ -156,11 +156,12 @@ async fn collect_worker_resource_response(
     observe_response: bool,
     error_prefix: &str,
 ) -> (
-    Result<WorkerResourceResponse, ResourceResponseFailure>,
+    Result<ResourceBodyResponse, ResourceResponseFailure>,
     Option<Vec<(String, String)>>,
 ) {
     let (mut response, network_request_headers) = worker_network_result_parts(observed);
     let head = Arc::new(ResourceResponseHead {
+        status_text: None,
         head: response.head(),
         network_request_headers: network_request_headers.clone(),
     });
@@ -176,7 +177,7 @@ async fn collect_worker_resource_response(
     }
     let body = body_writer.finish();
     let result = match response.finish().await {
-        Ok(()) => Ok(WorkerResourceResponse {
+        Ok(()) => Ok(ResourceBodyResponse {
             head: head.head.clone(),
             body,
         }),
@@ -227,7 +228,7 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
         {
             (
                 local_url_response(&resolved_url)
-                    .map(WorkerResourceResponse::from)
+                    .map(ResourceBodyResponse::from)
                     .ok_or_else(|| {
                         ResourceResponseFailure::from(format!(
                             "fetch: local url `{resolved_url}` is unavailable"
@@ -291,6 +292,7 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                             let body_source_id = crate::network_host::new_network_body_source_id();
                             let head = response.head();
                             network.response_started(Arc::new(ResourceResponseHead {
+                                status_text: None,
                                 head: head.clone(),
                                 network_request_headers: network_request_headers.clone(),
                             }));
@@ -314,13 +316,14 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                                 ));
                             }
                             let result = match response.finish().await {
-                                Ok(()) => Ok(WorkerResourceResponse {
+                                Ok(()) => Ok(ResourceBodyResponse {
                                     head,
                                     body: body_writer.finish(),
                                 }),
                                 Err(error) => Err(ResourceResponseFailure::PartialBody {
                                     message: format!("fetch: {error}"),
                                     response: Arc::new(ResourceResponseHead {
+                                        status_text: None,
                                         head,
                                         network_request_headers: network_request_headers.clone(),
                                     }),
@@ -512,7 +515,7 @@ fn spawn_worker_fetch_service_worker(
                 return;
             }
             Ok(ServiceWorkerDirectFetchResult::Response(response)) => Ok(
-                WorkerResourceResponse::from(Response::from(*response.response)),
+                ResourceBodyResponse::from(Response::from(*response.response)),
             ),
             Ok(ServiceWorkerDirectFetchResult::Failure(message)) => Err(message),
             Err(_) => Err("service worker fetch completion channel closed".to_owned()),
@@ -794,7 +797,7 @@ pub(in crate::worker) fn fulfill_pending_worker_fetch(
         WorkerRequestCompletion {
             id: completion.2,
             network_request_headers: None,
-            result: Ok(WorkerResourceResponse::from(completion.1)),
+            result: Ok(ResourceBodyResponse::from(completion.1)),
         },
     )));
 }
@@ -895,7 +898,7 @@ pub(in crate::worker) fn fulfill_pending_worker_fetch_response(
         WorkerRequestCompletion {
             id: completion.2,
             network_request_headers: None,
-            result: Ok(WorkerResourceResponse::from(completion.1)),
+            result: Ok(ResourceBodyResponse::from(completion.1)),
         },
     )));
 }
@@ -1058,7 +1061,7 @@ pub(in crate::worker) fn fulfill_pending_worker_xhr(
     };
     let _ = completion.0.send(WorkerXhrCompletion::decision(
         completion.2,
-        Ok(WorkerResourceResponse::from(completion.1)),
+        Ok(ResourceBodyResponse::from(completion.1)),
     ));
 }
 
@@ -1150,7 +1153,7 @@ pub(in crate::worker) fn fulfill_pending_worker_xhr_response(
     };
     let _ = completion.0.send(WorkerXhrCompletion::decision(
         completion.2,
-        Ok(WorkerResourceResponse::from(completion.1)),
+        Ok(ResourceBodyResponse::from(completion.1)),
     ));
 }
 
@@ -2570,7 +2573,7 @@ pub(in crate::worker) fn finish_worker_streaming_fetch(
 
 fn record_worker_fetch_success(
     pending: &PendingWorkerFetch,
-    response: &WorkerResourceResponse,
+    response: &ResourceBodyResponse,
     network_request_headers: Option<Vec<(String, String)>>,
 ) {
     let network_request_headers = pending
@@ -2698,7 +2701,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
                         extract_subresource_auth_challenge(&response_head.headers)
                 {
                     let response_body = response.subresource_response_body();
-                    pending.paused_response = Some(WorkerResourceResponse {
+                    pending.paused_response = Some(ResourceBodyResponse {
                         head: response_head.clone(),
                         body: response_body.clone(),
                     });
@@ -2759,7 +2762,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
                         response_body: response_body.clone(),
                         from_cache: response_head.from_cache,
                     };
-                    pending.paused_response = Some(WorkerResourceResponse {
+                    pending.paused_response = Some(ResourceBodyResponse {
                         head: response_head,
                         body: response_body,
                     });
@@ -2848,7 +2851,7 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
                 &response_head.headers,
                 pending.credentials_mode,
             );
-            let WorkerResourceResponse { mut head, body } = response;
+            let ResourceBodyResponse { mut head, body } = response;
             head.headers = filtered_headers;
             let body = if opaque_response_blocked {
                 SubresourceResponseBody::from_bytes(Vec::new())

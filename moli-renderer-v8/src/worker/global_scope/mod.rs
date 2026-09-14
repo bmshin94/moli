@@ -11,6 +11,7 @@
 //! - `requestAnimationFrame` / `cancelAnimationFrame`
 //! - `globalThis`
 
+use crate::network::ResourceBodyResponse;
 use crate::web_api_interfaces;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -37,8 +38,7 @@ use http::HeaderName;
 use moli_cookie_jar::StoredCookieSetReport;
 use moli_fetch::{
     BrowserRequestMetadata, FetchCancelHandle, Request, RequestCredentialsMode, RequestMode,
-    RequestRedirectMode, Response, ResponseBody, ResponseHead,
-    should_request_be_blocked_due_to_bad_port,
+    RequestRedirectMode, Response, ResponseHead, should_request_be_blocked_due_to_bad_port,
 };
 use moli_storage_key::MoliStorageKey;
 use moli_webapi_declare::{ObjectLiteralDeclaration, WebApiFunctionTemplate, WebApiObject};
@@ -1101,7 +1101,7 @@ pub(super) struct PendingWorkerFetch {
     pub(super) request_body: Option<Vec<u8>>,
     pub(super) network: Arc<ResourceTransfer>,
     pub(super) network_record: Option<PendingWorkerFetchNetworkRecord>,
-    pub(super) paused_response: Option<WorkerResourceResponse>,
+    pub(super) paused_response: Option<ResourceBodyResponse>,
     pub(super) streaming_body_source_id: Option<NetworkBodySourceId>,
 }
 
@@ -1116,7 +1116,7 @@ pub(super) enum WorkerFetchEvent {
 pub(super) struct WorkerRequestCompletion {
     id: u32,
     network_request_headers: Option<Vec<(String, String)>>,
-    result: Result<WorkerResourceResponse, ResourceResponseFailure>,
+    result: Result<ResourceBodyResponse, ResourceResponseFailure>,
 }
 
 impl WorkerRequestCompletion {
@@ -1165,66 +1165,6 @@ pub(super) struct WorkerFetchStreamingFinished {
     delivery: WorkerRequestDelivery,
 }
 
-pub(super) struct WorkerResourceResponse {
-    head: ResponseHead,
-    body: SubresourceResponseBody,
-}
-
-impl From<Response> for WorkerResourceResponse {
-    fn from(response: Response) -> Self {
-        Self {
-            head: response.head(),
-            body: SubresourceResponseBody::from_fetch_response(&response),
-        }
-    }
-}
-
-impl WorkerResourceResponse {
-    fn head(&self) -> ResponseHead {
-        self.head.clone()
-    }
-
-    fn subresource_response_body(&self) -> SubresourceResponseBody {
-        self.body.clone()
-    }
-
-    fn publish(
-        &self,
-        network: &ResourceTransfer,
-        network_request_headers: Option<Vec<(String, String)>>,
-    ) {
-        network.body_completed(
-            ResourceResponseHead {
-                head: self.head.clone(),
-                network_request_headers,
-            },
-            self.body.clone(),
-        );
-    }
-
-    fn failure(
-        &self,
-        message: String,
-        network_request_headers: Option<Vec<(String, String)>>,
-    ) -> ResourceResponseFailure {
-        ResourceResponseFailure::PartialBody {
-            message,
-            response: Arc::new(ResourceResponseHead {
-                head: self.head.clone(),
-                network_request_headers,
-            }),
-            body: self.body.clone(),
-        }
-    }
-
-    fn body_source(&self) -> Result<ResponseBody, String> {
-        self.body
-            .materialize_bytes()
-            .map(ResponseBody::materialized_bytes)
-            .map_err(|error| format!("failed to materialize worker XHR body: {error}"))
-    }
-}
-
 #[derive(Clone)]
 pub(super) struct PendingWorkerFetchNetworkRecord {
     pub(super) internal_id: u64,
@@ -1248,7 +1188,7 @@ pub(super) struct PendingWorkerXhr {
     pub(super) request_body: Option<Vec<u8>>,
     pub(super) network: Arc<ResourceTransfer>,
     pub(super) network_record: Option<PendingWorkerFetchNetworkRecord>,
-    pub(super) paused_response: Option<WorkerResourceResponse>,
+    pub(super) paused_response: Option<ResourceBodyResponse>,
 }
 
 pub(super) struct WorkerCspReport {
@@ -1269,7 +1209,7 @@ pub(super) enum WorkerXhrCompletion {
 }
 
 impl WorkerXhrCompletion {
-    fn decision(id: u32, result: Result<WorkerResourceResponse, ResourceResponseFailure>) -> Self {
+    fn decision(id: u32, result: Result<ResourceBodyResponse, ResourceResponseFailure>) -> Self {
         Self::Completion(Box::new(WorkerRequestCompletion {
             id,
             network_request_headers: None,

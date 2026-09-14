@@ -30,7 +30,7 @@ fn cancelled_worker_request_rejects_late_transport_delivery() {
                 result: if transport_failed {
                     Err("late transport failure".to_owned().into())
                 } else {
-                    Ok(WorkerResourceResponse::from(
+                    Ok(ResourceBodyResponse::from(
                         local_url_response(&url).unwrap(),
                     ))
                 },

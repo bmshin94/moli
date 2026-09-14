@@ -45,6 +45,85 @@ use url::Url;
 
 use self::http_fixture::{StaticHttpServer, static_http_loader};
 
+struct NativeResourceOutput(
+    std::sync::Arc<parking_lot::Mutex<Vec<crate::types::ScriptNetworkOutputItem>>>,
+);
+
+impl NativeResourceOutput {
+    fn observe(vm: &ScriptVm) -> Self {
+        let items = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let observed = items.clone();
+        vm._context_host
+            .borrow()
+            .browser_context_runtime()
+            .install_network_handler(move |input| {
+                if let crate::runtime::RendererNetworkInput::Observation(input) = input
+                    && matches!(
+                        input.occurrence.source,
+                        crate::runtime::RendererNetworkSource::Document { .. }
+                    )
+                    && let crate::runtime::RendererNetworkOutputItem::Resource(item) =
+                        &input.occurrence.item
+                {
+                    observed.lock().push(item.as_ref().clone());
+                }
+            });
+        Self(items)
+    }
+
+    fn take(&self) -> Vec<crate::types::ScriptNetworkOutputItem> {
+        std::mem::take(&mut self.0.lock())
+    }
+}
+
+fn native_resource_terminal(
+    items: &[crate::types::ScriptNetworkOutputItem],
+    handle: crate::types::SubresourceNetworkRequestHandle,
+) -> &crate::types::SubresourceBodyFinished {
+    let mut terminals = items.iter().filter_map(|item| match item {
+        crate::types::ScriptNetworkOutputItem::SubresourceBodyFinished(terminal)
+            if terminal.handle() == handle =>
+        {
+            Some(terminal.as_ref())
+        }
+        _ => None,
+    });
+    let terminal = terminals
+        .next()
+        .expect("the original request must terminate");
+    assert!(
+        terminals.next().is_none(),
+        "each request has exactly one terminal"
+    );
+    terminal
+}
+
+async fn apply_next_async_subresource_callback_for_test(
+    vm: &mut ScriptVm,
+    completions: &mut RendererResourceCompletionTestHarness,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            assert!(completions.wait_for_arrival_without_timeout().await);
+            let event = completions
+                .pop_next_async_subresource_event()
+                .expect("resource event");
+            let receipt = matches!(
+                event,
+                crate::types::AsyncSubresourceFetchEvent::NativeNetwork(_)
+            );
+            let _ = vm
+                .complete_async_subresource_fetch_event_body(event)
+                .expect("resource owner admission");
+            if !receipt {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("resource callback must follow its physical progress receipts");
+}
+
 const ZHIHU_CAPABILITY_PROBE_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/script_vm/fixtures/zhihu-capability-probe.html"
@@ -361,13 +440,9 @@ fn register_pending_window_fetch_for_test(
                 });
             }
             PendingWindowFetchTestStage::Streaming => {
-                host.record_streaming_subresource_fetch(
-                    crate::types::StreamingSubresourceFetchState {
+                host.record_streaming_subresource_fetch({
+                    let state = crate::types::StreamingSubresourceFetchState {
                         pending,
-                        request_url: url.clone(),
-                        request_method: "GET".to_owned(),
-                        request_headers: Vec::new(),
-                        request_body: None,
                         body_source_id: 10_000 + internal_id,
                         head: moli_fetch::ResponseHead {
                             final_url: url.clone(),
@@ -380,12 +455,25 @@ fn register_pending_window_fetch_for_test(
                             from_cache: false,
                             negotiated_http_version: None,
                         },
-                        network_request_headers: None,
-                        body_writer: Default::default(),
                         event_source_parser: None,
                         xhr_response: None,
-                    },
-                );
+                    };
+                    state
+                        .pending
+                        .response_stream()
+                        .buffer_head(std::sync::Arc::new(crate::network::ResourceResponseHead {
+                            status_text: None,
+                            head: state.head.clone(),
+                            network_request_headers: None,
+                        }));
+                    let body_writer: crate::types::SubresourceResponseBodyWriter =
+                        Default::default();
+                    state
+                        .pending
+                        .response_stream()
+                        .set_body_writer_for_test(body_writer);
+                    state
+                });
             }
             PendingWindowFetchTestStage::Auth => {
                 host.record_pending_subresource_auth(crate::types::PendingSubresourceAuthState {
@@ -408,10 +496,6 @@ fn register_pending_window_fetch_for_test(
                 host.record_pending_subresource_response(
                     crate::types::PendingSubresourceResponseState {
                         pending,
-                        request_url: url.clone(),
-                        request_method: "GET".to_owned(),
-                        request_headers: Vec::new(),
-                        request_body: None,
                         response: crate::types::NavigationResponse::from_text_body(
                             url.clone(),
                             200,
@@ -2363,16 +2447,13 @@ async fn child_navigation_retires_local_window_owned_xhr() {
     );
 
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id,
-        request_url: Url::parse("https://xhr-execution-context.test/pending").unwrap(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: None,
         skip_fetch_security_validation: false,
         response_filter: None,
         network_error_text: None,
-        result: Err("stale retired XHR completion".to_owned()),
+        result: Err("stale retired XHR completion".to_owned().into()),
     })
     .expect("late completion for retired XHR should be harmless");
     let stale_open = vm
@@ -2755,6 +2836,7 @@ fn main_document_open_preserves_ordinary_and_keepalive_fetches() {
 #[test]
 fn main_document_open_fetch_redirect_uses_source_document_csp_report_context() {
     let mut vm = new_storage_test_vm("https://main-fetch-csp-owner.test/source-document");
+    let network = NativeResourceOutput::observe(&vm);
     vm.set_fetch_subresource_interception(
         true,
         Some(crate::types::SubresourceResourceType::CspReport),
@@ -2779,6 +2861,11 @@ fn main_document_open_fetch_redirect_uses_source_document_csp_report_context() {
             ))
         })
         .expect("main Fetch should capture its source Document CSP context");
+    let registered_handle = vm
+        ._context_host
+        .borrow()
+        .pending_subresource_network(registered.0)
+        .handle();
     let source_document_owner = registered.4.owner();
 
     vm.eval(
@@ -2812,16 +2899,13 @@ fn main_document_open_fetch_redirect_uses_source_document_csp_report_context() {
     );
 
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: registered.0,
-        request_url: request_url.clone(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: Some("OK".to_owned()),
         skip_fetch_security_validation: true,
         response_filter: None,
         network_error_text: None,
-        result: Ok(redirected_fetch_response(&request_url, final_url)),
+        result: Ok(redirected_fetch_response(&request_url, final_url).into()),
     })
     .expect("source-owned Fetch redirect should complete in the preserved LocalWindow");
 
@@ -2838,17 +2922,17 @@ fn main_document_open_fetch_redirect_uses_source_document_csp_report_context() {
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].1, registered.4);
     assert!(!reports[0].2, "CSP report transport must not retain V8");
-    assert!(vm.take_network_output().into_items().any(|item| matches!(
-        item,
-        crate::types::ScriptNetworkOutputItem::SubresourceNetworkRecord(record)
-            if record.resource_type() == crate::types::SubresourceResourceType::Fetch
-                && matches!(record.outcome(), crate::types::SubresourceNetworkOutcome::Success { .. })
-    )));
+    let items = network.take();
+    assert!(matches!(
+        native_resource_terminal(&items, registered_handle).result(),
+        crate::types::SubresourceBodyFinishedResult::Ready(_)
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn child_navigation_aborts_fetch_and_detaches_keepalive() {
     let mut vm = new_storage_test_vm("https://child-owner-fetch.test/");
+    let network = NativeResourceOutput::observe(&vm);
     vm.eval(
         r#"
         (() => {
@@ -2921,6 +3005,11 @@ async fn child_navigation_aborts_fetch_and_detaches_keepalive() {
         })
         .expect("child Fetches should register");
 
+    let keepalive_handle = vm
+        ._context_host
+        .borrow()
+        .pending_subresource_network(keepalive.0)
+        .handle();
     vm.eval("__ownerBoundFetchFrame.srcdoc = '<p>replacement</p>'; 'queued'")
         .expect("child replacement should queue");
     assert_eq!(
@@ -2979,26 +3068,20 @@ async fn child_navigation_aborts_fetch_and_detaches_keepalive() {
     );
 
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: ordinary.0,
-        request_url: Url::parse("https://fetch-execution-context.test/pending").unwrap(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: None,
         skip_fetch_security_validation: false,
         response_filter: None,
         network_error_text: None,
-        result: Err("stale retired Fetch completion".to_owned()),
+        result: Err("stale retired Fetch completion".to_owned().into()),
     })
     .expect("late ordinary Fetch completion should be harmless");
-    let _ = vm.take_network_output();
+    let _ = network.take();
     let final_url = Url::parse("https://fetch-execution-context.test/pending").unwrap();
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: keepalive.0,
-        request_url: final_url.clone(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: Some("OK".to_owned()),
         skip_fetch_security_validation: false,
         response_filter: None,
@@ -3008,7 +3091,8 @@ async fn child_navigation_aborts_fetch_and_detaches_keepalive() {
             200,
             vec![("content-type".to_owned(), "text/plain".to_owned())],
             "keepalive completed".to_owned(),
-        )),
+        )
+        .into()),
     })
     .expect("detached keepalive completion should remain observable without V8");
     assert!(
@@ -3017,27 +3101,19 @@ async fn child_navigation_aborts_fetch_and_detaches_keepalive() {
             .pending_window_fetch_execution_contexts_for_test()
             .is_empty()
     );
-    let records = vm
-        .take_network_output()
-        .into_items()
-        .filter(|item| {
-            matches!(
-                item,
-                crate::types::ScriptNetworkOutputItem::SubresourceNetworkRecord(record)
-                    if record.url().as_str()
-                        == "https://fetch-execution-context.test/pending"
-            )
-        })
-        .count();
-    assert_eq!(
-        records, 1,
-        "detached keepalive must preserve network observation without settling the old Promise"
+    let items = network.take();
+    assert!(
+        matches!(native_resource_terminal(&items, keepalive_handle).result(),
+        crate::types::SubresourceBodyFinishedResult::Ready(body)
+            if body.diagnostic_bytes().as_ref() == b"keepalive completed"),
+        "detached keepalive must preserve the original response without settling the old Promise"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn detached_keepalive_redirect_reports_source_document_csp_without_v8() {
     let mut vm = new_storage_test_vm("https://detached-fetch-csp-owner.test/");
+    let network = NativeResourceOutput::observe(&vm);
     vm.set_fetch_subresource_interception(
         true,
         Some(crate::types::SubresourceResourceType::CspReport),
@@ -3108,6 +3184,16 @@ async fn detached_keepalive_redirect_reports_source_document_csp_without_v8() {
             ))
         })
         .expect("child keepalive Fetches should capture their source Document policy");
+    let report_only_fetch_handle = vm
+        ._context_host
+        .borrow()
+        .pending_subresource_network(report_only_fetch.0)
+        .handle();
+    let enforce_fetch_handle = vm
+        ._context_host
+        .borrow()
+        .pending_subresource_network(enforce_fetch.0)
+        .handle();
     assert_eq!(report_only_fetch.4, enforce_fetch.4);
 
     vm.eval("__detachedFetchCspFrame.srcdoc = '<p>replacement</p>'; 'queued'")
@@ -3138,33 +3224,24 @@ async fn detached_keepalive_redirect_reports_source_document_csp_without_v8() {
 
     let report_only_final = Url::parse("https://report-only-redirect-target.test/final").unwrap();
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: report_only_fetch.0,
-        request_url: report_only_request.clone(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: Some("OK".to_owned()),
         skip_fetch_security_validation: true,
         response_filter: None,
         network_error_text: None,
-        result: Ok(redirected_fetch_response(
-            &report_only_request,
-            report_only_final,
-        )),
+        result: Ok(redirected_fetch_response(&report_only_request, report_only_final).into()),
     })
     .expect("detached report-only keepalive should complete without V8");
     let enforce_final = Url::parse("https://enforce-redirect-target.test/final").unwrap();
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: enforce_fetch.0,
-        request_url: enforce_request.clone(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: Some("OK".to_owned()),
         skip_fetch_security_validation: true,
         response_filter: None,
         network_error_text: None,
-        result: Ok(redirected_fetch_response(&enforce_request, enforce_final)),
+        result: Ok(redirected_fetch_response(&enforce_request, enforce_final).into()),
     })
     .expect("detached enforcing keepalive should fail without entering V8");
 
@@ -3190,34 +3267,16 @@ async fn detached_keepalive_redirect_reports_source_document_csp_without_v8() {
                     && *credentials == moli_fetch::RequestCredentialsMode::SameOrigin
             })
     );
-    let fetch_records = vm
-        .take_network_output()
-        .into_items()
-        .filter_map(|item| match item {
-            crate::types::ScriptNetworkOutputItem::SubresourceNetworkRecord(record)
-                if record.resource_type() == crate::types::SubresourceResourceType::Fetch =>
-            {
-                Some(record)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(fetch_records.len(), 2);
-    assert!(fetch_records.iter().any(|record| {
-        record.url() == &report_only_request
-            && matches!(
-                record.outcome(),
-                crate::types::SubresourceNetworkOutcome::Success { .. }
-            )
-    }));
-    assert!(fetch_records.iter().any(|record| {
-        record.url() == &enforce_request
-            && matches!(
-                record.outcome(),
-                crate::types::SubresourceNetworkOutcome::Failure { error_text }
-                    if error_text.contains("Content Security Policy")
-            )
-    }));
+    let items = network.take();
+    assert!(matches!(
+        native_resource_terminal(&items, report_only_fetch_handle).result(),
+        crate::types::SubresourceBodyFinishedResult::Ready(_)
+    ));
+    assert!(
+        matches!(native_resource_terminal(&items, enforce_fetch_handle).result(),
+        crate::types::SubresourceBodyFinishedResult::FailedWithPartialBody { error_text, .. }
+            if error_text.contains("Content Security Policy"))
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3365,13 +3424,10 @@ async fn child_navigation_keeps_accepted_beacon_network_only_and_rejects_stale_s
     .expect(
         "accepted request must complete after its original Document retires without entering V8",
     );
-    for _ in 0..2 {
-        let event = completions
-            .pop_next_async_subresource_event()
-            .expect("native response and terminal receipts");
-        assert!(matches!(vm.complete_async_subresource_fetch_event_body(event).unwrap(),
-            crate::script_vm::subresource_fetch::AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered));
-    }
+    assert!(
+        completions.pop_next_async_subresource_event().is_none(),
+        "synchronous completion must record its receipts before returning"
+    );
     assert!(
         vm._context_host
             .borrow()
@@ -3447,11 +3503,8 @@ fn main_document_open_preserves_accepted_beacon_without_rebind() {
 
     let request_url = Url::parse("https://beacon-execution-context.test/main").unwrap();
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: accepted[0].0,
-        request_url: request_url.clone(),
-        request_method: "POST".to_owned(),
-        request_headers: Vec::new(),
-        request_body: Some("payload".to_owned()),
         response_status_text: Some("No Content".to_owned()),
         skip_fetch_security_validation: false,
         response_filter: None,
@@ -3461,7 +3514,8 @@ fn main_document_open_preserves_accepted_beacon_without_rebind() {
             204,
             Vec::new(),
             String::new(),
-        )),
+        )
+        .into()),
     })
     .expect("accepted main Beacon should complete without entering V8");
     assert!(
@@ -3607,13 +3661,10 @@ async fn child_csp_report_keeps_exact_violation_document_without_v8_after_naviga
     .expect(
         "accepted request must complete after its original Document retires without entering V8",
     );
-    for _ in 0..2 {
-        let event = completions
-            .pop_next_async_subresource_event()
-            .expect("native response and terminal receipts");
-        assert!(matches!(vm.complete_async_subresource_fetch_event_body(event).unwrap(),
-            crate::script_vm::subresource_fetch::AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered));
-    }
+    assert!(
+        completions.pop_next_async_subresource_event().is_none(),
+        "synchronous completion must record its receipts before returning"
+    );
     assert!(
         vm._context_host
             .borrow()
@@ -3704,11 +3755,8 @@ fn main_document_open_preserves_accepted_csp_report_but_rejects_stale_owner_reus
     );
 
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: accepted[0].0,
-        request_url: report_url.clone(),
-        request_method: "POST".to_owned(),
-        request_headers: Vec::new(),
-        request_body: Some("report".to_owned()),
         response_status_text: Some("No Content".to_owned()),
         skip_fetch_security_validation: false,
         response_filter: None,
@@ -3718,7 +3766,8 @@ fn main_document_open_preserves_accepted_csp_report_but_rejects_stale_owner_reus
             204,
             Vec::new(),
             String::new(),
-        )),
+        )
+        .into()),
     })
     .expect("accepted main CSP report should complete without entering V8");
     assert!(
@@ -3732,6 +3781,7 @@ fn main_document_open_preserves_accepted_csp_report_but_rejects_stale_owner_reus
 #[test]
 fn isolated_realm_destruction_aborts_fetch_and_detaches_keepalive() {
     let mut vm = new_storage_test_vm("https://isolated-fetch-owner.test/");
+    let network = NativeResourceOutput::observe(&vm);
     let main_owner = vm
         .current_main_document_task_owner()
         .expect("main document owner");
@@ -3768,6 +3818,11 @@ fn isolated_realm_destruction_aborts_fetch_and_detaches_keepalive() {
         )
         .expect("isolated Fetches should register");
 
+    let keepalive_handle = vm
+        ._context_host
+        .borrow()
+        .pending_subresource_network(keepalive.0)
+        .handle();
     vm.destroy_isolated_world_context(isolated_context_id);
 
     assert!(ordinary.3.is_cancelled());
@@ -3789,11 +3844,7 @@ fn isolated_realm_destruction_aborts_fetch_and_detaches_keepalive() {
     vm.start_streaming_async_subresource_fetch(crate::types::AsyncSubresourceStreamingStarted {
         internal_id: keepalive.0,
         request_url: request_url.clone(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         body_source_id,
-        network_request_headers: None,
         head: moli_fetch::ResponseHead {
             final_url: request_url,
             status: 200,
@@ -3821,18 +3872,12 @@ fn isolated_realm_destruction_aborts_fetch_and_detaches_keepalive() {
         "detached streaming terminal must release its host state"
     );
     assert!(!keepalive.3.is_cancelled());
-    assert_eq!(
-        vm.take_network_output()
-            .into_items()
-            .filter(|item| matches!(
-                item,
-                crate::types::ScriptNetworkOutputItem::SubresourceNetworkRecord(record)
-                    if record.url().as_str()
-                        == "https://fetch-execution-context.test/pending"
-            ))
-            .count(),
-        1,
-        "detached streaming keepalive must preserve terminal network observation"
+    let items = network.take();
+    assert!(
+        matches!(native_resource_terminal(&items, keepalive_handle).result(),
+        crate::types::SubresourceBodyFinishedResult::Ready(body)
+            if body.diagnostic_bytes().as_ref() == b"detached streaming body"),
+        "detached streaming keepalive must preserve the original response"
     );
 }
 
@@ -12072,20 +12117,7 @@ async fn web_font_requests_and_registration_follow_effective_stylesheet_media() 
 
     release_tx.send(()).expect("release font response");
     server.await.expect("font server should finish");
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            resource_completions.wait_for_arrival_without_timeout(),
-        )
-        .await
-        .expect("web font completion should reach the Networking source")
-    );
-    let completion = resource_completions
-        .pop_next_async_subresource_event()
-        .expect("web font completion must retain its typed terminal");
-    let _ = vm
-        .complete_async_subresource_fetch_event_body(completion)
-        .expect("web font completion should apply to its current document owner");
+    apply_next_async_subresource_callback_for_test(&mut vm, &mut resource_completions).await;
     assert_eq!(
         vm.document_web_font_counts_for_test(),
         (1, 1, 1),
@@ -12197,20 +12229,7 @@ async fn imported_web_font_keeps_its_response_base_slot_through_layout_reconcili
     font_release
         .send(true)
         .expect("release imported Ahem response");
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            resource_completions.wait_for_arrival_without_timeout(),
-        )
-        .await
-        .expect("imported font completion should reach the resource source")
-    );
-    let completion = resource_completions
-        .pop_next_async_subresource_event()
-        .expect("imported font completion body");
-    let _ = vm
-        .complete_async_subresource_fetch_event_body(completion)
-        .expect("the response-base slot should accept its font completion");
+    apply_next_async_subresource_callback_for_test(&mut vm, &mut resource_completions).await;
     assert_eq!(
         vm.document_web_font_counts_for_test(),
         (1, 1, 1),
@@ -12283,20 +12302,7 @@ style.textContent = '@font-face {{ font-family: PendingPrint; src: url({font_url
 
     release_tx.send(()).expect("release stale font response");
     server.await.expect("font server should finish");
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            resource_completions.wait_for_arrival_without_timeout(),
-        )
-        .await
-        .expect("stale font completion should reach the Networking source")
-    );
-    let completion = resource_completions
-        .pop_next_async_subresource_event()
-        .expect("stale font completion must retain its typed terminal");
-    let _ = vm
-        .complete_async_subresource_fetch_event_body(completion)
-        .expect("stale font completion should settle without mutating layout fonts");
+    apply_next_async_subresource_callback_for_test(&mut vm, &mut resource_completions).await;
     assert_eq!(vm.document_web_font_counts_for_test(), (0, 0, 0));
     assert_eq!(
         vm._context_host
@@ -12739,16 +12745,13 @@ async fn main_image_source_restart_cancels_exact_request_and_drops_stale_termina
     );
 
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: first_request_id,
-        request_url: Url::parse(&image_url).expect("image request URL"),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: None,
         skip_fetch_security_validation: false,
         response_filter: None,
         network_error_text: None,
-        result: Err("stale cancelled image completion".to_owned()),
+        result: Err("stale cancelled image completion".to_owned().into()),
     })
     .expect("stale cancelled image completion should be harmless");
     wait_for_image_load_event_executor_test_task(&mut vm, "replacement image decode completion")
@@ -13408,16 +13411,13 @@ async fn main_media_source_restart_cancels_exact_network_request_and_stale_termi
     );
 
     vm.complete_async_subresource_fetch(crate::types::AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id: first_request_id,
-        request_url: Url::parse(&media_url).expect("media request URL"),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: None,
         skip_fetch_security_validation: false,
         response_filter: None,
         network_error_text: None,
-        result: Err("stale cancelled media completion".to_owned()),
+        result: Err("stale cancelled media completion".to_owned().into()),
     })
     .expect("stale cancelled media completion should be harmless");
 
@@ -13838,6 +13838,11 @@ async fn main_text_track_network_terminal_gates_canplay_without_delaying_complet
         "resource completion may only queue the later track event"
     );
 
+    assert!(
+        !vm.apply_one_page_resource_terminal_owner_admission()
+            .expect("apply the native terminal receipt before the text-track event"),
+        "the text-track resource callback must already be consumed"
+    );
     assert!(
         vm.run_one_text_track_networking_task_executor_turn(&loader)
             .await

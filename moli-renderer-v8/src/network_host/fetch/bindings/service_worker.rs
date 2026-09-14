@@ -96,7 +96,7 @@ pub(super) fn dispatch_service_worker_fetch(
         network_context,
         result_tx: ServiceWorkerFetchResultSender::Page {
             completion_tx: host.resource_completion_sender(),
-            network: host.pending_subresource_network_request(internal_id),
+            network: host.pending_subresource_response_stream(internal_id),
         },
         request_client: prepared.resource_loader.request_client().clone(),
         resource_task_runner: prepared.resource_loader.task_runner(),
@@ -106,20 +106,19 @@ pub(super) fn dispatch_service_worker_fetch(
         return Ok(Some(internal_id));
     }
 
-    let _ =
-        host.resource_completion_sender()
-            .send_async_subresource(AsyncSubresourceFetchCompletion {
-                internal_id,
-                request_url: prepared.resolved_url.clone(),
-                request_method: prepared.method.clone(),
-                request_headers: prepared.request_headers.clone(),
-                request_body: request_body_text,
-                response_status_text: None,
-                skip_fetch_security_validation: false,
-                response_filter: None,
-                network_error_text: None,
-                result: Err("service worker fetch dispatch failed".to_owned()),
-            });
+    crate::network_host::send_resource_completion(
+        &host.resource_completion_sender(),
+        host.pending_subresource_network(internal_id),
+        AsyncSubresourceFetchCompletion {
+            network_request_headers: None,
+            internal_id,
+            response_status_text: None,
+            skip_fetch_security_validation: false,
+            response_filter: None,
+            network_error_text: None,
+            result: Err("service worker fetch dispatch failed".to_owned().into()),
+        },
+    );
     Ok(Some(internal_id))
 }
 

@@ -1,3 +1,4 @@
+use crate::network::{ResourceBodyResponse, ResourceResponseFailure, ResourceResponseHead};
 use crate::service_worker_runtime::ServiceWorkerFetchResultSender;
 use anyhow::{Result, anyhow, bail};
 use std::cell::RefCell;
@@ -28,9 +29,8 @@ use crate::types::{
     PendingSubresourceContinueOutcome, PendingSubresourceFetchInfo, PendingSubresourceFetchState,
     PendingSubresourceResponseInfo, PendingSubresourceResponseState,
     PopupClassicScriptLoadCompletion, PopupDocumentLoadCompletion, RunningSubresourceFetchState,
-    StreamingSubresourceFetchState, SubresourceNetworkRequestHandle,
-    SubresourceRequestInitiatorType, SubresourceResourceType, SubresourceResponseBody,
-    SubresourceResponseBodyWriter,
+    StreamingSubresourceFetchState, SubresourceNetworkRequestHandle, SubresourceResourceType,
+    SubresourceResponseBody,
 };
 use crate::util::v8_string;
 
@@ -517,9 +517,7 @@ impl ScriptVm {
             pending.info.request_body = body.clone();
             pending.info.request_body_bytes = body.as_ref().map(|body| body.as_bytes().to_vec());
         }
-        if let PendingSubresourceContinuation::CspReport { network, .. }
-        | PendingSubresourceContinuation::Beacon(network) = &pending.continuation
-        {
+        if let Some(network) = &pending.network {
             let info = &mut pending.info;
             let changed = url.as_ref().is_some_and(|url| url != &info.url)
                 || method.as_ref().is_some_and(|method| method != &info.method)
@@ -537,8 +535,14 @@ impl ScriptVm {
                 info.request_headers = headers.clone();
             }
             if changed {
-                network.update_request(|request| {
-                    crate::network_host::keepalive_request_started(request, info)
+                network.network.update_request(|request| {
+                    crate::network_host::resource_request_started(
+                        request,
+                        info,
+                        pending.continuation.request_initiator_type(),
+                        pending.load.disposition()
+                            == crate::network::loads::ResourceLoadDisposition::Keepalive,
+                    )
                 });
             }
         }
@@ -551,7 +555,7 @@ impl ScriptVm {
             network_partition_key,
             policy_context,
             continuation,
-            network_request,
+            network,
         } = pending;
         let pending = match continuation {
             PendingSubresourceContinuation::WebSocket(connection) => {
@@ -572,7 +576,7 @@ impl ScriptVm {
                     PendingSubresourceContinueOutcome::Started,
                 ));
             }
-            PendingSubresourceContinuation::CspReport { client_id, network } => {
+            PendingSubresourceContinuation::CspReport { client_id } => {
                 let request_url = url.unwrap_or_else(|| info.url.clone());
                 let request_method = method.unwrap_or_else(|| info.method.clone());
                 let request_body_bytes = match &body {
@@ -590,8 +594,8 @@ impl ScriptVm {
                     request_mode,
                     network_partition_key,
                     policy_context,
-                    continuation: PendingSubresourceContinuation::CspReport { client_id, network },
-                    network_request,
+                    continuation: PendingSubresourceContinuation::CspReport { client_id },
+                    network,
                 };
                 if !self._context_host.borrow().network_offline() {
                     let maybe_pending = self.continue_csp_report_via_service_worker(
@@ -639,7 +643,7 @@ impl ScriptVm {
                 network_partition_key,
                 policy_context,
                 continuation,
-                network_request,
+                network,
             },
         };
         let request_url = url.unwrap_or_else(|| pending.info.url.clone());
@@ -671,10 +675,6 @@ impl ScriptVm {
         if pending.load.network_offline() {
             let activity = self.resolve_pending_subresource_fetch_body(
                 pending,
-                request_url,
-                request_method,
-                request_headers,
-                request_body,
                 None,
                 false,
                 None,
@@ -809,11 +809,7 @@ impl ScriptVm {
         let document_url = pending.info.document_url.clone();
         let frame_id = pending.info.frame_id.clone();
         let completion_tx = self._context_host.borrow().resource_completion_sender();
-        let PendingSubresourceContinuation::CspReport { network, .. } = &pending.continuation
-        else {
-            unreachable!("CSP continuation owns its native request");
-        };
-        let network = network.clone();
+        let network = pending.network().clone();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let fallback = request.clone();
         let request_client = pending.load.request_client();
@@ -889,20 +885,20 @@ impl ScriptVm {
                     Err("service worker csp report fetch dispatch closed".into()),
                 ),
             };
-            crate::network_host::send_keepalive_completion(
+            crate::network_host::send_resource_completion(
                 &completion_tx,
                 network,
                 AsyncSubresourceFetchCompletion {
                     internal_id,
-                    request_url,
-                    request_method,
-                    request_headers,
-                    request_body,
                     response_status_text: None,
                     skip_fetch_security_validation,
                     response_filter,
                     network_error_text: None,
-                    result,
+                    network_request_headers: result
+                        .as_ref()
+                        .ok()
+                        .and_then(|response| response.network_request_headers().map(<[_]>::to_vec)),
+                    result: result.map(Into::into).map_err(Into::into),
                 },
             );
         });
@@ -979,10 +975,6 @@ impl ScriptVm {
         if self._context_host.borrow().network_offline() {
             let activity = self.resolve_pending_subresource_fetch_body(
                 pending_fetch,
-                request_url,
-                request_method,
-                request_headers,
-                request_body,
                 None,
                 false,
                 None,
@@ -1033,10 +1025,6 @@ impl ScriptVm {
             .ok_or_else(|| anyhow!("unknown pending subresource auth `{internal_id}`"))?;
         let activity = self.resolve_pending_subresource_fetch_body(
             pending.pending,
-            pending.request_url,
-            pending.request_method,
-            pending.request_headers,
-            pending.request_body,
             None,
             false,
             None,
@@ -1090,10 +1078,6 @@ impl ScriptVm {
             .borrow_mut()
             .record_pending_subresource_response(PendingSubresourceResponseState {
                 pending,
-                request_url,
-                request_method,
-                request_headers,
-                request_body,
                 response,
             });
         if intercept_response {
@@ -1126,7 +1110,7 @@ impl ScriptVm {
             network_partition_key,
             policy_context,
             continuation,
-            network_request,
+            network,
         } = pending;
         let pending = match continuation {
             PendingSubresourceContinuation::WebSocket(connection) => {
@@ -1145,16 +1129,11 @@ impl ScriptVm {
                 network_partition_key,
                 policy_context,
                 continuation,
-                network_request,
+                network,
             },
         };
-        let info = pending.info.clone();
         let activity = self.resolve_pending_subresource_fetch_body(
             pending,
-            info.url,
-            info.method,
-            info.request_headers,
-            info.request_body,
             None,
             false,
             None,
@@ -1185,7 +1164,7 @@ impl ScriptVm {
             network_partition_key,
             policy_context,
             continuation,
-            network_request,
+            network,
         } = pending;
         let pending = match continuation {
             PendingSubresourceContinuation::WebSocket(connection) => {
@@ -1225,16 +1204,12 @@ impl ScriptVm {
                 network_partition_key,
                 policy_context,
                 continuation,
-                network_request,
+                network,
             },
         };
         let info = pending.info.clone();
         let activity = self.resolve_pending_subresource_fetch_body(
             pending,
-            info.url.clone(),
-            info.method,
-            info.request_headers,
-            info.request_body,
             None,
             false,
             None,
@@ -1302,10 +1277,6 @@ impl ScriptVm {
         );
         let activity = self.resolve_pending_subresource_fetch_body(
             pending.pending,
-            pending.request_url,
-            pending.request_method,
-            pending.request_headers,
-            pending.request_body,
             None,
             false,
             None,
@@ -1339,10 +1310,6 @@ impl ScriptVm {
             .ok_or_else(|| anyhow!("unknown pending subresource response `{internal_id}`"))?;
         let activity = self.resolve_pending_subresource_fetch_body(
             pending.pending,
-            pending.request_url,
-            pending.request_method,
-            pending.request_headers,
-            pending.request_body,
             None,
             false,
             None,
@@ -1397,10 +1364,6 @@ impl ScriptVm {
             .ok_or_else(|| anyhow!("unknown pending subresource response `{internal_id}`"))?;
         let activity = self.resolve_pending_subresource_fetch_body(
             pending.pending,
-            pending.request_url,
-            pending.request_method,
-            pending.request_headers,
-            pending.request_body,
             None,
             false,
             None,
@@ -1511,30 +1474,12 @@ impl ScriptVm {
     fn resolve_network_only_subresource_fetch(
         &mut self,
         pending: PendingSubresourceFetchState,
-        request_url: Url,
-        request_method: String,
-        request_headers: Vec<(String, String)>,
-        request_body: Option<String>,
-        response_status_text: Option<String>,
         skip_fetch_security_validation: bool,
         network_error_text: Option<String>,
         result: std::result::Result<crate::protocol_types::NavigationResponse, String>,
     ) -> Result<()> {
-        if let PendingSubresourceContinuation::CspReport { network, .. }
-        | PendingSubresourceContinuation::Beacon(network) = &pending.continuation
-        {
-            let result = result.map_err(|message| network_error_text.unwrap_or(message));
-            crate::network_host::finish_keepalive_result(network, &result);
-            pending.load.finish();
-            return Ok(());
-        }
-        let detached_window_fetch = pending.continuation.is_detached_window_fetch();
-        debug_assert!(
-            detached_window_fetch || pending.execution_context.is_window_network_only(),
-            "network-only completion must be an accepted fire-and-forget request or detached Fetch"
-        );
-
-        let result = if detached_window_fetch {
+        let physical = result.as_ref().ok().cloned();
+        let result = if pending.continuation.is_detached_window_fetch() {
             result.and_then(|response| {
                 if !response.redirect_chain.is_empty()
                     && let Some(message) = detached_window_fetch_csp_redirect_failure_message(
@@ -1561,77 +1506,14 @@ impl ScriptVm {
         } else {
             result
         };
-
-        match result {
-            Ok(response) => {
-                let network_request_headers = response
-                    .network_request_headers()
-                    .map(|headers| headers.to_vec());
-                let request_cookie_report = response
-                    .request_cookie_report
-                    .clone()
-                    .or_else(|| pending.info.request_cookie_report.clone());
-                let response_body = SubresourceResponseBody::from_navigation_response(&response);
-                let mut network_record = crate::types::SubresourceNetworkRecord::success_with_body(
-                    pending.info.frame_id.clone(),
-                    pending.info.document_url.clone(),
-                    request_url,
-                    request_method,
-                    request_headers,
-                    request_body,
-                    pending.info.resource_type,
-                    request_cookie_report,
-                    response.redirect_chain,
-                    response.final_url,
-                    response.status,
-                    response.headers,
-                    response_body,
-                    response.cookie_set_reports,
-                )
-                .with_from_cache(response.from_cache)
-                .with_negotiated_http_version(response.negotiated_http_version)
-                .with_network_request_headers(network_request_headers)
-                .with_request_initiator_type(SubresourceRequestInitiatorType::Script)
-                .with_request_body_bytes(pending.info.request_body_bytes.clone());
-                if let Some(status_text) = response_status_text.as_deref() {
-                    network_record = network_record.with_response_status_text(status_text);
-                }
-                if let Some(handle) = pending.info.network_request_handle {
-                    network_record = network_record.with_request_handle(handle);
-                }
-                self._context_host
-                    .borrow_mut()
-                    .record_subresource_network(network_record);
-            }
-            Err(error_text) => {
-                let error_text = network_error_text.as_deref().unwrap_or(&error_text);
-                let mut network_record = crate::types::SubresourceNetworkRecord::failure(
-                    pending.info.frame_id.clone(),
-                    pending.info.document_url.clone(),
-                    request_url,
-                    request_method,
-                    request_headers,
-                    request_body,
-                    pending.info.resource_type,
-                    error_text.to_owned(),
-                )
-                .with_request_initiator_type(SubresourceRequestInitiatorType::Script)
-                .with_request_body_bytes(pending.info.request_body_bytes.clone());
-                if let Some(handle) = pending.info.network_request_handle {
-                    network_record = network_record.with_request_handle(handle);
-                }
-                self._context_host
-                    .borrow_mut()
-                    .record_subresource_network(network_record);
-            }
-        }
-        tracing::debug!(
-            internal_id = pending.info.internal_id,
-            detached_owner = ?pending.execution_context.detached_window_fetch_identity(),
-            accepted_context = ?pending.execution_context.window_network_only_identity(),
-            accepted_document = ?pending.execution_context.window_document_network_only_identity(),
-            "completed network-only subresource without entering V8"
+        publish_buffered_subresource_result(
+            &self._context_host,
+            pending.network(),
+            physical.as_ref(),
+            &result,
+            network_error_text.as_deref(),
         );
+        pending.load.finish();
         Ok(())
     }
 
@@ -1639,10 +1521,6 @@ impl ScriptVm {
     fn resolve_pending_event_source_fetch(
         &mut self,
         pending: PendingSubresourceFetchState,
-        request_url: Url,
-        request_method: String,
-        request_headers: Vec<(String, String)>,
-        request_body: Option<String>,
         response_status_text: Option<String>,
         skip_fetch_security_validation: bool,
         network_error_text: Option<String>,
@@ -1680,22 +1558,10 @@ impl ScriptVm {
                 match result {
                     Err(error_text) => {
                         let error_text = network_error_text.unwrap_or(error_text);
-                        let mut record = crate::types::SubresourceNetworkRecord::failure(
-                            pending.info.frame_id.clone(),
-                            pending.info.document_url.clone(),
-                            request_url,
-                            request_method,
-                            request_headers,
-                            request_body,
-                            SubresourceResourceType::EventSource,
-                            error_text,
+                        pending.network().failed_with(
+                            &ResourceResponseFailure::Request(error_text),
+                            subresource_turn_observer(&context_host),
                         );
-                        if let Some(handle) = request_handle {
-                            record = record.with_request_handle(handle);
-                        }
-                        context_host
-                            .borrow_mut()
-                            .record_subresource_network(record);
                         crate::network_host::fail_event_source_connection(
                             scope,
                             event_source,
@@ -1730,22 +1596,13 @@ impl ScriptVm {
                                 .flatten()
                         });
                         if let Some(error_text) = security_error {
-                            let mut record = crate::types::SubresourceNetworkRecord::failure(
-                                pending.info.frame_id.clone(),
-                                pending.info.document_url.clone(),
-                                request_url,
-                                request_method,
-                                request_headers,
-                                request_body,
-                                SubresourceResourceType::EventSource,
-                                error_text,
+                            publish_buffered_subresource_result(
+                                &context_host,
+                                pending.network(),
+                                Some(&response),
+                                &Err(error_text),
+                                None,
                             );
-                            if let Some(handle) = request_handle {
-                                record = record.with_request_handle(handle);
-                            }
-                            context_host
-                                .borrow_mut()
-                                .record_subresource_network(record);
                             crate::network_host::fail_event_source_connection(
                                 scope,
                                 event_source,
@@ -1753,66 +1610,37 @@ impl ScriptVm {
                             );
                         } else {
                             let head = response.head();
-                            if let Some(handle) = request_handle {
-                                context_host
-                                    .borrow_mut()
-                                    .record_subresource_response_started(
-                                        crate::types::SubresourceResponseStarted::new(
-                                            handle,
-                                            response.redirect_chain.clone(),
-                                            response.final_url.clone(),
-                                            response.status,
-                                            response.headers.clone(),
-                                            response.cookie_set_reports.clone(),
-                                        )
-                                        .with_status_text(response_status_text)
-                                        .with_request_cookie_report(head.request_cookie_report.clone())
-                                        .with_from_cache(response.from_cache)
-                                        .with_negotiated_http_version(
-                                            response.negotiated_http_version,
-                                        )
-                                        .with_network_request_headers(
-                                            response
-                                                .network_request_headers()
-                                                .map(|headers| headers.to_vec()),
-                                        ),
-                                    );
-                            }
                             if let Some(error_text) =
                                 crate::network_host::event_source_response_error(&head)
                             {
-                                if let Some(handle) = request_handle {
-                                    context_host
-                                        .borrow_mut()
-                                        .record_subresource_body_finished(
-                                            crate::types::SubresourceBodyFinished::failed(
-                                                handle, error_text,
-                                            ),
-                                        );
-                                }
+                                publish_buffered_subresource_result(
+                                    &context_host,
+                                    pending.network(),
+                                    Some(&response),
+                                    &Err(error_text),
+                                    None,
+                                );
                                 crate::network_host::fail_event_source_connection(
                                     scope,
                                     event_source,
                                     crate::network_host::EventSourceTerminalMode::Close,
                                 );
                             } else {
+                                pending.network().body_completed_with(
+                                    ResourceResponseHead {
+                                        head: response.head(),
+                                        status_text: response_status_text.clone(),
+                                        network_request_headers: response.network_request_headers().map(<[_]>::to_vec),
+                                    },
+                                    SubresourceResponseBody::from_navigation_response(&response),
+                                    subresource_turn_observer(&context_host),
+                                );
                                 crate::network_host::open_event_source_connection(
                                     scope,
                                     event_source,
                                     &response.final_url,
                                 );
                                 let bytes = response.body_bytes();
-                                if let Some(handle) = request_handle
-                                    && !bytes.is_empty()
-                                {
-                                    context_host.borrow_mut().record_subresource_data_received(
-                                        crate::types::SubresourceDataReceived::new(
-                                            handle,
-                                            bytes.len(),
-                                            bytes.len(),
-                                        ),
-                                    );
-                                }
                                 let mut parser = crate::network_host::EventSourceParser::new(
                                     crate::network_host::event_source_last_event_id(
                                         scope,
@@ -1845,16 +1673,6 @@ impl ScriptVm {
                                         parser.reconnect_delay_ms(),
                                     );
                                 }
-                                if let Some(handle) = request_handle {
-                                    context_host.borrow_mut().record_subresource_body_finished(
-                                        crate::types::SubresourceBodyFinished::ready_after_streaming(
-                                            handle,
-                                            SubresourceResponseBody::from_navigation_response(
-                                                &response,
-                                            ),
-                                        ),
-                                    );
-                                }
                                 if crate::network_host::event_source_ready_state(scope, event_source)
                                     != crate::network_host::EVENT_SOURCE_CLOSED
                                 {
@@ -1881,10 +1699,6 @@ impl ScriptVm {
     fn resolve_pending_subresource_fetch_body(
         &mut self,
         pending: PendingSubresourceFetchState,
-        request_url: Url,
-        request_method: String,
-        request_headers: Vec<(String, String)>,
-        request_body: Option<String>,
         response_status_text: Option<String>,
         skip_fetch_security_validation: bool,
         response_filter: Option<AsyncSubresourceFetchResponseFilter>,
@@ -1908,11 +1722,6 @@ impl ScriptVm {
             return self
                 .resolve_network_only_subresource_fetch(
                     pending,
-                    request_url,
-                    request_method,
-                    request_headers,
-                    request_body,
-                    response_status_text,
                     skip_fetch_security_validation,
                     network_error_text,
                     result,
@@ -1930,16 +1739,13 @@ impl ScriptVm {
         if pending.continuation.is_window_event_source() {
             return self.resolve_pending_event_source_fetch(
                 pending,
-                request_url,
-                request_method,
-                request_headers,
-                request_body,
                 response_status_text,
                 skip_fetch_security_validation,
                 network_error_text,
                 result,
             );
         }
+        let physical = result.as_ref().ok().cloned();
         let context_host = self._context_host.clone();
         let mut completed_web_font = None;
         let result = self.renderer_document_isolate.with_entered_renderer_document_isolate(|isolate| {
@@ -2025,66 +1831,29 @@ impl ScriptVm {
                 security_started,
             );
 
-            let request_initiator_type = pending.continuation.request_initiator_type();
             match result {
                 Ok(response) => {
                     let response_status = response.status;
-                    let request_cookie_report = response
-                        .request_cookie_report
-                        .clone()
-                        .or_else(|| pending.info.request_cookie_report.clone());
-                    let record_started =
-                        moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
-                    let mut network_record = if opaque_response_blocked {
-                        crate::types::SubresourceNetworkRecord::failure(
-                            pending.info.frame_id.clone(),
-                            pending.info.document_url.clone(),
-                            request_url.clone(),
-                            request_method,
-                            request_headers,
-                            request_body,
-                            pending.info.resource_type,
-                            crate::network_host::ABORTED_ERROR_TEXT.to_owned(),
-                        )
-                        .with_request_initiator_type(request_initiator_type)
-                        .with_request_body_bytes(pending.info.request_body_bytes.clone())
+                    let record_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
+                    if opaque_response_blocked {
+                        publish_buffered_subresource_result(
+                            &context_host,
+                            pending.network(),
+                            physical.as_ref(),
+                            &Err(crate::network_host::ABORTED_ERROR_TEXT.to_owned()),
+                            None,
+                        );
                     } else {
-                        crate::types::SubresourceNetworkRecord::success_with_body(
-                            pending.info.frame_id.clone(),
-                            pending.info.document_url.clone(),
-                            request_url.clone(),
-                            request_method,
-                            request_headers,
-                            request_body,
-                            pending.info.resource_type,
-                            request_cookie_report,
-                            response.redirect_chain.clone().into_iter().collect(),
-                            response.final_url.clone(),
-                            response.status,
-                            response.headers.clone(),
+                        pending.network().body_completed_with(
+                            ResourceResponseHead {
+                                head: response.head(),
+                                status_text: response_status_text.clone(),
+                                network_request_headers: response.network_request_headers().map(<[_]>::to_vec),
+                            },
                             SubresourceResponseBody::from_navigation_response(&response),
-                            response.cookie_set_reports.clone(),
-                        )
-                        .with_from_cache(response.from_cache)
-                        .with_negotiated_http_version(response.negotiated_http_version)
-                        .with_network_request_headers(
-                            response.network_request_headers().map(|headers| headers.to_vec()),
-                        )
-                        .with_request_initiator_type(request_initiator_type)
-                        .with_request_body_bytes(pending.info.request_body_bytes.clone())
-                    };
-                    if !opaque_response_blocked
-                        && let Some(status_text) = response_status_text.as_deref()
-                    {
-                        network_record =
-                            network_record.with_response_status_text(status_text);
+                            subresource_turn_observer(&context_host),
+                        );
                     }
-                    if let Some(handle) = pending.info.network_request_handle {
-                        network_record = network_record.with_request_handle(handle);
-                    }
-                    context_host
-                        .borrow_mut()
-                        .record_subresource_network(network_record);
                     trace_async_subresource_stage(
                         "async_subresource_network_recorded",
                         trace_fields,
@@ -2226,7 +1995,7 @@ impl ScriptVm {
                             }
                             apply_stylesheet_subresource_terminal(&context_host, binding);
                         }
-                        PendingSubresourceContinuation::Beacon(_)
+                        PendingSubresourceContinuation::Beacon
                         | PendingSubresourceContinuation::CspReport { .. }
                         | PendingSubresourceContinuation::EventSource(_)
                         | PendingSubresourceContinuation::WebSocket(_) => {}
@@ -2245,32 +2014,14 @@ impl ScriptVm {
                                 .then_some(crate::network_host::FAILED_ERROR_TEXT)
                         })
                         .unwrap_or(&error_text);
-                    let record_started =
-                        moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
-                    let mut network_record = crate::types::SubresourceNetworkRecord::failure(
-                        pending.info.frame_id.clone(),
-                        pending.info.document_url.clone(),
-                        request_url,
-                        request_method,
-                        request_headers,
-                        request_body,
-                        pending.info.resource_type,
-                        network_error_text.to_owned(),
-                    )
-                    .with_request_initiator_type(request_initiator_type);
-                    if let Some(handle) = pending.info.network_request_handle {
-                        network_record = network_record.with_request_handle(handle);
-                    }
-                    context_host
-                        .borrow_mut()
-                        .record_subresource_network(network_record);
-                    trace_async_subresource_stage(
-                        "async_subresource_network_recorded",
-                        trace_fields,
-                        record_started,
+                    publish_buffered_subresource_result(
+                        &context_host,
+                        pending.network(),
+                        physical.as_ref(),
+                        &Err(error_text.clone()),
+                        Some(network_error_text),
                     );
-                    let continuation_started =
-                        moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
+                    let continuation_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
                     match pending.continuation {
                         PendingSubresourceContinuation::Fetch(fetch) => {
                             let resolver = fetch
@@ -2338,7 +2089,7 @@ impl ScriptVm {
                             }
                             apply_stylesheet_subresource_terminal(&context_host, binding);
                         }
-                        PendingSubresourceContinuation::Beacon(_)
+                        PendingSubresourceContinuation::Beacon
                         | PendingSubresourceContinuation::CspReport { .. }
                         | PendingSubresourceContinuation::EventSource(_)
                         | PendingSubresourceContinuation::WebSocket(_) => {}
@@ -2379,15 +2130,7 @@ impl ScriptVm {
     ) {
         let task_runner = state.pending.load.task_runner();
         let internal_id = state.pending.info.internal_id;
-        let request_url = state.request_url.clone();
-        let request_method = state.request_method.clone();
-        let request_headers = state.request_headers.clone();
-        let request_body = state.request_body.clone();
-        let keepalive_network = match &state.pending.continuation {
-            PendingSubresourceContinuation::CspReport { network, .. }
-            | PendingSubresourceContinuation::Beacon(network) => Some(network.clone()),
-            _ => None,
-        };
+        let response_stream = state.pending.response_stream().clone();
         let completion_tx = self._context_host.borrow().resource_completion_sender();
         let preflight_observer = state.pending.preflight_observer(completion_tx.clone());
         {
@@ -2396,49 +2139,50 @@ impl ScriptVm {
             host.record_running_subresource_fetch(state);
         }
         task_runner.spawn(async move {
-            let result = if let Some(network) = &keepalive_network {
-                crate::network_host::fetch_buffered_keepalive(
-                    &request_client,
-                    request,
-                    cancel_handle.unwrap_or_default(),
-                    network,
-                )
-                .await
-            } else {
-                let preflight_headers = request.request_headers.clone();
-                crate::network_host::fetch_browser_subresource_with_preflight_headers_and_observer(
-                    request_client,
-                    request,
-                    cancel_handle,
-                    preflight_headers,
-                    Some(&preflight_observer),
-                )
-                .await
-                .map(|observed| {
-                    let (response, request_observation) = observed.into_parts();
-                    crate::protocol_types::NavigationResponse::from(response)
-                        .with_network_request_headers(
-                            request_observation.map(|observation| observation.into_headers()),
-                        )
-                })
+            let preflight_headers = request.request_headers.clone();
+            let observed = crate::network_host::fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer(
+                &request_client,
+                request,
+                cancel_handle,
+                preflight_headers,
+                Some(&preflight_observer),
+            ).await;
+            let mut network_request_headers = None;
+            let result = match observed {
+                Ok(observed) => {
+                    network_request_headers = observed.request_observation()
+                        .map(|request| request.headers().to_vec());
+                    let (mut response, _) = observed.into_parts();
+                    response_stream.buffer_head(std::sync::Arc::new(ResourceResponseHead {
+                        head: response.head(),
+                        status_text: None,
+                        network_request_headers: network_request_headers.clone(),
+                    }));
+                    while let Some(bytes) = response.next_chunk().await {
+                        response_stream.buffer_data(&bytes);
+                    }
+                    match response.finish().await {
+                        Ok(()) => Ok(response_stream.finish_response()
+                            .expect("buffered response retains its head")),
+                        Err(error) => Err(response_stream.failure(format!("{error:#}"))),
+                    }
+                }
+                Err(message) => Err(ResourceResponseFailure::Request(message)),
             };
             let completion = AsyncSubresourceFetchCompletion {
                 internal_id,
-                request_url,
-                request_method,
-                request_headers,
-                request_body,
                 response_status_text: None,
                 skip_fetch_security_validation: false,
                 response_filter: None,
                 network_error_text: None,
+                network_request_headers,
                 result,
             };
-            if let Some(network) = keepalive_network {
-                crate::network_host::send_keepalive_completion(&completion_tx, network, completion);
-            } else {
-                let _ = completion_tx.send_async_subresource(completion);
-            }
+            crate::network_host::send_resource_completion(
+                &completion_tx,
+                response_stream.network.clone(),
+                completion,
+            );
         });
     }
 
@@ -2560,10 +2304,6 @@ impl ScriptVm {
                         .borrow_mut()
                         .record_pending_subresource_response(PendingSubresourceResponseState {
                             pending,
-                            request_url,
-                            request_method,
-                            request_headers,
-                            request_body,
                             response,
                         });
                     self._context_host
@@ -2576,10 +2316,6 @@ impl ScriptVm {
 
                 let activity = self.resolve_pending_subresource_fetch_body(
                     pending,
-                    request_url,
-                    request_method,
-                    request_headers,
-                    request_body,
                     response_status_text.clone(),
                     skip_fetch_security_validation,
                     response_filter,
@@ -2596,10 +2332,6 @@ impl ScriptVm {
             Err(error) => {
                 let activity = self.resolve_pending_subresource_fetch_body(
                     pending,
-                    request_url,
-                    request_method,
-                    request_headers,
-                    request_body,
                     response_status_text,
                     skip_fetch_security_validation,
                     response_filter,
@@ -2648,6 +2380,18 @@ impl ScriptVm {
             },
             trace_started,
         );
+        if completion.result.is_err() {
+            let network = self._context_host.borrow().subresource_network(internal_id);
+            if let Some(network) = network {
+                completion.publish_with(&network, subresource_turn_observer(&self._context_host));
+            }
+        }
+        let result = match completion.result {
+            Ok(response) => response.into_navigation_response().map(|response| {
+                response.with_network_request_headers(completion.network_request_headers)
+            }),
+            Err(error) => Err(error.to_string()),
+        };
         let running = {
             self._context_host
                 .borrow_mut()
@@ -2673,7 +2417,7 @@ impl ScriptVm {
                 completion.skip_fetch_security_validation,
                 completion.response_filter,
                 completion.network_error_text,
-                completion.result,
+                result,
             );
             trace_async_subresource_stage(
                 "async_subresource_complete_done",
@@ -2707,15 +2451,11 @@ impl ScriptVm {
         );
         let activity = self.resolve_pending_subresource_fetch_body(
             pending,
-            completion.request_url,
-            completion.request_method,
-            completion.request_headers,
-            completion.request_body,
             completion.response_status_text,
             completion.skip_fetch_security_validation,
             completion.response_filter,
             completion.network_error_text,
-            completion.result,
+            result,
         )?;
         trace_async_subresource_stage(
             "async_subresource_complete_done",
@@ -2733,11 +2473,19 @@ impl ScriptVm {
         let trace_fields = async_subresource_trace_fields_for_event(&event);
         trace_async_subresource_stage("async_subresource_event_start", trace_fields, trace_started);
         let result = match event {
+            #[cfg(test)]
             AsyncSubresourceFetchEvent::Completion(completion) => {
                 self.complete_async_subresource_fetch_body(*completion)
             }
-            AsyncSubresourceFetchEvent::Keepalive(completion) => {
-                self.complete_async_subresource_fetch_body(completion.into_completion())
+            AsyncSubresourceFetchEvent::TransportCompletion(completion) => {
+                let network = self
+                    ._context_host
+                    .borrow()
+                    .subresource_network(completion.internal_id());
+                match network.and_then(|network| completion.claim(&network)) {
+                    Some(completion) => self.complete_async_subresource_fetch_body(completion),
+                    None => Ok(AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered),
+                }
             }
             AsyncSubresourceFetchEvent::NativeNetwork(observation) => {
                 self._context_host
@@ -2753,12 +2501,57 @@ impl ScriptVm {
                     chunk.body_source_id,
                     chunk.bytes,
                 )),
-            AsyncSubresourceFetchEvent::StreamingFinished(finished) => self
-                .finish_streaming_async_subresource_fetch_body(
+            AsyncSubresourceFetchEvent::TransportStreamingFinished {
+                body_source_id,
+                completion,
+            } => {
+                let network = self
+                    ._context_host
+                    .borrow()
+                    .subresource_network(completion.internal_id());
+                if let Some((network, completion)) = network.and_then(|network| {
+                    completion
+                        .claim(&network)
+                        .map(|completion| (network, completion))
+                }) {
+                    completion
+                        .publish_with(&network, subresource_turn_observer(&self._context_host));
+                    let (result, body) = match completion.result {
+                        Ok(response) => (Ok(()), response.body),
+                        Err(error) => {
+                            let message = error.to_string();
+                            let body = match error {
+                                ResourceResponseFailure::PartialBody { body, .. } => body,
+                                ResourceResponseFailure::Request(_) => {
+                                    SubresourceResponseBody::from_bytes(Vec::new())
+                                }
+                            };
+                            (Err(message), body)
+                        }
+                    };
+                    self.finish_streaming_async_subresource_fetch_body(
+                        completion.internal_id,
+                        body_source_id,
+                        result,
+                        body,
+                    )
+                } else {
+                    Ok(AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered)
+                }
+            }
+            #[cfg(test)]
+            AsyncSubresourceFetchEvent::StreamingFinished(finished) => {
+                let body = self
+                    ._context_host
+                    .borrow_mut()
+                    .take_test_streaming_body(finished.internal_id);
+                self.finish_streaming_async_subresource_fetch_body(
                     finished.internal_id,
                     finished.body_source_id,
                     finished.result,
-                ),
+                    body,
+                )
+            }
         };
         trace_async_subresource_stage("async_subresource_event_done", trace_fields, trace_started);
         result
@@ -2811,24 +2604,10 @@ impl ScriptVm {
 
         if let Some(error_text) = security_error {
             pending.load.cancel();
-            let mut network_record = crate::types::SubresourceNetworkRecord::failure(
-                pending.info.frame_id.clone(),
-                pending.info.document_url.clone(),
-                started.request_url,
-                started.request_method,
-                started.request_headers,
-                started.request_body,
-                pending.info.resource_type,
-                error_text,
-            )
-            .with_request_initiator_type(SubresourceRequestInitiatorType::Script)
-            .with_request_body_bytes(pending.info.request_body_bytes.clone());
-            if let Some(handle) = pending.info.network_request_handle {
-                network_record = network_record.with_request_handle(handle);
-            }
-            self._context_host
-                .borrow_mut()
-                .record_subresource_network(network_record);
+            pending.network().failed_with(
+                &pending.response_stream().failure(error_text),
+                subresource_turn_observer(&self._context_host),
+            );
             self._context_host
                 .borrow_mut()
                 .record_pending_subresource_continue_event(
@@ -2844,14 +2623,8 @@ impl ScriptVm {
             .borrow_mut()
             .record_streaming_subresource_fetch(StreamingSubresourceFetchState {
                 pending,
-                request_url: started.request_url,
-                request_method: started.request_method,
-                request_headers: started.request_headers,
-                request_body: started.request_body,
                 body_source_id: started.body_source_id,
                 head: started.head,
-                network_request_headers: started.network_request_headers,
-                body_writer: SubresourceResponseBodyWriter::default(),
                 event_source_parser: None,
                 xhr_response: None,
             });
@@ -2863,12 +2636,23 @@ impl ScriptVm {
         Ok(())
     }
 
-    /// Standalone ScriptVm test turn for a streaming-start terminal.
+    /// Inject the physical response and its subsequent VM delivery.
     #[cfg(test)]
     pub(super) fn start_streaming_async_subresource_fetch(
         &mut self,
         started: crate::types::AsyncSubresourceStreamingStarted,
     ) -> Result<()> {
+        if let Some(stream) = self
+            ._context_host
+            .borrow()
+            .subresource_response_stream(started.internal_id)
+        {
+            stream.response_started(ResourceResponseHead {
+                status_text: None,
+                head: started.head.clone(),
+                network_request_headers: None,
+            });
+        }
         let activity = self.start_streaming_async_subresource_fetch_body(started)?;
         self.finish_async_subresource_body_checkpoint_for_test(activity)
     }
@@ -3006,23 +2790,10 @@ impl ScriptVm {
                     } else {
                         error_text.clone()
                     };
-                let mut network_record = crate::types::SubresourceNetworkRecord::failure(
-                    pending.info.frame_id.clone(),
-                    pending.info.document_url.clone(),
-                    started.request_url.clone(),
-                    started.request_method.clone(),
-                    started.request_headers.clone(),
-                    started.request_body.clone(),
-                    pending.info.resource_type,
-                    network_error_text,
-                )
-                .with_request_body_bytes(pending.info.request_body_bytes.clone());
-                if let Some(handle) = pending.info.network_request_handle {
-                    network_record = network_record.with_request_handle(handle);
-                }
-                self._context_host
-                    .borrow_mut()
-                    .record_subresource_network(network_record);
+                pending.network().failed_with(
+                    &pending.response_stream().failure(network_error_text),
+                    subresource_turn_observer(&self._context_host),
+                );
                 match &pending.continuation {
                     PendingSubresourceContinuation::Fetch(fetch) => {
                         let resolver = fetch
@@ -3084,7 +2855,7 @@ impl ScriptVm {
                     PendingSubresourceContinuation::StylesheetSubresource { binding, .. } => {
                         apply_stylesheet_subresource_terminal(&self._context_host, *binding);
                     }
-                    PendingSubresourceContinuation::Beacon(_)
+                    PendingSubresourceContinuation::Beacon
                     | PendingSubresourceContinuation::CspReport { .. }
                     | PendingSubresourceContinuation::WebSocket(_) => {}
                 }
@@ -3109,39 +2880,10 @@ impl ScriptVm {
                     crate::network_host::event_source_response_error(&started.head)
             {
                 pending.load.cancel();
-                if let Some(handle) = pending.info.network_request_handle {
-                    self._context_host
-                        .borrow_mut()
-                        .record_subresource_response_started(
-                            crate::types::SubresourceResponseStarted::new(
-                                handle,
-                                started
-                                    .head
-                                    .redirect_chain
-                                    .clone()
-                                    .into_iter()
-                                    .map(Into::into)
-                                    .collect(),
-                                started.head.final_url.clone(),
-                                started.head.status,
-                                started.head.headers.clone(),
-                                started.head.cookie_set_reports.clone(),
-                            )
-                            .with_from_cache(started.head.from_cache)
-                            .with_request_cookie_report(started.head.request_cookie_report.clone())
-                            .with_negotiated_http_version(
-                                started.head.negotiated_http_version,
-                            )
-                            .with_network_request_headers(
-                                started.network_request_headers.clone(),
-                            ),
-                        );
-                    self._context_host
-                        .borrow_mut()
-                        .record_subresource_body_finished(
-                            crate::types::SubresourceBodyFinished::failed(handle, error_text),
-                        );
-                }
+                pending.network().failed_with(
+                    &pending.response_stream().failure(error_text),
+                    subresource_turn_observer(&self._context_host),
+                );
                 if let PendingSubresourceContinuation::EventSource(event_source) =
                     &pending.continuation
                 {
@@ -3181,33 +2923,6 @@ impl ScriptVm {
                 );
             }
 
-            if matches!(&pending.continuation, PendingSubresourceContinuation::Xhr(_) | PendingSubresourceContinuation::Fetch(_))
-                && let Some(handle) = pending.info.network_request_handle
-            {
-                self._context_host
-                    .borrow_mut()
-                    .record_subresource_response_started(
-                        crate::types::SubresourceResponseStarted::new(
-                            handle,
-                            started
-                                .head
-                                .redirect_chain
-                                .clone()
-                                .into_iter()
-                                .map(Into::into)
-                                .collect(),
-                            started.head.final_url.clone(),
-                            started.head.status,
-                            started.head.headers.clone(),
-                            started.head.cookie_set_reports.clone(),
-                        )
-                        .with_from_cache(started.head.from_cache)
-                            .with_request_cookie_report(started.head.request_cookie_report.clone())
-                        .with_negotiated_http_version(started.head.negotiated_http_version)
-                        .with_network_request_headers(started.network_request_headers.clone()),
-                    );
-            }
-
             if let PendingSubresourceContinuation::Xhr(xhr) = &pending.continuation {
                 let xhr = v8::Local::new(scope, xhr);
                 let pending_owner = pending.execution_context.dispatch_scope();
@@ -3218,17 +2933,10 @@ impl ScriptVm {
                     .borrow_mut()
                     .record_streaming_subresource_fetch(StreamingSubresourceFetchState {
                         pending,
-                        request_url: started.request_url.clone(),
-                        request_method: started.request_method.clone(),
-                        request_headers: started.request_headers.clone(),
-                        request_body: started.request_body.clone(),
                         body_source_id: started.body_source_id,
                         head: started.head.clone(),
-                        network_request_headers: started.network_request_headers.clone(),
-                        body_writer: SubresourceResponseBodyWriter::default(),
                         event_source_parser: None,
-                        xhr_response: Some(xhr_response),
-                    });
+                        xhr_response: Some(xhr_response)});
                 let remains_current =
                     crate::network_host::apply_xhr_streaming_response_head(
                         scope,
@@ -3314,34 +3022,6 @@ impl ScriptVm {
                     apply_stylesheet_subresource_terminal(&self._context_host, *binding);
                 }
                 PendingSubresourceContinuation::EventSource(event_source) => {
-                    if let Some(handle) = pending.info.network_request_handle {
-                        self._context_host
-                            .borrow_mut()
-                            .record_subresource_response_started(
-                                crate::types::SubresourceResponseStarted::new(
-                                    handle,
-                                    started
-                                        .head
-                                        .redirect_chain
-                                        .clone()
-                                        .into_iter()
-                                        .map(Into::into)
-                                        .collect(),
-                                    started.head.final_url.clone(),
-                                    started.head.status,
-                                    started.head.headers.clone(),
-                                    started.head.cookie_set_reports.clone(),
-                                )
-                                .with_from_cache(started.head.from_cache)
-                            .with_request_cookie_report(started.head.request_cookie_report.clone())
-                                .with_negotiated_http_version(
-                                    started.head.negotiated_http_version,
-                                )
-                                .with_network_request_headers(
-                                    started.network_request_headers.clone(),
-                                ),
-                            );
-                    }
                     let event_source = v8::Local::new(scope, event_source);
                     let last_event_id =
                         crate::network_host::event_source_last_event_id(scope, event_source);
@@ -3353,7 +3033,7 @@ impl ScriptVm {
                     ));
                     event_source_to_open = Some(event_source);
                 }
-                PendingSubresourceContinuation::Beacon(_)
+                PendingSubresourceContinuation::Beacon
                 | PendingSubresourceContinuation::CspReport { .. }
                 | PendingSubresourceContinuation::Xhr(_)
                 | PendingSubresourceContinuation::WebSocket(_) => {}
@@ -3363,17 +3043,10 @@ impl ScriptVm {
             self._context_host.borrow_mut().record_streaming_subresource_fetch(
                 StreamingSubresourceFetchState {
                     pending,
-                    request_url: started.request_url.clone(),
-                    request_method: started.request_method.clone(),
-                    request_headers: started.request_headers.clone(),
-                    request_body: started.request_body.clone(),
                     body_source_id: started.body_source_id,
                     head: started.head.clone(),
-                    network_request_headers: started.network_request_headers.clone(),
-                    body_writer: SubresourceResponseBodyWriter::default(),
                     event_source_parser,
-                    xhr_response: None,
-                },
+                    xhr_response: None},
             );
             if let Some(event_source) = event_source_to_open {
                 crate::network_host::open_event_source_connection(
@@ -3406,6 +3079,13 @@ impl ScriptVm {
         body_source_id: NetworkBodySourceId,
         bytes: Vec<u8>,
     ) {
+        if let Some(stream) = self
+            ._context_host
+            .borrow()
+            .streaming_response_for_test(body_source_id)
+        {
+            stream.data_received(&bytes);
+        }
         let activity =
             self.append_streaming_async_subresource_fetch_chunk_body(body_source_id, bytes);
         self.finish_async_subresource_body_checkpoint_for_test(activity)
@@ -3448,13 +3128,6 @@ impl ScriptVm {
                     ) else {
                         return Ok(false);
                     };
-                    if let Some(handle) = delivery.request_handle {
-                        context_host.borrow_mut().record_subresource_data_received(
-                            crate::types::SubresourceDataReceived::new(
-                                handle, bytes_len, bytes_len,
-                            ),
-                        );
-                    }
                     let context = delivery.context;
                     let xhr = delivery.xhr;
                     let dispatch_scope = delivery.dispatch_scope;
@@ -3522,15 +3195,6 @@ impl ScriptVm {
                     else {
                         return Ok(false);
                     };
-                    if let Some(handle) = delivery.request_handle {
-                        self._context_host
-                            .borrow_mut()
-                            .record_subresource_data_received(
-                                crate::types::SubresourceDataReceived::new(
-                                    handle, bytes_len, bytes_len,
-                                ),
-                            );
-                    }
                     let context = delivery.context;
                     let event_source = delivery.event_source;
                     let scope = &mut v8::ContextScope::new(scope, context);
@@ -3562,7 +3226,7 @@ impl ScriptVm {
         let append_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
         self._context_host
             .borrow_mut()
-            .append_streaming_subresource_body(body_source_id, &bytes);
+            .note_streaming_subresource_activity(body_source_id);
         trace_async_subresource_stage(
             "async_subresource_streaming_chunk_appended",
             trace_fields,
@@ -3587,9 +3251,8 @@ impl ScriptVm {
                     }
                     let previous =
                         enter_subresource_owner_async_scope(&context_host, scope, dispatch_scope);
-                    // The CDP capture already borrowed this chunk into its
-                    // body-writer above, so the original Vec can move into the
-                    // Web-visible stream without cloning the full chunk.
+                    // The producer retained these bytes for the native response.
+                    // Move this delivery into the Web-visible stream.
                     crate::network_host::enqueue_pending_network_body_chunk(
                         scope,
                         body_source_id,
@@ -3621,128 +3284,6 @@ impl ScriptVm {
         activity
     }
 
-    fn finish_detached_window_fetch_stream(
-        &mut self,
-        streaming: StreamingSubresourceFetchState,
-        internal_id: u64,
-        result: std::result::Result<(), String>,
-    ) -> Result<()> {
-        debug_assert!(
-            streaming.pending.continuation.is_detached_window_fetch(),
-            "only a detached Fetch keeps a VM-managed stream without a JS consumer"
-        );
-        let detached_identity = streaming
-            .pending
-            .execution_context
-            .detached_window_fetch_identity();
-        match result {
-            Ok(()) => {
-                let request_cookie_report = streaming
-                    .head
-                    .request_cookie_report
-                    .clone()
-                    .or_else(|| streaming.pending.info.request_cookie_report.clone());
-                let response_body = streaming.body_writer.finish();
-                let mut network_record = crate::types::SubresourceNetworkRecord::success_with_body(
-                    streaming.pending.info.frame_id.clone(),
-                    streaming.pending.info.document_url.clone(),
-                    streaming.request_url,
-                    streaming.request_method,
-                    streaming.request_headers,
-                    streaming.request_body,
-                    streaming.pending.info.resource_type,
-                    request_cookie_report,
-                    streaming
-                        .head
-                        .redirect_chain
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                    streaming.head.final_url,
-                    streaming.head.status,
-                    streaming.head.headers,
-                    response_body,
-                    streaming.head.cookie_set_reports,
-                )
-                .with_from_cache(streaming.head.from_cache)
-                .with_negotiated_http_version(streaming.head.negotiated_http_version)
-                .with_network_request_headers(streaming.network_request_headers)
-                .with_request_initiator_type(SubresourceRequestInitiatorType::Script)
-                .with_request_body_bytes(streaming.pending.info.request_body_bytes.clone());
-                if let Some(handle) = streaming.pending.info.network_request_handle {
-                    network_record = network_record.with_request_handle(handle);
-                }
-                self._context_host
-                    .borrow_mut()
-                    .record_subresource_network(network_record);
-            }
-            Err(_) => {
-                let network_error_text = crate::network_host::ABORTED_ERROR_TEXT.to_owned();
-                if let Some(handle) = streaming.pending.info.network_request_handle {
-                    let partial_body = streaming.body_writer.finish();
-                    self._context_host
-                        .borrow_mut()
-                        .record_subresource_response_started(
-                            crate::types::SubresourceResponseStarted::new(
-                                handle,
-                                streaming
-                                    .head
-                                    .redirect_chain
-                                    .into_iter()
-                                    .map(Into::into)
-                                    .collect(),
-                                streaming.head.final_url,
-                                streaming.head.status,
-                                streaming.head.headers,
-                                streaming.head.cookie_set_reports,
-                            )
-                            .with_from_cache(streaming.head.from_cache)
-                            .with_request_cookie_report(
-                                streaming.head.request_cookie_report.clone(),
-                            )
-                            .with_negotiated_http_version(streaming.head.negotiated_http_version)
-                            .with_network_request_headers(streaming.network_request_headers),
-                        );
-                    self._context_host
-                        .borrow_mut()
-                        .record_subresource_body_finished(
-                            crate::types::SubresourceBodyFinished::failed_with_partial_body(
-                                handle,
-                                network_error_text,
-                                partial_body,
-                            ),
-                        );
-                } else {
-                    self._context_host.borrow_mut().record_subresource_network(
-                        crate::types::SubresourceNetworkRecord::failure(
-                            streaming.pending.info.frame_id.clone(),
-                            streaming.pending.info.document_url.clone(),
-                            streaming.request_url,
-                            streaming.request_method,
-                            streaming.request_headers,
-                            streaming.request_body,
-                            streaming.pending.info.resource_type,
-                            network_error_text,
-                        )
-                        .with_request_initiator_type(SubresourceRequestInitiatorType::Script)
-                        .with_request_body_bytes(streaming.pending.info.request_body_bytes.clone()),
-                    );
-                }
-            }
-        }
-        self._context_host
-            .borrow_mut()
-            .record_pending_subresource_continue_event(
-                PendingSubresourceContinueEvent::Completed { internal_id },
-            );
-        tracing::debug!(
-            internal_id,
-            ?detached_identity,
-            "finished network-only subresource without entering V8"
-        );
-        Ok(())
-    }
-
     /// Standalone ScriptVm test turn for a streaming-finish terminal.
     #[cfg(test)]
     pub(super) fn finish_streaming_async_subresource_fetch(
@@ -3751,10 +3292,29 @@ impl ScriptVm {
         body_source_id: NetworkBodySourceId,
         result: std::result::Result<(), String>,
     ) -> Result<()> {
+        if let Some(stream) = self
+            ._context_host
+            .borrow()
+            .subresource_response_stream(internal_id)
+        {
+            match &result {
+                Ok(()) => {
+                    if let Some(response) = stream.finish_response() {
+                        response.publish(&stream.network, None);
+                    }
+                }
+                Err(message) => stream.network.failed(&stream.failure(message.clone())),
+            }
+        }
+        let body = self
+            ._context_host
+            .borrow_mut()
+            .take_test_streaming_body(internal_id);
         let activity = self.finish_streaming_async_subresource_fetch_body(
             internal_id,
             body_source_id,
             result,
+            body,
         )?;
         self.finish_async_subresource_body_checkpoint_for_test(activity)
     }
@@ -3764,6 +3324,7 @@ impl ScriptVm {
         internal_id: u64,
         body_source_id: NetworkBodySourceId,
         result: std::result::Result<(), String>,
+        response_body: SubresourceResponseBody,
     ) -> Result<AsyncSubresourceFetchBodyActivity> {
         let trace_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
         let trace_fields = AsyncSubresourceTraceFields {
@@ -3796,9 +3357,8 @@ impl ScriptVm {
             &streaming.pending,
         );
         if streaming.pending.continuation.is_detached_window_fetch() {
-            return self
-                .finish_detached_window_fetch_stream(streaming, internal_id, result)
-                .map(|()| AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered);
+            streaming.pending.load.finish();
+            return Ok(AsyncSubresourceFetchBodyActivity::NoWindowRealmEntered);
         }
         if !window_subresource_owner_is_current(&self._context_host, &streaming.pending) {
             self._context_host
@@ -3865,25 +3425,6 @@ impl ScriptVm {
                             parser.reconnect_delay_ms(),
                         );
                     }
-                    let response_body = streaming.body_writer.finish();
-                    if let Some(handle) = streaming.pending.info.network_request_handle {
-                        let body = match result {
-                            Ok(()) => crate::types::SubresourceBodyFinished::ready_after_streaming(
-                                handle,
-                                response_body,
-                            ),
-                            Err(error_text) => {
-                                crate::types::SubresourceBodyFinished::failed_with_partial_body(
-                                    handle,
-                                    error_text,
-                                    response_body,
-                                )
-                            }
-                        };
-                        context_host
-                            .borrow_mut()
-                            .record_subresource_body_finished(body);
-                    }
                     if crate::network_host::event_source_ready_state(scope, event_source)
                         != crate::network_host::EVENT_SOURCE_CLOSED
                     {
@@ -3908,14 +3449,9 @@ impl ScriptVm {
                 }
                 match result {
                     Ok(()) => {
-                        let request_cookie_report = streaming
-                            .head
-                            .request_cookie_report
-                            .clone()
-                            .or_else(|| streaming.pending.info.request_cookie_report.clone());
                         let finish_body_started =
                             moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
-                        let response_body = streaming.body_writer.finish();
+                        let response_body = response_body.clone();
                         trace_async_subresource_stage(
                             "async_subresource_streaming_body_finished",
                             trace_fields,
@@ -3945,28 +3481,6 @@ impl ScriptVm {
                                         body_source_id,
                                         error_text.clone(),
                                     );
-                                    let request_handle =
-                                        streaming.pending.info.network_request_handle;
-                                    let mut network_record =
-                                        crate::types::SubresourceNetworkRecord::failure(
-                                            streaming.pending.info.frame_id.clone(),
-                                            streaming.pending.info.document_url.clone(),
-                                            streaming.request_url,
-                                            streaming.request_method,
-                                            streaming.request_headers,
-                                            streaming.request_body,
-                                            streaming.pending.info.resource_type,
-                                            error_text,
-                                        )
-                                        .with_request_body_bytes(
-                                            streaming.pending.info.request_body_bytes.clone(),
-                                        );
-                                    if let Some(handle) = request_handle {
-                                        network_record = network_record.with_request_handle(handle);
-                                    }
-                                    context_host
-                                        .borrow_mut()
-                                        .record_subresource_network(network_record);
                                     if let PendingSubresourceContinuation::Xhr(xhr) =
                                         streaming.pending.continuation
                                     {
@@ -4004,66 +3518,6 @@ impl ScriptVm {
                             "async_subresource_stream_closed",
                             trace_fields,
                             close_started,
-                        );
-                        let record_started =
-                            moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
-                        let request_handle = streaming.pending.info.network_request_handle;
-                        if matches!(
-                            &streaming.pending.continuation,
-                            PendingSubresourceContinuation::Xhr(_)
-                        ) && let Some(handle) = request_handle
-                        {
-                            context_host.borrow_mut().record_subresource_body_finished(
-                                crate::types::SubresourceBodyFinished::ready_after_streaming(
-                                    handle,
-                                    response_body,
-                                ),
-                            );
-                        } else {
-                            let mut network_record =
-                                crate::types::SubresourceNetworkRecord::success_with_body(
-                                    streaming.pending.info.frame_id.clone(),
-                                    streaming.pending.info.document_url.clone(),
-                                    streaming.request_url,
-                                    streaming.request_method,
-                                    streaming.request_headers,
-                                    streaming.request_body,
-                                    streaming.pending.info.resource_type,
-                                    request_cookie_report,
-                                    streaming
-                                        .head
-                                        .redirect_chain
-                                        .clone()
-                                        .into_iter()
-                                        .map(Into::into)
-                                        .collect(),
-                                    streaming.head.final_url.clone(),
-                                    streaming.head.status,
-                                    streaming.head.headers.clone(),
-                                    response_body,
-                                    streaming.head.cookie_set_reports.clone(),
-                                )
-                                .with_from_cache(streaming.head.from_cache)
-                                .with_negotiated_http_version(
-                                    streaming.head.negotiated_http_version,
-                                )
-                                .with_network_request_headers(
-                                    streaming.network_request_headers.clone(),
-                                )
-                                .with_request_body_bytes(
-                                    streaming.pending.info.request_body_bytes.clone(),
-                                );
-                            if let Some(handle) = request_handle {
-                                network_record = network_record.with_request_handle(handle);
-                            }
-                            context_host
-                                .borrow_mut()
-                                .record_subresource_network(network_record);
-                        }
-                        trace_async_subresource_stage(
-                            "async_subresource_streaming_network_recorded",
-                            trace_fields,
-                            record_started,
                         );
                         if let PendingSubresourceContinuation::Xhr(xhr) =
                             streaming.pending.continuation
@@ -4105,68 +3559,6 @@ impl ScriptVm {
                             body_source_id,
                             error_text.clone(),
                         );
-                        let network_error_text = crate::network_host::ABORTED_ERROR_TEXT.to_owned();
-                        let request_handle = streaming.pending.info.network_request_handle;
-                        if let Some(handle) = request_handle {
-                            let partial_body = streaming.body_writer.finish();
-                            if !matches!(
-                                &streaming.pending.continuation,
-                                PendingSubresourceContinuation::Xhr(_)
-                                    | PendingSubresourceContinuation::Fetch(_)
-                            ) {
-                                context_host
-                                    .borrow_mut()
-                                    .record_subresource_response_started(
-                                        crate::types::SubresourceResponseStarted::new(
-                                            handle,
-                                            streaming
-                                                .head
-                                                .redirect_chain
-                                                .clone()
-                                                .into_iter()
-                                                .map(Into::into)
-                                                .collect(),
-                                            streaming.head.final_url.clone(),
-                                            streaming.head.status,
-                                            streaming.head.headers.clone(),
-                                            streaming.head.cookie_set_reports.clone(),
-                                        )
-                                        .with_from_cache(streaming.head.from_cache)
-                                        .with_request_cookie_report(
-                                            streaming.head.request_cookie_report.clone(),
-                                        )
-                                        .with_negotiated_http_version(
-                                            streaming.head.negotiated_http_version,
-                                        )
-                                        .with_network_request_headers(
-                                            streaming.network_request_headers.clone(),
-                                        ),
-                                    );
-                            }
-                            context_host.borrow_mut().record_subresource_body_finished(
-                                crate::types::SubresourceBodyFinished::failed_with_partial_body(
-                                    handle,
-                                    network_error_text,
-                                    partial_body,
-                                ),
-                            );
-                        } else {
-                            context_host.borrow_mut().record_subresource_network(
-                                crate::types::SubresourceNetworkRecord::failure(
-                                    streaming.pending.info.frame_id.clone(),
-                                    streaming.pending.info.document_url.clone(),
-                                    streaming.request_url,
-                                    streaming.request_method,
-                                    streaming.request_headers,
-                                    streaming.request_body,
-                                    streaming.pending.info.resource_type,
-                                    network_error_text,
-                                )
-                                .with_request_body_bytes(
-                                    streaming.pending.info.request_body_bytes.clone(),
-                                ),
-                            );
-                        }
                         trace_async_subresource_stage(
                             "async_subresource_streaming_error_recorded",
                             trace_fields,
@@ -4561,6 +3953,47 @@ struct AsyncSubresourceTraceFields {
     resource_type: Option<SubresourceResourceType>,
 }
 
+fn publish_buffered_subresource_result(
+    context_host: &Rc<RefCell<JsContextHost>>,
+    network: &crate::network::ResourceTransfer,
+    physical: Option<&crate::protocol_types::NavigationResponse>,
+    result: &Result<crate::protocol_types::NavigationResponse, String>,
+    network_error_text: Option<&str>,
+) {
+    match result {
+        Ok(response) => network.body_completed_with(
+            ResourceResponseHead {
+                head: response.head(),
+                status_text: None,
+                network_request_headers: response.network_request_headers().map(<[_]>::to_vec),
+            },
+            SubresourceResponseBody::from_navigation_response(response),
+            subresource_turn_observer(context_host),
+        ),
+        Err(message) => {
+            let message = network_error_text.unwrap_or(message).to_owned();
+            let failure = match physical {
+                Some(response) => ResourceBodyResponse::from(response.clone()).failure(
+                    message,
+                    response.network_request_headers().map(<[_]>::to_vec),
+                ),
+                None => ResourceResponseFailure::Request(message),
+            };
+            network.failed_with(&failure, subresource_turn_observer(context_host));
+        }
+    }
+}
+
+fn subresource_turn_observer(
+    context_host: &Rc<RefCell<JsContextHost>>,
+) -> impl FnMut(crate::runtime::RendererNetworkObservation) + '_ {
+    |observation| {
+        context_host
+            .borrow_mut()
+            .record_native_resource_observation(observation)
+    }
+}
+
 fn async_subresource_trace_fields_for_pending(
     event_kind: &'static str,
     internal_id: u64,
@@ -4589,16 +4022,19 @@ fn async_subresource_trace_fields_for_event(
     event: &AsyncSubresourceFetchEvent,
 ) -> AsyncSubresourceTraceFields {
     match event {
+        #[cfg(test)]
         AsyncSubresourceFetchEvent::Completion(completion) => AsyncSubresourceTraceFields {
             event_kind: Some("completion"),
             internal_id: Some(completion.internal_id),
             ..AsyncSubresourceTraceFields::default()
         },
-        AsyncSubresourceFetchEvent::Keepalive(completion) => AsyncSubresourceTraceFields {
-            event_kind: Some("keepalive"),
-            internal_id: Some(completion.internal_id()),
-            ..AsyncSubresourceTraceFields::default()
-        },
+        AsyncSubresourceFetchEvent::TransportCompletion(completion) => {
+            AsyncSubresourceTraceFields {
+                event_kind: Some("keepalive"),
+                internal_id: Some(completion.internal_id()),
+                ..AsyncSubresourceTraceFields::default()
+            }
+        }
         AsyncSubresourceFetchEvent::NativeNetwork(_) => AsyncSubresourceTraceFields {
             event_kind: Some("native_network"),
             ..AsyncSubresourceTraceFields::default()
@@ -4615,6 +4051,16 @@ fn async_subresource_trace_fields_for_event(
             bytes: Some(chunk.bytes.len()),
             ..AsyncSubresourceTraceFields::default()
         },
+        AsyncSubresourceFetchEvent::TransportStreamingFinished {
+            body_source_id,
+            completion,
+        } => AsyncSubresourceTraceFields {
+            event_kind: Some("streaming_finished"),
+            internal_id: Some(completion.internal_id()),
+            body_source_id: Some(*body_source_id),
+            ..Default::default()
+        },
+        #[cfg(test)]
         AsyncSubresourceFetchEvent::StreamingFinished(finished) => AsyncSubresourceTraceFields {
             event_kind: Some("streaming_finished"),
             internal_id: Some(finished.internal_id),
@@ -4634,7 +4080,7 @@ fn pending_subresource_continuation_kind(
         PendingSubresourceContinuation::Media { .. } => "media",
         PendingSubresourceContinuation::TextTrack { .. } => "text_track",
         PendingSubresourceContinuation::StylesheetSubresource { .. } => "stylesheet_subresource",
-        PendingSubresourceContinuation::Beacon(_) => "beacon",
+        PendingSubresourceContinuation::Beacon => "beacon",
         PendingSubresourceContinuation::CspReport { .. } => "csp_report",
         PendingSubresourceContinuation::Xhr(_) => "xhr",
         PendingSubresourceContinuation::WebSocket(_) => "websocket",

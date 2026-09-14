@@ -261,11 +261,9 @@ pub(super) fn spawn_network_fetch(
         Some(cancel_handle),
         prepared.cors_preflight_request_headers,
         internal_id,
+        host.pending_subresource_response_stream(internal_id),
         host.pending_subresource_preflight_observer(internal_id),
         prepared.resolved_url,
-        prepared.method,
-        prepared.request_headers,
-        request_body_text(&prepared.body),
     );
     Ok(internal_id)
 }

@@ -909,7 +909,7 @@ pub(in crate::worker) fn drain_worker_xhr_completion(
                         extract_subresource_auth_challenge(&response_head.headers)
                 {
                     let response_body = response.subresource_response_body();
-                    pending.paused_response = Some(WorkerResourceResponse {
+                    pending.paused_response = Some(ResourceBodyResponse {
                         head: response_head.clone(),
                         body: response_body.clone(),
                     });
@@ -971,7 +971,7 @@ pub(in crate::worker) fn drain_worker_xhr_completion(
                         response_body: response_body.clone(),
                         from_cache: response_head.from_cache,
                     };
-                    pending.paused_response = Some(WorkerResourceResponse {
+                    pending.paused_response = Some(ResourceBodyResponse {
                         head: response_head,
                         body: response_body,
                     });

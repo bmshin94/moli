@@ -36,18 +36,15 @@ fetch({:?}).then(
     pending[0].internal_id
 }
 
-fn failed_fetch_completion(internal_id: u64, request_url: &Url) -> AsyncSubresourceFetchEvent {
+fn failed_fetch_completion(internal_id: u64) -> AsyncSubresourceFetchEvent {
     AsyncSubresourceFetchEvent::Completion(Box::new(AsyncSubresourceFetchCompletion {
+        network_request_headers: None,
         internal_id,
-        request_url: request_url.clone(),
-        request_method: "GET".to_owned(),
-        request_headers: Vec::new(),
-        request_body: None,
         response_status_text: None,
         skip_fetch_security_validation: false,
         response_filter: None,
         network_error_text: Some("typed test failure".to_owned()),
-        result: Err("typed test failure".to_owned()),
+        result: Err("typed test failure".to_owned().into()),
     }))
 }
 
@@ -105,7 +102,7 @@ async fn async_subresource_completion_uses_exact_typed_networking_owner() {
         let outcome = run_completion(
             &mut page_vm,
             root_document,
-            failed_fetch_completion(internal_id, &request_url),
+            failed_fetch_completion(internal_id),
         );
 
         assert_eq!(outcome.action.owner, owner);
@@ -147,7 +144,7 @@ async fn selected_current_async_subresource_terminal_submits_checkpoint_without_
             .page_resource_completion_queue()
             .enqueue_local_for_test(RendererPageResourceCompletion::async_subresource(
                 root_document,
-                failed_fetch_completion(internal_id, &request_url),
+                failed_fetch_completion(internal_id),
             ));
         assert!(
             page_vm
@@ -228,11 +225,7 @@ fetch({:?})
                     AsyncSubresourceStreamingStarted {
                         internal_id,
                         request_url: request_url.clone(),
-                        request_method: "GET".to_owned(),
-                        request_headers: Vec::new(),
-                        request_body: None,
                         body_source_id,
-                        network_request_headers: None,
                         head: moli_fetch::ResponseHead {
                             final_url: request_url,
                             status: 200,
@@ -327,7 +320,7 @@ async fn stale_root_with_reused_async_subresource_id_cannot_consume_current_requ
         let stale = run_completion(
             &mut page_vm,
             stale_root,
-            failed_fetch_completion(internal_id, &request_url),
+            failed_fetch_completion(internal_id),
         );
         assert_eq!(stale.action.owner, stale_owner);
         assert_eq!(
@@ -351,7 +344,7 @@ async fn stale_root_with_reused_async_subresource_id_cannot_consume_current_requ
         let current = run_completion(
             &mut page_vm,
             current_root,
-            failed_fetch_completion(internal_id, &request_url),
+            failed_fetch_completion(internal_id),
         );
         assert_eq!(
             current.action.document_effect,
@@ -410,7 +403,7 @@ document.close();
         let outcome = run_completion(
             &mut page_vm,
             root_document,
-            failed_fetch_completion(internal_id, &request_url),
+            failed_fetch_completion(internal_id),
         );
         assert_eq!(
             outcome.action.document_effect,
@@ -440,11 +433,7 @@ async fn streaming_finish_requires_matching_request_and_body_source_identity() {
             AsyncSubresourceStreamingStarted {
                 internal_id,
                 request_url: request_url.clone(),
-                request_method: "GET".to_owned(),
-                request_headers: Vec::new(),
-                request_body: None,
                 body_source_id,
-                network_request_headers: None,
                 head: moli_fetch::ResponseHead {
                     final_url: request_url,
                     status: 200,

@@ -1,15 +1,11 @@
+use super::resource_request_started;
 use std::sync::Arc;
 
-use moli_page_types::{NavigationResponse, SubresourceResponseBody, SubresourceResponseBodyWriter};
-use parking_lot::Mutex;
+use moli_page_types::{NavigationResponse, SubresourceResponseBody};
 
 use crate::{
     network::loads::ResourceLoadLease,
-    network::{
-        ResourceResponseFailure, ResourceResponseHead, ResourceResponseObserver, ResourceTransfer,
-    },
-    page_task_queue::RendererResourceCompletionSender,
-    types::{AsyncSubresourceFetchCompletion, AsyncSubresourceFetchEvent},
+    network::{ResourceResponseHead, ResourceTransfer},
 };
 
 /// A keepalive resource without a JS consumer keeps its request and resource lease until
@@ -19,50 +15,34 @@ pub(crate) struct KeepaliveResource {
     load: ResourceLoadLease,
     // ServiceWorker streaming failures do not carry a final Response. Retain
     // the physical prefix here, just as the HTTP response collector does.
-    stream: Mutex<Option<(Arc<ResourceResponseHead>, SubresourceResponseBodyWriter)>>,
+    stream: Arc<crate::network::ResourceResponseStream>,
 }
 
 impl KeepaliveResource {
     pub(crate) fn new(network: Arc<ResourceTransfer>, load: ResourceLoadLease) -> Arc<Self> {
         Arc::new(Self {
+            stream: crate::network::ResourceResponseStream::new(network.clone()),
             network,
             load,
-            stream: Mutex::new(None),
         })
     }
 
-    pub(crate) fn response_started(&self, head: moli_fetch::ResponseHead) {
-        let response = Arc::new(ResourceResponseHead {
-            head,
-            network_request_headers: None,
-        });
-        self.network.response_started(response.clone());
-        *self.stream.lock() = Some((response, SubresourceResponseBodyWriter::default()));
+    pub(crate) fn response_started(&self, head: ResourceResponseHead) {
+        self.stream.response_started(head);
     }
 
     pub(crate) fn data_received(&self, bytes: &[u8]) {
-        if let Some((_, body)) = &mut *self.stream.lock() {
-            body.append(bytes);
-        }
-        self.network.data_received(bytes.len());
+        self.stream.data_received(bytes);
     }
 
     pub(crate) fn response_completed(&self, response: &NavigationResponse) {
+        self.stream.finish_response();
         finish_keepalive_response(&self.network, response);
-        self.stream.lock().take();
         self.load.finish();
     }
 
     pub(crate) fn fail(&self, message: String) {
-        let error = match self.stream.lock().take() {
-            Some((response, body)) => ResourceResponseFailure::PartialBody {
-                message,
-                response,
-                body: body.finish(),
-            },
-            None => ResourceResponseFailure::Request(message),
-        };
-        self.network.failed(&error);
+        self.network.failed(&self.stream.failure(message));
         self.load.finish();
     }
 
@@ -82,78 +62,10 @@ impl KeepaliveResource {
     }
 }
 
-/// Buffered intercepted results still belong to the original pending request.
-/// If its Page route retires before delivery, the result itself settles the
-/// native request rather than losing the physical response with the VM.
-pub(crate) struct CompletedKeepaliveFetch {
-    network: Arc<ResourceTransfer>,
-    completion: Option<AsyncSubresourceFetchCompletion>,
-}
-
-impl std::fmt::Debug for CompletedKeepaliveFetch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CompletedKeepaliveFetch")
-            .field("completion", &self.completion)
-            .finish_non_exhaustive()
-    }
-}
-
-impl CompletedKeepaliveFetch {
-    pub(crate) fn new(
-        network: Arc<ResourceTransfer>,
-        completion: AsyncSubresourceFetchCompletion,
-    ) -> Self {
-        Self {
-            network,
-            completion: Some(completion),
-        }
-    }
-
-    pub(crate) fn internal_id(&self) -> u64 {
-        self.completion
-            .as_ref()
-            .expect("unclaimed keepalive result")
-            .internal_id
-    }
-
-    pub(crate) fn into_completion(mut self) -> AsyncSubresourceFetchCompletion {
-        self.completion
-            .take()
-            .expect("keepalive result is claimed once")
-    }
-}
-
-impl Drop for CompletedKeepaliveFetch {
-    fn drop(&mut self) {
-        if let Some(completion) = self.completion.take() {
-            finish_keepalive_result(&self.network, &completion.result);
-        }
-    }
-}
-
-pub(crate) fn send_keepalive_completion(
-    sender: &RendererResourceCompletionSender,
-    network: Arc<ResourceTransfer>,
-    completion: AsyncSubresourceFetchCompletion,
-) {
-    let _ = sender.send_async_subresource_event(AsyncSubresourceFetchEvent::Keepalive(Box::new(
-        CompletedKeepaliveFetch::new(network, completion),
-    )));
-}
-
-pub(crate) fn finish_keepalive_result(
-    network: &ResourceTransfer,
-    result: &Result<NavigationResponse, String>,
-) {
-    match result {
-        Ok(response) => finish_keepalive_response(network, response),
-        Err(message) => network.failed(&ResourceResponseFailure::Request(message.clone())),
-    }
-}
-
 fn finish_keepalive_response(network: &ResourceTransfer, response: &NavigationResponse) {
     network.body_completed(
         ResourceResponseHead {
+            status_text: None,
             head: response.head(),
             network_request_headers: response.network_request_headers().map(<[_]>::to_vec),
         },
@@ -191,107 +103,10 @@ pub(crate) fn keepalive_request_started(
     network: &crate::runtime::RendererNetworkRequest,
     info: &crate::types::PendingSubresourceFetchInfo,
 ) -> moli_page_types::SubresourceRequestStarted {
-    moli_page_types::SubresourceRequestStarted::new(
-        network.handle(),
-        info.frame_id.clone(),
-        info.document_url.clone(),
-        info.url.clone(),
-        info.method.clone(),
-        info.request_headers.clone(),
-        info.request_body.clone(),
-        info.resource_type,
+    resource_request_started(
+        network,
+        info,
         moli_page_types::SubresourceRequestInitiatorType::Script,
-        info.request_cookie_report.clone(),
+        true,
     )
-    .with_request_body_bytes(info.request_body_bytes.clone())
-    .with_keepalive(true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use moli_page_types::{ScriptNetworkOutputItem, SubresourceBodyFinishedResult};
-
-    #[test]
-    fn buffered_report_result_survives_a_closed_route_and_a_claim_defers_completion() {
-        for closed_route in [false, true] {
-            let source = crate::runtime::RendererWorkerNetworkReporter::unobserved_for_test();
-            let records = Arc::new(Mutex::new(Vec::new()));
-            let observed = records.clone();
-            let url = url::Url::parse("data:text/plain,physical").unwrap();
-            let (network, started) = ResourceTransfer::start(
-                source.start_request().unwrap(),
-                move |receipt| {
-                    let crate::runtime::RendererNetworkOutputItem::Resource(item) = receipt.item()
-                    else {
-                        panic!("resource receipt")
-                    };
-                    observed.lock().push(item.clone());
-                },
-                |request| {
-                    moli_page_types::SubresourceRequestStarted::new(
-                        request.handle(),
-                        None,
-                        url.clone(),
-                        url.clone(),
-                        "POST".into(),
-                        Vec::new(),
-                        None,
-                        moli_page_types::SubresourceResourceType::CspReport,
-                        moli_page_types::SubresourceRequestInitiatorType::Script,
-                        None,
-                    )
-                },
-            );
-            let crate::runtime::RendererNetworkOutputItem::Resource(started) = started.item()
-            else {
-                panic!("resource admission")
-            };
-            records.lock().push(started.clone());
-            let response =
-                NavigationResponse::from(crate::network_host::local_url_response(&url).unwrap());
-            let completion = AsyncSubresourceFetchCompletion {
-                internal_id: 1,
-                request_url: url,
-                request_method: "POST".into(),
-                request_headers: Vec::new(),
-                request_body: None,
-                response_status_text: None,
-                skip_fetch_security_validation: false,
-                response_filter: None,
-                network_error_text: None,
-                result: Ok(response),
-            };
-            if closed_route {
-                send_keepalive_completion(
-                    &RendererResourceCompletionSender::closed_for_test(),
-                    network.clone(),
-                    completion,
-                );
-            } else {
-                let completion =
-                    CompletedKeepaliveFetch::new(network.clone(), completion).into_completion();
-                assert_eq!(
-                    records.lock().len(),
-                    1,
-                    "the claim transfers the decision to its pending request"
-                );
-                finish_keepalive_result(&network, &completion.result);
-            }
-            drop(network);
-            let records = records.lock();
-            assert_eq!(
-                records.len(),
-                3,
-                "one admission, physical head and terminal"
-            );
-            let ScriptNetworkOutputItem::SubresourceBodyFinished(body) = records[2].as_ref() else {
-                panic!("terminal last")
-            };
-            let SubresourceBodyFinishedResult::Ready(body) = body.result() else {
-                panic!("retain the actual completed response")
-            };
-            assert_eq!(body.clone_body_bytes(), b"physical");
-        }
-    }
 }

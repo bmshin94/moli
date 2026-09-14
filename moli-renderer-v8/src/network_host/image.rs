@@ -337,25 +337,26 @@ pub(crate) fn start_image_element_resource_fetch(
             },
             result_tx: ServiceWorkerFetchResultSender::Page {
                 completion_tx: host.resource_completion_sender(),
-                network: host.pending_subresource_network_request(internal_id),
+                network: host.pending_subresource_response_stream(internal_id),
             },
             request_client: loader,
             resource_task_runner: resource_loader.task_runner(),
             cancel_handle,
         };
         if !host.dispatch_service_worker_fetch(dispatch) {
-            let _ = host.resource_completion_sender().send_async_subresource(
+            crate::network_host::send_resource_completion(
+                &host.resource_completion_sender(),
+                host.pending_subresource_network(internal_id),
                 AsyncSubresourceFetchCompletion {
+                    network_request_headers: None,
                     internal_id,
-                    request_url,
-                    request_method: "GET".to_owned(),
-                    request_headers: request_headers.clone(),
-                    request_body: None,
                     response_status_text: None,
                     skip_fetch_security_validation: false,
                     response_filter: None,
                     network_error_text: None,
-                    result: Err("service worker image fetch dispatch failed".to_owned()),
+                    result: Err("service worker image fetch dispatch failed"
+                        .to_owned()
+                        .into()),
                 },
             );
         }
@@ -365,20 +366,32 @@ pub(crate) fn start_image_element_resource_fetch(
     if let Some(scanned_preload) = scanned_preload {
         debug_assert_eq!(scanned_preload.request_key().url(), request_url.as_str());
         let completion_tx = host.resource_completion_sender();
+        let network = host.pending_subresource_network(internal_id);
         resource_loader.task_runner().spawn(async move {
             let outcome = scanned_preload.wait_outcome().await;
-            let _ = completion_tx.send_async_subresource(AsyncSubresourceFetchCompletion {
-                internal_id,
-                request_url,
-                request_method: "GET".to_owned(),
-                request_headers,
-                request_body: None,
-                response_status_text: None,
-                skip_fetch_security_validation: false,
-                response_filter: None,
-                network_error_text: None,
-                result: outcome.network_result().as_ref().clone(),
-            });
+            crate::network_host::send_resource_completion(
+                &completion_tx,
+                network,
+                AsyncSubresourceFetchCompletion {
+                    internal_id,
+                    response_status_text: None,
+                    skip_fetch_security_validation: false,
+                    response_filter: None,
+                    network_error_text: None,
+                    network_request_headers: outcome
+                        .network_result()
+                        .as_ref()
+                        .as_ref()
+                        .ok()
+                        .and_then(|response| response.network_request_headers().map(<[_]>::to_vec)),
+                    result: outcome
+                        .network_result()
+                        .as_ref()
+                        .clone()
+                        .map(Into::into)
+                        .map_err(Into::into),
+                },
+            );
         });
         return Ok(ImageElementResourceFetchStart::Pending);
     }
@@ -391,11 +404,9 @@ pub(crate) fn start_image_element_resource_fetch(
         Some(cancel_handle),
         request_headers,
         internal_id,
+        host.pending_subresource_response_stream(internal_id),
         host.pending_subresource_preflight_observer(internal_id),
         request_url,
-        "GET".to_owned(),
-        Vec::new(),
-        None,
     );
     Ok(ImageElementResourceFetchStart::Pending)
 }
