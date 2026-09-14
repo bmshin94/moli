@@ -11,9 +11,7 @@ use crate::{
         RendererPageReservationToken, RendererReplyBoundary, RendererReservedServiceWorkerClient,
     },
 };
-use moli_fetch::{
-    BrowserNavigationRequestKind, FetchCancelHandle, NetworkFetchResult, RawResponse, Request,
-};
+use moli_fetch::{BrowserNavigationRequestKind, FetchCancelHandle};
 use url::Url;
 
 use super::{InheritedDocumentPolicy, WebContents, navigation_commit::DocumentNavigationIdentity};
@@ -211,52 +209,6 @@ impl AdmittedNavigationLoad {
                 self.request_cancellation.clone(),
             )
             .await
-    }
-
-    fn intercepted_request(
-        &self,
-        method: &str,
-        raw_url: &str,
-        body: Option<Vec<u8>>,
-        headers: Vec<(String, String)>,
-        auth: Option<SubresourceAuthCredentials>,
-    ) -> anyhow::Result<Request> {
-        self.validate_request(raw_url)?;
-        let mut request = Request::new_bytes(method, raw_url, body, headers)?
-            .with_top_level_navigation_cookie_context()
-            .with_page_network_policy()
-            .with_browser_navigation_kind(self.navigation_kind());
-        if !self.infer_referrer() {
-            request = request.without_inferred_referrer();
-        }
-        if let Some(initiator) = &self.initiator_url {
-            request = request.with_initiator_url(initiator);
-        }
-        request.set_auth(auth.map(Into::into));
-        Ok(request)
-    }
-
-    pub async fn fetch_intercepted_auth_response(
-        &self,
-        method: &str,
-        raw_url: &str,
-        body: Option<Vec<u8>>,
-        headers: Vec<(String, String)>,
-        auth: SubresourceAuthCredentials,
-    ) -> anyhow::Result<NetworkFetchResult<RawResponse>> {
-        let request = self.intercepted_request(method, raw_url, body, headers, Some(auth))?;
-        // Digest's intermediate 401 responses still require buffered transport.
-        let response = self
-            .engine
-            .resource_request_client()
-            .expect("admitted resource runtime")
-            .fetch_raw_with_cancel_and_network_metadata(request, self.request_cancellation.clone())
-            .await?;
-        anyhow::ensure!(
-            !self.identity().is_cancelled(),
-            "canceled navigation document candidate"
-        );
-        Ok(response)
     }
 
     pub async fn prepare_document_response_async(

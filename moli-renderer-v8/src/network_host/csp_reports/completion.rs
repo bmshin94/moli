@@ -167,19 +167,6 @@ pub(crate) async fn fetch_buffered_csp_report(
     cancel: moli_fetch::FetchCancelHandle,
     network: &ResourceTransfer,
 ) -> Result<NavigationResponse, String> {
-    if request.auth_requires_buffered_transport() {
-        return crate::network_host::fetch_browser_subresource_with_preflight_and_network_metadata(
-            loader.clone(),
-            request,
-            Some(cancel),
-        )
-        .await
-        .map(|observed| {
-            let (response, request) = observed.into_parts();
-            NavigationResponse::from(response)
-                .with_network_request_headers(request.map(|request| request.into_headers()))
-        });
-    }
     let observed = loader
         .fetch_raw_stream_with_cancel_and_network_metadata(request, cancel)
         .await

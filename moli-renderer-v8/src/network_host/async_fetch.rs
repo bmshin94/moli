@@ -13,16 +13,6 @@ pub(crate) async fn fetch_browser_subresource_with_preflight(
     request: Request,
     cancel_handle: Option<FetchCancelHandle>,
 ) -> Result<Response, String> {
-    fetch_browser_subresource_with_preflight_and_network_metadata(loader, request, cancel_handle)
-        .await
-        .map(NetworkFetchResult::into_response)
-}
-
-pub(crate) async fn fetch_browser_subresource_with_preflight_and_network_metadata(
-    loader: ResourceRequestClient,
-    request: Request,
-    cancel_handle: Option<FetchCancelHandle>,
-) -> Result<NetworkFetchResult<Response>, String> {
     let preflight_request_headers = request.request_headers.clone();
     fetch_browser_subresource_with_preflight_headers_and_observer(
         loader,
@@ -32,6 +22,7 @@ pub(crate) async fn fetch_browser_subresource_with_preflight_and_network_metadat
         None,
     )
     .await
+    .map(NetworkFetchResult::into_response)
 }
 
 #[cfg(test)]
@@ -488,7 +479,6 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
     request_body: Option<String>,
 ) {
     task_runner.spawn(async move {
-        let auth_requires_buffered_transport = request.auth_requires_buffered_transport();
         let requires_manual_preflight_redirects =
             browser_request_needs_manual_preflight_redirects(&request, &preflight_request_headers);
         let can_stream_subresource_body = matches!(
@@ -512,13 +502,12 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
                 request_mode = ?request.request_mode,
                 redirect_mode = ?request.redirect_mode,
                 follow_redirects = request.follow_redirects,
-                auth_requires_buffered_transport,
                 requires_manual_preflight_redirects,
                 can_stream_subresource_body,
                 stage = "async_subresource_transport_selected",
             );
         }
-        if auth_requires_buffered_transport || !can_stream_subresource_body {
+        if !can_stream_subresource_body {
             let result = fetch_browser_subresource_with_preflight_headers_and_observer(
                 loader,
                 request,
@@ -654,16 +643,6 @@ async fn fetch_browser_subresource_streaming_with_preflight_headers(
     Ok(())
 }
 
-async fn fetch_once(
-    loader: &ResourceRequestClient,
-    request: Request,
-    cancel_handle: Option<FetchCancelHandle>,
-) -> Result<Response, String> {
-    fetch_once_with_network_metadata(loader, request, cancel_handle)
-        .await
-        .map(NetworkFetchResult::into_response)
-}
-
 async fn fetch_once_with_network_metadata(
     loader: &ResourceRequestClient,
     request: Request,
@@ -700,15 +679,6 @@ pub(super) async fn fetch_response_head_once(
     request: Request,
     cancel_handle: Option<FetchCancelHandle>,
 ) -> Result<ResponseHead, String> {
-    // Challenge-response auth retries are completed inside libcurl on the
-    // buffered path. Preemptive Basic auth can still use the streaming head
-    // path because credentials are already represented as request headers.
-    if request.auth_requires_buffered_transport() {
-        return fetch_once(loader, request, cancel_handle)
-            .await
-            .map(|response| response.head());
-    }
-
     let cancel_handle = cancel_handle.unwrap_or_default();
     let mut response = loader
         .fetch_raw_stream_with_cancel(request, cancel_handle)

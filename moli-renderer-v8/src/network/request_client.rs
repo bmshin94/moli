@@ -291,14 +291,6 @@ impl ResourceRequestClient {
         cancel_handle: FetchCancelHandle,
     ) -> Result<NetworkFetchResult<Response>> {
         let request = self.apply_network_policy(request)?;
-        if request.auth_requires_buffered_transport() {
-            return self
-                .resource_runtime
-                .client()
-                .fetch_with_cancel_and_network_metadata(request, cancel_handle)
-                .await;
-        }
-
         let observed = self
             .fetch_raw_stream_with_cancel_after_policy_and_network_metadata(request, cancel_handle)
             .await?;
@@ -633,14 +625,6 @@ impl ResourceRequestClient {
         if let Some(result) = local_text_response(&request.url) {
             return result.map_err(Into::into);
         }
-        if request.auth_requires_buffered_transport() {
-            return self
-                .resource_runtime
-                .client()
-                .fetch_with_cancel(request, cancel)
-                .await
-                .map_err(Into::into);
-        }
         let observed = self
             .fetch_raw_stream_with_cancel_after_policy_and_network_metadata(request, cancel)
             .await
@@ -653,17 +637,6 @@ impl ResourceRequestClient {
         request: Request,
         cancel_handle: FetchCancelHandle,
     ) -> Result<Response> {
-        if request.auth_requires_buffered_transport() {
-            // Challenge-response schemes still need libcurl's buffered auth
-            // retry behavior until the streaming collector models
-            // intermediate authentication challenges explicitly.
-            return self
-                .resource_runtime
-                .client()
-                .fetch_with_cancel(request, cancel_handle)
-                .await;
-        }
-
         let response = self
             .fetch_raw_stream_with_cancel_after_policy(request, cancel_handle)
             .await?;
@@ -914,22 +887,6 @@ impl ResourceRequestClient {
         cancel_handle: Option<FetchCancelHandle>,
     ) -> Result<Response> {
         let request = self.apply_network_policy(request)?;
-        if request.auth_requires_buffered_transport() {
-            // Digest auth retries are still completed inside libcurl on the
-            // buffered path. Keep auth requests there until the streaming
-            // collector can distinguish intermediate auth challenges from
-            // final responses.
-            return match cancel_handle {
-                Some(cancel_handle) => {
-                    self.resource_runtime
-                        .client()
-                        .fetch_with_cancel(request, cancel_handle)
-                        .await
-                }
-                None => self.resource_runtime.client().fetch(request).await,
-            };
-        }
-
         let cancel_handle = cancel_handle.unwrap_or_default();
         let response = self
             .fetch_raw_stream_with_cancel_after_policy(request, cancel_handle)

@@ -206,26 +206,9 @@ pub(crate) fn outgoing_request_headers_for_url(
         && let Some((username, password)) =
             request.preemptive_server_basic_auth_for_url(request_url)
     {
-        // Basic auth is just a deterministic request header. Sending it
-        // preemptively lets streaming transports avoid libcurl's intermediate
-        // 401 retry body while Digest/NTLM/Negotiate stay on the buffered path.
         outgoing.push((
             "Authorization".to_owned(),
             format!("Basic {}", encode_basic_auth(username, password)),
-        ));
-    }
-
-    if let Some(auth) = request.auth()
-        && auth.target == RequestAuthTarget::Server
-        && auth.scheme == RequestAuthScheme::Basic
-        && !header_present(&outgoing, "authorization")
-    {
-        outgoing.push((
-            "Authorization".to_owned(),
-            format!(
-                "Basic {}",
-                encode_basic_auth(&auth.username, &auth.password)
-            ),
         ));
     }
 
@@ -757,9 +740,7 @@ pub(crate) fn configure_easy<H: Handler>(
             .context("failed to attach curl request headers")?;
     }
 
-    if let Some(auth) = request.auth()
-        && request.auth_requires_buffered_transport()
-    {
+    if let Some(auth) = request.curl_auth_for_url(request_url) {
         let mut methods = Auth::new();
         match auth.scheme {
             RequestAuthScheme::Basic => {

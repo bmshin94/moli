@@ -352,27 +352,7 @@ pub(in crate::worker) fn spawn_worker_fetch_network(
                     if let Some(auth) = auth {
                         request = request.with_auth(auth.into());
                     }
-                    if request.auth_requires_buffered_transport() {
-                        match fetch_browser_subresource_with_preflight_headers_and_observer(
-                            loader.clone(),
-                            request,
-                            Some(cancel_handle),
-                            cors_preflight_request_headers,
-                            Some(&preflight),
-                        )
-                        .await
-                        {
-                            Ok(observed) => {
-                                let (response, network_request_headers) =
-                                    worker_network_result_parts(observed);
-                                (
-                                    Ok(WorkerResourceResponse::Materialized(Box::new(response))),
-                                    network_request_headers,
-                                )
-                            }
-                            Err(error) => (Err(WorkerRequestError::from(format!("fetch: {error}"))), None),
-                        }
-                    } else if !allow_headers_first
+                    if !allow_headers_first
                         || request.request_mode == RequestMode::NoCors
                         || !request.follow_redirects
                     {
@@ -651,27 +631,6 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
             .unwrap_or_default();
 
         let (result, network_request_headers) = match request {
-            Ok(request) if request.auth_requires_buffered_transport() => {
-                match fetch_browser_subresource_with_preflight_headers_and_observer(
-                    loader.clone(),
-                    request,
-                    Some(cancel_handle),
-                    cors_preflight_request_headers,
-                    Some(&preflight),
-                )
-                .await
-                {
-                    Ok(observed) => {
-                        let (response, network_request_headers) =
-                            worker_network_result_parts(observed);
-                        (
-                            Ok(WorkerResourceResponse::Materialized(Box::new(response))),
-                            network_request_headers,
-                        )
-                    }
-                    Err(error) => (Err(WorkerRequestError::from(format!("xhr: {error}"))), None),
-                }
-            }
             Ok(request) => {
                 // Ordinary worker XHR can keep the network/cache path streaming
                 // and spool large bodies until the XHR DONE boundary.
