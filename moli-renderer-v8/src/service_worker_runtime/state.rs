@@ -732,7 +732,6 @@ pub(super) struct ServiceWorkerFetchJob {
     pub(super) streaming_body_source_id: Option<crate::types::NetworkBodySourceId>,
     pub(super) direct_completion_tx:
         Option<tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>>,
-    pub(super) network_transfer: Option<std::sync::Arc<crate::network::ResourceTransfer>>,
 }
 
 impl ServiceWorkerFetchJob {

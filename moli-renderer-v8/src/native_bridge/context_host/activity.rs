@@ -78,25 +78,6 @@ impl JsContextHost {
         true
     }
 
-    /// Appends a native network fact to the Page stream even while a V8
-    /// command is collecting its response-local output. The fact was created
-    /// by an admitted asynchronous producer, so attributing it to the active
-    /// command would strand it in that command's response recorder when the
-    /// Document is replaced before the transport finishes.
-    pub(crate) fn append_live_page_observation(
-        &self,
-        observation: crate::runtime::RendererProtocolObservation,
-    ) -> bool {
-        let Some(output_journal) = self.output_journal.as_ref() else {
-            return false;
-        };
-        output_journal.append(crate::runtime::PendingRendererOutputRecord::observation(
-            None,
-            observation,
-        ));
-        true
-    }
-
     /// Appends adjacent facts through one selected concrete output sink.
     ///
     /// Some Web operations synchronously produce both an observable protocol

@@ -8,15 +8,14 @@ use crate::{
     page_task_queue::RendererResourceCompletionSender,
     renderer_resource_scheduler::RendererResourceScheduler,
     types::{
-        CspReportNetworkPublication, NetworkBodySourceId, PendingSubresourceAuthState,
-        PendingSubresourceContinuation, PendingSubresourceContinueEvent,
-        PendingSubresourceExecutionContext, PendingSubresourceFetchInfo,
-        PendingSubresourceFetchState, PendingSubresourceResponseState, PendingWebSocketConnection,
-        PendingWebSocketResponseState, RunningSubresourceFetchState, ScriptNetworkOutput,
-        ScriptNetworkOutputItem, StreamingSubresourceFetchState, SubresourceBodyFinished,
-        SubresourceNetworkRecord, SubresourceNetworkRequestHandle, SubresourceRequestInitiatorType,
-        SubresourceRequestStarted, SubresourceResourceType, SubresourceResponseBody,
-        SubresourceResponseStarted,
+        NetworkBodySourceId, PendingSubresourceAuthState, PendingSubresourceContinuation,
+        PendingSubresourceContinueEvent, PendingSubresourceExecutionContext,
+        PendingSubresourceFetchInfo, PendingSubresourceFetchState, PendingSubresourceResponseState,
+        PendingWebSocketConnection, PendingWebSocketResponseState, RunningSubresourceFetchState,
+        ScriptNetworkOutput, ScriptNetworkOutputItem, StreamingSubresourceFetchState,
+        SubresourceBodyFinished, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
+        SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResourceType,
+        SubresourceResponseBody, SubresourceResponseStarted,
     },
 };
 
@@ -216,20 +215,6 @@ impl JsContextHost {
         self.note_subresource_activity();
     }
 
-    pub(crate) fn record_native_resource_observation(
-        &mut self,
-        observation: crate::runtime::RendererNetworkObservation,
-    ) {
-        let crate::runtime::RendererNetworkOutputItem::Resource(item) = observation.item() else {
-            unreachable!("resource completion carries a resource observation");
-        };
-        self.pending_network_output.push(item.as_ref().clone());
-        self.append_live_page_observation(crate::runtime::RendererProtocolObservation::Network(
-            observation,
-        ));
-        self.note_subresource_activity();
-    }
-
     pub(crate) fn push_network_output_item(&mut self, mut item: ScriptNetworkOutputItem) {
         // Complete-only producers still need an exact occurrence identity. Do
         // not synthesize a request-start event at the time completion arrives.
@@ -273,28 +258,6 @@ impl JsContextHost {
             return None;
         };
         Some((owner_local_host_id, document))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn standalone_network_source_for_test(
-        &self,
-    ) -> Option<(
-        crate::runtime::RendererOwnerLocalHostId,
-        crate::runtime::RendererDocumentLifecycleIdentity,
-    )> {
-        Some((
-            self.standalone_network_owner?,
-            self.root_document_lifecycle_identity()?,
-        ))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn bind_standalone_network_owner_for_test(&mut self) {
-        // Standalone VMs have a root Document but no protocol owner. Bind their
-        // native identity explicitly without redirecting the fixture's output
-        // queues into a journal that it does not drive.
-        self.standalone_network_owner =
-            Some(crate::runtime::RendererOwnerLocalHostId::new_for_testing(1));
     }
 
     pub(crate) fn record_get_subresource_network_result(
@@ -1082,7 +1045,6 @@ impl JsContextHost {
         load: ResourceLoadLease,
         network_partition_key: Option<String>,
         policy_context: crate::types::SubresourcePolicyContext,
-        publication: CspReportNetworkPublication,
         mut info: PendingSubresourceFetchInfo,
     ) -> u64 {
         self.assign_pending_subresource_fetch_identity(&mut info);
@@ -1092,9 +1054,7 @@ impl JsContextHost {
             crate::network::loads::ResourceLoadKind::CspReport
         );
         debug_assert_eq!(load.disposition(), ResourceLoadDisposition::Keepalive);
-        if !publication.uses_native_transfer() {
-            self.record_pending_subresource_request_started(&info, load.disposition());
-        }
+        self.record_pending_subresource_request_started(&info, load.disposition());
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
@@ -1107,10 +1067,7 @@ impl JsContextHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context,
-                continuation: PendingSubresourceContinuation::CspReport {
-                    client_id,
-                    publication,
-                },
+                continuation: PendingSubresourceContinuation::CspReport { client_id },
                 deferred_request_started: false,
             },
         );
@@ -1182,10 +1139,7 @@ impl JsContextHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context,
-                continuation: PendingSubresourceContinuation::CspReport {
-                    client_id,
-                    publication: CspReportNetworkPublication::Generic,
-                },
+                continuation: PendingSubresourceContinuation::CspReport { client_id },
                 deferred_request_started: false,
             },
         );

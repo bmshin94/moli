@@ -18,7 +18,7 @@ mod inspector_task_runner;
 mod module_mime;
 mod module_runtime;
 mod network_transfer;
-use crate::network::ResourceTransfer;
+pub(crate) use network_transfer::WorkerResourceTransfer;
 mod parent_output;
 pub(crate) use parent_output::{WorkerNetworkObserver, WorkerParentSender};
 mod script_loading;

@@ -1012,12 +1012,6 @@ impl ScriptVm {
         &mut self,
         lifecycle: crate::runtime::RendererDocumentLifecycleJournalHandle,
     ) {
-        #[cfg(test)]
-        if self.renderer_page_script_environment.is_none() {
-            self._context_host
-                .borrow_mut()
-                .bind_standalone_network_owner_for_test();
-        }
         self._context_host
             .borrow_mut()
             .set_root_document_lifecycle(lifecycle);
@@ -1833,8 +1827,6 @@ impl ScriptVmPageRealmBootstrap {
             crate::service_worker_runtime::ServiceWorkerClientId,
         >,
     ) -> std::result::Result<Self, ScriptVmBootstrapError> {
-        browser_context_runtime
-            .bind_resource_task_runner(initial_document_loader_bootstrap.task_runner());
         let document_handle = dom_host.document_handle();
         let document_url = dom_host
             .dom()
@@ -1937,8 +1929,10 @@ impl ScriptVmPageRealmBootstrap {
                 moli_url::origin_ascii_serialization(&document_url),
             )
         };
-        let initial_document_loader =
-            initial_document_loader_bootstrap.commit(initial_document_context);
+        let initial_document_loader = initial_document_loader_bootstrap.commit(
+            initial_document_context,
+            &context_host.borrow().browser_context_runtime(),
+        );
         context_host
             .borrow_mut()
             .register_main_document_resource_loader(&initial_document_loader);

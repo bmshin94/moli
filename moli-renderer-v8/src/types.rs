@@ -63,23 +63,10 @@ pub use crate::protocol_types::{
     WebSocketLifecycleEvent, WebSocketLifecycleKind, WebSocketNetworkEvent,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CspReportNetworkPublication {
-    Generic,
-    NativeTransfer,
-}
-
-impl CspReportNetworkPublication {
-    pub(super) const fn uses_native_transfer(self) -> bool {
-        matches!(self, Self::NativeTransfer)
-    }
-}
-
 pub(super) enum PendingSubresourceContinuation {
     Beacon,
     CspReport {
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
-        publication: CspReportNetworkPublication,
     },
     EventSource(v8::Global<v8::Object>),
     Fetch(PendingWindowFetchContinuation),
@@ -125,16 +112,6 @@ impl ImageRequestCorsMode {
 }
 
 impl PendingSubresourceContinuation {
-    pub(super) fn uses_native_transfer(&self) -> bool {
-        matches!(
-            self,
-            Self::CspReport {
-                publication: CspReportNetworkPublication::NativeTransfer,
-                ..
-            }
-        )
-    }
-
     pub(super) fn request_initiator_type(&self) -> SubresourceRequestInitiatorType {
         match self {
             Self::Image {
@@ -667,7 +644,6 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
 pub(super) enum AsyncSubresourceFetchEvent {
     Completion(Box<AsyncSubresourceFetchCompletion>),
     ObservedNetworkRecord(Box<SubresourceNetworkRecord>),
-    NativeNetwork(crate::runtime::RendererNetworkObservation),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
     StreamingChunk(AsyncSubresourceStreamingChunk),
     StreamingFinished(AsyncSubresourceStreamingFinished),
@@ -679,7 +655,7 @@ impl AsyncSubresourceFetchEvent {
             Self::Completion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id,
             },
-            Self::ObservedNetworkRecord(_) | Self::NativeNetwork(_) => {
+            Self::ObservedNetworkRecord(_) => {
                 AsyncSubresourceFetchEventTarget::ObservedNetworkRecord
             }
             Self::StreamingStarted(started) => AsyncSubresourceFetchEventTarget::StreamingStart {

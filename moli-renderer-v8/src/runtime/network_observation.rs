@@ -170,46 +170,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn document_source_retirement_keeps_one_lease_and_releases_context_registration() {
-        let reporter =
-            RendererNetworkReporter::new(RendererBrowserContextRuntimeId::new_for_testing(24));
-        let inputs = Arc::new(Mutex::new(Vec::new()));
-        let observed = inputs.clone();
-        reporter.install_handler(move |input| observed.lock().push(input));
-        let owner = crate::RendererOwnerLocalHostId::new_for_testing(3);
-        let document = crate::runtime::RendererDocumentLifecycleJournalHandle::new_initial(
-            crate::PageId::new_for_testing(5),
-        )
-        .identity();
-        let captured = reporter.for_document(owner, document);
-        let request = captured.start_request().unwrap();
-        let duplicate_capture = reporter.for_document(owner, document);
-        reporter.close_source(owner, document.document.page_id);
-        reporter.close_source(owner, document.document.page_id);
-        assert!(captured.start_request().is_none());
-        assert!(duplicate_capture.start_request().is_none());
-        assert!(
-            inputs.lock().is_empty(),
-            "repeat retirement cannot bypass the admitted request"
-        );
-        drop(request);
-        assert!(matches!(
-            inputs.lock().as_slice(),
-            [RendererNetworkInput::SourceClosed { .. }]
-        ));
-        assert!(
-            reporter.documents.lock().is_empty(),
-            "Context cannot retain a closed Page registration"
-        );
-        drop((captured, duplicate_capture));
-        assert_eq!(
-            inputs.lock().len(),
-            1,
-            "captures do not own request completion"
-        );
-    }
-
     #[tokio::test]
     async fn native_network_receipts_require_exact_commit_and_source_close_follows_the_fifo() {
         let runtime = RendererBrowserContextRuntimeId::new_for_testing(19);
@@ -413,79 +373,38 @@ type NetworkHandler = Box<dyn Fn(RendererNetworkInput) + Send + Sync>;
 pub(crate) struct RendererWorkerNetworkReporter {
     reporter: RendererNetworkReporter,
     source: RendererWorkerIdentity,
-    requests: Arc<Mutex<NetworkSourceState>>,
+    requests: Arc<Mutex<WorkerNetworkSourceState>>,
 }
 
 #[derive(Debug)]
-enum NetworkSourceState {
+enum WorkerNetworkSourceState {
     Active(usize),
     Retiring(std::num::NonZeroUsize),
     Closed,
 }
 
-/// One admitted request keeps only its native source, never a Page, Worker or VM.
+/// One admitted request keeps only its native source, never a Worker or VM.
 /// Clones share the same request identity and release one source lease together.
 #[derive(Clone, Debug)]
-pub(crate) struct RendererNetworkRequest {
-    lease: Arc<NetworkRequestInner>,
+pub(crate) struct RendererWorkerNetworkRequest {
+    lease: Arc<WorkerNetworkRequestInner>,
     handle: moli_page_types::SubresourceNetworkRequestHandle,
 }
 
 #[derive(Debug)]
-struct NetworkRequestInner {
-    reporter: RendererNetworkReporter,
-    source: RendererNetworkSource,
-    requests: Arc<Mutex<NetworkSourceState>>,
+struct WorkerNetworkRequestInner {
+    source: RendererWorkerNetworkReporter,
     admitted_handle: moli_page_types::SubresourceNetworkRequestHandle,
 }
 
-impl RendererNetworkRequest {
-    fn start(
-        reporter: RendererNetworkReporter,
-        source: RendererNetworkSource,
-        requests: Arc<Mutex<NetworkSourceState>>,
-    ) -> Option<Self> {
-        Self::start_with_handle(
-            reporter,
-            source,
-            requests,
-            moli_page_types::SubresourceNetworkRequestHandle::allocate(),
-        )
-    }
-
-    fn start_with_handle(
-        reporter: RendererNetworkReporter,
-        source: RendererNetworkSource,
-        requests: Arc<Mutex<NetworkSourceState>>,
-        handle: moli_page_types::SubresourceNetworkRequestHandle,
-    ) -> Option<Self> {
-        {
-            let mut state = requests.lock();
-            let NetworkSourceState::Active(count) = &mut *state else {
-                return None;
-            };
-            *count = count
-                .checked_add(1)
-                .expect("network request count exhausted");
-        }
-        Some(Self {
-            lease: Arc::new(NetworkRequestInner {
-                reporter,
-                source,
-                requests,
-                admitted_handle: handle,
-            }),
-            handle,
-        })
-    }
-
+impl RendererWorkerNetworkRequest {
     pub(crate) fn handle(&self) -> moli_page_types::SubresourceNetworkRequestHandle {
         self.handle
     }
 
     pub(crate) fn report(&self, item: ScriptNetworkOutputItem) -> RendererNetworkObservation {
-        self.lease.reporter.report_source(
-            self.lease.source.clone(),
+        self.lease.source.reporter.report_source(
+            RendererNetworkSource::Worker(self.lease.source.source.clone()),
             item,
             (self.handle != self.lease.admitted_handle).then_some(self.lease.admitted_handle),
         )
@@ -550,30 +469,32 @@ mod worker_request_tests {
     }
 }
 
-impl Drop for NetworkRequestInner {
+impl Drop for WorkerNetworkRequestInner {
     fn drop(&mut self) {
-        let mut state = self.requests.lock();
+        let mut state = self.source.requests.lock();
         let close = match &mut *state {
-            NetworkSourceState::Active(count) => {
+            WorkerNetworkSourceState::Active(count) => {
                 *count = count.checked_sub(1).expect("admitted request source lease");
                 false
             }
-            NetworkSourceState::Retiring(count) => {
+            WorkerNetworkSourceState::Retiring(count) => {
                 if let Some(remaining) = std::num::NonZeroUsize::new(count.get() - 1) {
                     *count = remaining;
                     false
                 } else {
-                    *state = NetworkSourceState::Closed;
+                    *state = WorkerNetworkSourceState::Closed;
                     true
                 }
             }
-            NetworkSourceState::Closed => unreachable!("live request outlasts source close"),
+            WorkerNetworkSourceState::Closed => unreachable!("live request outlasts source close"),
         };
         drop(state);
         if close {
-            let source = self.source.identity();
-            self.reporter.documents.lock().remove(&source);
-            self.reporter.close_producer(source);
+            self.source
+                .reporter
+                .close_producer(RendererNetworkSourceIdentity::Worker(
+                    self.source.source.clone(),
+                ));
         }
     }
 }
@@ -605,24 +526,45 @@ impl RendererWorkerNetworkReporter {
         Self {
             reporter,
             source,
-            requests: Arc::new(Mutex::new(NetworkSourceState::Active(0))),
+            requests: Arc::new(Mutex::new(WorkerNetworkSourceState::Active(0))),
         }
     }
 
-    pub(crate) fn start_request(&self) -> Option<RendererNetworkRequest> {
-        RendererNetworkRequest::start(
-            self.reporter.clone(),
-            RendererNetworkSource::Worker(self.source.clone()),
-            self.requests.clone(),
-        )
+    pub(crate) fn start_request(&self) -> Option<RendererWorkerNetworkRequest> {
+        let mut state = self.requests.lock();
+        let WorkerNetworkSourceState::Active(count) = &mut *state else {
+            return None;
+        };
+        *count = count
+            .checked_add(1)
+            .expect("Worker request count exhausted");
+        let handle = moli_page_types::SubresourceNetworkRequestHandle::allocate();
+        Some(RendererWorkerNetworkRequest {
+            lease: Arc::new(WorkerNetworkRequestInner {
+                source: self.clone(),
+                admitted_handle: handle,
+            }),
+            handle,
+        })
     }
 
     pub(crate) fn close_source(&self) {
-        close_network_requests(
-            &self.reporter,
-            RendererNetworkSourceIdentity::Worker(self.source.clone()),
-            &self.requests,
-        );
+        let mut state = self.requests.lock();
+        let mut close = false;
+        if let WorkerNetworkSourceState::Active(count) = *state {
+            *state = match std::num::NonZeroUsize::new(count) {
+                Some(count) => WorkerNetworkSourceState::Retiring(count),
+                None => {
+                    close = true;
+                    WorkerNetworkSourceState::Closed
+                }
+            };
+        }
+        drop(state);
+        if close {
+            self.reporter
+                .close_producer(RendererNetworkSourceIdentity::Worker(self.source.clone()));
+        }
     }
 
     #[cfg(test)]
@@ -632,58 +574,6 @@ impl RendererWorkerNetworkReporter {
             RendererWorkerIdentity::Shared(moli_shared_worker::SharedWorkerInstanceId::from_u64(1)),
         )
     }
-}
-
-/// Captured with the original Document, before any asynchronous continuation.
-#[derive(Clone, Debug)]
-pub(crate) struct RendererDocumentNetworkReporter {
-    reporter: RendererNetworkReporter,
-    source: RendererNetworkSource,
-    requests: Arc<Mutex<NetworkSourceState>>,
-}
-
-impl RendererDocumentNetworkReporter {
-    pub(crate) fn start_request(&self) -> Option<RendererNetworkRequest> {
-        RendererNetworkRequest::start(
-            self.reporter.clone(),
-            self.source.clone(),
-            self.requests.clone(),
-        )
-    }
-
-    pub(crate) fn start_request_with_handle(
-        &self,
-        handle: moli_page_types::SubresourceNetworkRequestHandle,
-    ) -> Option<RendererNetworkRequest> {
-        RendererNetworkRequest::start_with_handle(
-            self.reporter.clone(),
-            self.source.clone(),
-            self.requests.clone(),
-            handle,
-        )
-    }
-}
-
-fn close_network_requests(
-    reporter: &RendererNetworkReporter,
-    source: RendererNetworkSourceIdentity,
-    requests: &Mutex<NetworkSourceState>,
-) -> bool {
-    let close = {
-        let mut state = requests.lock();
-        let NetworkSourceState::Active(count) = *state else {
-            return false;
-        };
-        *state = match std::num::NonZeroUsize::new(count) {
-            Some(count) => NetworkSourceState::Retiring(count),
-            None => NetworkSourceState::Closed,
-        };
-        count == 0
-    };
-    if close {
-        reporter.close_producer(source);
-    }
-    close
 }
 
 impl PartialEq for RendererWorkerNetworkReporter {
@@ -697,14 +587,6 @@ impl Eq for RendererWorkerNetworkReporter {}
 pub(crate) struct RendererNetworkReporter {
     runtime: RendererBrowserContextRuntimeId,
     handler: Arc<Mutex<Option<NetworkHandler>>>,
-    documents: Arc<
-        Mutex<
-            std::collections::HashMap<
-                RendererNetworkSourceIdentity,
-                Arc<Mutex<NetworkSourceState>>,
-            >,
-        >,
-    >,
 }
 
 impl std::fmt::Debug for RendererNetworkReporter {
@@ -724,7 +606,6 @@ impl RendererNetworkReporter {
         Self {
             runtime,
             handler: Arc::new(Mutex::new(None)),
-            documents: Default::default(),
         }
     }
 
@@ -784,40 +665,10 @@ impl RendererNetworkReporter {
         owner_local_host_id: super::RendererOwnerLocalHostId,
         page: super::PageId,
     ) {
-        let source = RendererNetworkSourceIdentity::Page {
+        self.close_producer(RendererNetworkSourceIdentity::Page {
             owner_local_host_id,
             page,
-        };
-        let requests = self.documents.lock().get(&source).cloned();
-        if let Some(requests) = requests {
-            if close_network_requests(self, source.clone(), &requests) {
-                self.documents.lock().remove(&source);
-            }
-        } else {
-            self.close_producer(source);
-        }
-    }
-
-    pub(crate) fn for_document(
-        &self,
-        owner_local_host_id: super::RendererOwnerLocalHostId,
-        document: RendererDocumentLifecycleIdentity,
-    ) -> RendererDocumentNetworkReporter {
-        let source = RendererNetworkSource::Document {
-            owner_local_host_id,
-            document,
-        };
-        let requests = self
-            .documents
-            .lock()
-            .entry(source.identity())
-            .or_insert_with(|| Arc::new(Mutex::new(NetworkSourceState::Active(0))))
-            .clone();
-        RendererDocumentNetworkReporter {
-            reporter: self.clone(),
-            source,
-            requests,
-        }
+        });
     }
 
     pub(crate) fn close_producer(&self, source: RendererNetworkSourceIdentity) {

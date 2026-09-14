@@ -2,15 +2,13 @@ use moli_fetch::{FetchCancelHandle, Request, ResponseHead};
 
 use crate::{
     network::ResourceRequestClient,
-    network::ResourceTransfer,
     page_task_queue::RendererResourceCompletionSender,
-    runtime::RendererDocumentNetworkReporter,
-    runtime::RendererNetworkRequest,
+    runtime::RendererWorkerNetworkRequest,
     types::{
         AsyncSubresourceFetchEvent, AsyncSubresourceNetworkContext, SubresourceNetworkRecord,
-        SubresourceRequestInitiatorType, SubresourceResponseBody,
+        SubresourceResponseBody,
     },
-    worker::WorkerNetworkObserver,
+    worker::{WorkerNetworkObserver, WorkerResourceTransfer},
 };
 
 #[derive(Clone)]
@@ -18,10 +16,9 @@ pub(crate) enum CorsPreflightNetworkObserver {
     Page {
         completion_tx: RendererResourceCompletionSender,
         context: AsyncSubresourceNetworkContext,
-        network_reporter: Option<Box<RendererDocumentNetworkReporter>>,
     },
     Worker {
-        request: RendererNetworkRequest,
+        request: RendererWorkerNetworkRequest,
         observer: WorkerNetworkObserver,
         keepalive: bool,
     },
@@ -32,11 +29,9 @@ impl CorsPreflightNetworkObserver {
         completion_tx: RendererResourceCompletionSender,
         context: AsyncSubresourceNetworkContext,
     ) -> Self {
-        let network_reporter = completion_tx.network_reporter().map(Box::new);
         Self::Page {
             completion_tx,
             context,
-            network_reporter,
         }
     }
 
@@ -52,8 +47,12 @@ impl CorsPreflightNetworkObserver {
                 observer,
                 keepalive,
             } => {
-                let network =
-                    ResourceTransfer::preflight(parent, observer.clone(), &request, *keepalive);
+                let network = WorkerResourceTransfer::preflight(
+                    parent,
+                    observer.clone(),
+                    &request,
+                    *keepalive,
+                );
                 let result = loader
                     .fetch_observed_script_text_with_cancel(
                         request,
@@ -69,52 +68,9 @@ impl CorsPreflightNetworkObserver {
             Self::Page {
                 completion_tx,
                 context,
-                network_reporter,
             } => {
                 let request_url = request.url.clone();
                 let request_headers = request.request_headers.clone();
-                if let Some(network_reporter) = network_reporter.as_deref() {
-                    let Some(network_request) = network_reporter.start_request() else {
-                        return Err("Document network source is closed".to_owned());
-                    };
-                    let transfer = ResourceTransfer::from_request(
-                        network_request,
-                        {
-                            let completion_tx = completion_tx.clone();
-                            move |observation| {
-                                let _ = completion_tx.send_async_subresource_event(
-                                    AsyncSubresourceFetchEvent::NativeNetwork(observation),
-                                );
-                            }
-                        },
-                        move |network| {
-                            moli_page_types::SubresourceRequestStarted::new(
-                                network.handle(),
-                                context.frame_id.clone(),
-                                context.document_url.clone(),
-                                request_url.clone(),
-                                "OPTIONS".to_owned(),
-                                request_headers.clone(),
-                                None,
-                                context.resource_type,
-                                SubresourceRequestInitiatorType::Other,
-                                None,
-                            )
-                        },
-                    );
-                    let result = loader
-                        .fetch_observed_script_text_with_cancel(
-                            request,
-                            cancel.unwrap_or_default(),
-                            transfer.as_ref(),
-                        )
-                        .await;
-                    transfer.complete(&result);
-                    return result
-                        .map(|response| response.head())
-                        .map_err(|error| error.to_string());
-                }
-
                 let result =
                     super::async_fetch::fetch_response_head_once(loader, request, cancel).await;
                 let record = match &result {

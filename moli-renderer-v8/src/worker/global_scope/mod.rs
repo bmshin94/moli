@@ -1098,7 +1098,7 @@ pub(super) struct PendingWorkerFetch {
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
     pub(super) request_body: Option<Vec<u8>>,
-    pub(super) network: crate::runtime::RendererNetworkRequest,
+    pub(super) network: crate::runtime::RendererWorkerNetworkRequest,
     pub(super) network_record: Option<PendingWorkerFetchNetworkRecord>,
     pub(super) paused_response: Option<PausedWorkerSubresourceResponse>,
     pub(super) streaming_body_source_id: Option<NetworkBodySourceId>,
@@ -1160,7 +1160,7 @@ impl WorkerRequestError {
 /// The VM claims delivery before applying policy/interception. If it is gone,
 /// dropping the packet still settles the original native transport request.
 pub(super) struct WorkerRequestDelivery {
-    network: crate::runtime::RendererNetworkRequest,
+    network: crate::runtime::RendererWorkerNetworkRequest,
     observer: crate::worker::WorkerNetworkObserver,
     completion: Option<Box<WorkerRequestCompletion>>,
 }
@@ -1172,7 +1172,7 @@ impl WorkerRequestDelivery {
 
     fn claim(
         mut self,
-        request: &crate::runtime::RendererNetworkRequest,
+        request: &crate::runtime::RendererWorkerNetworkRequest,
     ) -> Option<WorkerRequestCompletion> {
         if request.handle() != self.network.handle() {
             return None;
@@ -1196,7 +1196,7 @@ pub(super) struct WorkerFetchStreamingChunk {
 pub(super) struct WorkerFetchStreamingFinished {
     fetch_id: u32,
     body_source_id: NetworkBodySourceId,
-    network: crate::runtime::RendererNetworkRequest,
+    network: crate::runtime::RendererWorkerNetworkRequest,
     observer: crate::worker::WorkerNetworkObserver,
     result: moli_page_types::SubresourceBodyFinished,
 }
@@ -1315,13 +1315,13 @@ pub(super) struct PendingWorkerXhr {
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
     pub(super) request_body: Option<Vec<u8>>,
-    pub(super) network: crate::runtime::RendererNetworkRequest,
+    pub(super) network: crate::runtime::RendererWorkerNetworkRequest,
     pub(super) network_record: Option<PendingWorkerFetchNetworkRecord>,
     pub(super) paused_response: Option<PausedWorkerSubresourceResponse>,
 }
 
 pub(super) struct WorkerCspReport {
-    network: Arc<crate::network::ResourceTransfer>,
+    network: Arc<super::network_transfer::WorkerResourceTransfer>,
     pub(super) load: ResourceLoadLease,
     pub(super) document_url: Url,
     pub(super) request: Request,

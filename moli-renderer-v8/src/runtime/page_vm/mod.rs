@@ -1311,7 +1311,7 @@ impl PageVmRuntimeHooks {
         owner_wake: RendererOwnerWakeSender,
         browser_context_runtime: super::RendererBrowserContextRuntime,
     ) -> Self {
-        browser_context_runtime.bind_resource_task_runner(
+        let resource_task_runner = browser_context_runtime.bind_resource_task_runner(
             crate::network::RendererResourceTaskRunner::from_current_tokio()
                 .expect("renderer owner must install its Context resource executor"),
         );
@@ -1320,7 +1320,7 @@ impl PageVmRuntimeHooks {
             popup_broker: super::RendererPopupBroker::default(),
             owner_wake: Some(owner_wake),
             page_creation_progress: None,
-            resource_task_runner: browser_context_runtime.resource_task_runner(),
+            resource_task_runner: Some(resource_task_runner),
             browser_context_runtime,
             document_lifecycle: None,
             document_lifecycle_install: PageVmDocumentLifecycleInstall::ReuseOrCreateInitial,
@@ -4273,28 +4273,10 @@ impl PageVm {
                 service_worker,
             );
         let script_event_parser_boundary_sender = page_task_queue.parser_boundary_sender();
-        let network_reporter = runtime_hooks
-            .renderer_page_script_environment
-            .as_ref()
-            .and_then(|environment| {
-                let crate::runtime::RendererOutputResidenceIdentity::Page {
-                    owner_local_host_id,
-                    ..
-                } = environment.output_journal().stream().residence()
-                else {
-                    return None;
-                };
-                Some(
-                    runtime_hooks
-                        .browser_context_runtime
-                        .network_for_document(owner_local_host_id, document_lifecycle_identity),
-                )
-            });
         let resource_completion_sender = RendererResourceCompletionSender::for_page_scheduler(
             resource_completion,
             document_lifecycle_identity.document,
-        )
-        .with_network_reporter(network_reporter);
+        );
         let PageVmRendererDocumentIsolateBootstrap {
             renderer_document_isolate_bootstrap,
         } = page_vm_isolate_bootstrap;

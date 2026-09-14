@@ -39,7 +39,7 @@ pub(super) fn spawn_shared_worker_loading_task(
     fetch: SharedWorkerScriptFetch,
     cancel_handle: FetchCancelHandle,
     cancel_wait: tokio::sync::oneshot::Receiver<()>,
-    network: Arc<crate::network::ResourceTransfer>,
+    network: Arc<crate::worker::WorkerResourceTransfer>,
 ) {
     let task_runner = params
         .launch_context

@@ -288,7 +288,6 @@ impl ServiceWorkerRuntimeService {
             navigation_preload_cancel_handle: None,
             streaming_body_source_id: None,
             direct_completion_tx: dispatch.direct_completion_tx,
-            network_transfer: dispatch.network_transfer,
         };
         self.dispatch_controlled_fetch_job(fetch_job, request)
             .is_ok()

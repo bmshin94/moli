@@ -15,7 +15,6 @@ use crate::content_security_policy::{
 };
 use crate::context_bootstrap::dispatch_simple_event_target_event;
 use crate::network::ResourceResponseFailure;
-use crate::network::ResourceTransfer;
 use crate::network::loads::{ResourceLoadDisposition, ResourceLoadKind};
 use crate::protocol_types::{PendingSubresourceFetchInfo, SubresourceRequestStarted};
 use crate::service_worker_runtime::{
@@ -24,6 +23,7 @@ use crate::service_worker_runtime::{
 };
 use crate::types::{AsyncSubresourceNetworkContext, SubresourceResourceType};
 use crate::worker::WorkerPendingFetchContinue;
+use crate::worker::network_transfer::WorkerResourceTransfer;
 use moli_fetch::{
     BrowserRequestMetadata, FetchCancelHandle, Request, RequestResourceType,
     should_request_be_blocked_due_to_bad_port,
@@ -119,7 +119,7 @@ fn send_worker_content_security_policy_report_for_state(
             .with_initiator_url(&document_url)
             .with_network_partition_key(state.network_partition_key.clone())
             .with_browser_request_metadata(BrowserRequestMetadata::Fetch);
-        let Some(network) = ResourceTransfer::start(
+        let Some(network) = WorkerResourceTransfer::start(
             state.global_kind.network(),
             state.parent_tx.network_observer(),
             |network| report_request_started(network, &document_url, &request),
@@ -192,7 +192,7 @@ fn send_worker_content_security_policy_report_for_state(
 }
 
 fn report_request_started(
-    network: &crate::runtime::RendererNetworkRequest,
+    network: &crate::runtime::RendererWorkerNetworkRequest,
     document_url: &Url,
     request: &Request,
 ) -> SubresourceRequestStarted {
@@ -291,7 +291,6 @@ impl WorkerCspReport {
             resource_task_runner: self.load.task_runner(),
             cancel_handle,
             direct_completion_tx: Some(direct_completion_tx),
-            network_transfer: None,
         };
         if !runtime.dispatch_controlled_fetch(dispatch) {
             self.fail("service worker csp report fetch dispatch failed".into());

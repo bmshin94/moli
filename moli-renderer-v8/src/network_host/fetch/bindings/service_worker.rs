@@ -107,7 +107,6 @@ pub(super) fn dispatch_service_worker_fetch(
         resource_task_runner: prepared.resource_loader.task_runner(),
         cancel_handle,
         direct_completion_tx: None,
-        network_transfer: None,
     };
     if host.dispatch_service_worker_fetch(dispatch) {
         return Ok(Some(internal_id));

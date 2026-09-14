@@ -16,8 +16,6 @@ pub mod navigation;
 mod policy;
 mod request_client;
 pub(crate) mod resource_response;
-mod resource_transfer;
-pub(crate) use resource_transfer::ResourceTransfer;
 mod task_runner;
 
 pub use backend::{

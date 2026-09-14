@@ -353,7 +353,7 @@ impl RendererBrowserContextRuntime {
     pub fn bind_resource_task_runner(
         &self,
         task_runner: crate::network::RendererResourceTaskRunner,
-    ) {
+    ) -> crate::network::RendererResourceTaskRunner {
         let runner = self.inner.resource_task_runner.get_or_init(|| task_runner);
         self.inner.worker_service_task.get_or_init(|| {
             let (shared_tx, mut shared_rx) =
@@ -388,6 +388,7 @@ impl RendererBrowserContextRuntime {
                 }
             }))
         });
+        runner.clone()
     }
 
     #[cfg(test)]
@@ -395,12 +396,6 @@ impl RendererBrowserContextRuntime {
         let owner = Self::new();
         owner.bind_resource_task_runner(crate::network::RendererResourceTaskRunner::for_test());
         owner
-    }
-
-    pub(crate) fn resource_task_runner(
-        &self,
-    ) -> Option<crate::network::RendererResourceTaskRunner> {
-        self.inner.resource_task_runner.get().cloned()
     }
 
     /// Resolves once, before the caller yields. The returned capability can
@@ -696,16 +691,6 @@ impl RendererBrowserContextRuntime {
         self.inner
             .network
             .report(owner_local_host_id, document, item)
-    }
-
-    pub(crate) fn network_for_document(
-        &self,
-        owner_local_host_id: super::RendererOwnerLocalHostId,
-        document: super::RendererDocumentLifecycleIdentity,
-    ) -> super::RendererDocumentNetworkReporter {
-        self.inner
-            .network
-            .for_document(owner_local_host_id, document)
     }
 
     pub(crate) fn close_network_source(
@@ -1150,7 +1135,7 @@ mod owner_wake_tests;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn worker_resource_executor_is_selected_once_for_existing_and_future_context_views() {
+    fn resource_executor_is_selected_once_for_existing_and_future_context_views() {
         let owner = super::RendererBrowserContextRuntime::new();
         let existing = owner.worker_context_runtime();
         assert!(existing.resource_task_runner().is_none());
