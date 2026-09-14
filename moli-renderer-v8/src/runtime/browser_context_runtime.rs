@@ -682,6 +682,14 @@ impl RendererBrowserContextRuntime {
         self.inner.network.install_handler(handler);
     }
 
+    pub(crate) fn network_for_document(
+        &self,
+        owner: super::RendererOwnerLocalHostId,
+        document: super::RendererDocumentLifecycleIdentity,
+    ) -> super::RendererDocumentNetworkReporter {
+        self.inner.network.for_document(owner, document)
+    }
+
     pub(crate) fn report_network(
         &self,
         owner_local_host_id: super::RendererOwnerLocalHostId,

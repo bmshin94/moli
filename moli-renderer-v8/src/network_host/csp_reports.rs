@@ -1,3 +1,9 @@
+mod completion;
+pub(crate) use completion::{
+    CompletedCspReport, CspReportResource, fetch_buffered_csp_report, finish_report_result,
+    send_report_completion,
+};
+
 use super::*;
 use crate::content_security_policy::{
     ContentSecurityPolicyViolationEventFields, content_security_policy_report_requests,
@@ -97,6 +103,8 @@ impl ContentSecurityPolicyReportOwner {
 #[derive(Clone)]
 pub(crate) struct WindowCspReportRequestContext {
     identity: crate::native_bridge::WindowDocumentNetworkRequestIdentity,
+    network: crate::runtime::RendererDocumentNetworkReporter,
+    completion_tx: crate::page_task_queue::RendererResourceCompletionSender,
     resource_loader: crate::network::context::DocumentResourceLoader,
     request_client: ResourceRequestClient,
     frame_id: Option<String>,
@@ -199,12 +207,28 @@ fn send_content_security_policy_report_request(
         .with_initiator_url(&request_context.document_url)
         .with_network_partition_key(request_context.network_partition_key.clone())
         .with_subframe_context(request_context.frame_id.is_some());
-    let info = report_subresource_fetch_info(
+    let mut info = report_subresource_fetch_info(
         &request_context.request_client,
         request_context.frame_id.clone(),
         &request_context.document_url,
         &request,
     );
+
+    let Some(request_network) = request_context.network.start_request() else {
+        return;
+    };
+    info.network_request_handle = Some(request_network.handle());
+    let completion_tx = request_context.completion_tx.clone();
+    let (network, started) = crate::network::ResourceTransfer::start(
+        request_network,
+        move |observation| {
+            let _ = completion_tx.send_async_subresource_event(
+                AsyncSubresourceFetchEvent::NativeNetwork(observation),
+            );
+        },
+        |network| csp_report_request_started(network, &info),
+    );
+    host.record_native_resource_observation(started);
 
     if request_context
         .request_client
@@ -212,19 +236,16 @@ fn send_content_security_policy_report_request(
         .snapshot()
         .blocks_url(&request.url)
     {
-        record_content_security_policy_report_failure(
-            host,
-            info,
+        network.failed(&crate::network::ResourceResponseFailure::Request(
             BLOCKED_BY_CLIENT_ERROR_TEXT.to_owned(),
-        );
+        ));
         return;
     }
     if should_request_be_blocked_due_to_bad_port(&request.url) {
-        record_content_security_policy_report_failure(
-            host,
-            info,
-            format!("csp report: blocked bad port for `{}`", request.url),
-        );
+        network.failed(&crate::network::ResourceResponseFailure::Request(format!(
+            "csp report: blocked bad port for `{}`",
+            request.url
+        )));
         return;
     }
 
@@ -234,6 +255,7 @@ fn send_content_security_policy_report_request(
             request_context.identity,
             request_context.client_id,
             load,
+            network,
             request_context.network_partition_key.clone(),
             request_context.policy_context,
             info,
@@ -247,143 +269,62 @@ fn send_content_security_policy_report_request(
         .snapshot()
         .network_offline()
     {
-        record_content_security_policy_report_failure(
-            host,
-            info,
+        network.failed(&crate::network::ResourceResponseFailure::Request(
             "Network emulation offline".to_owned(),
-        );
+        ));
         return;
     }
 
-    if dispatch_service_worker_content_security_policy_report(
-        host,
-        request_context,
-        info.clone(),
-        request.clone(),
-    ) {
-        return;
-    }
-
-    let loader = request_context.request_client.clone();
-    spawn_content_security_policy_report_fetch(host, loader, request_context, info, request);
-}
-
-fn dispatch_service_worker_content_security_policy_report(
-    host: &mut JsContextHost,
-    request_context: &WindowCspReportRequestContext,
-    info: PendingSubresourceFetchInfo,
-    request: Request,
-) -> bool {
+    let cancel_handle = FetchCancelHandle::new();
+    let load = request_context.register_report_load(Some(cancel_handle.clone()));
+    let resource = CspReportResource::new(network, load);
     if host
         .service_worker_controller_for_fetch(
             request_context.client_id,
             &info.document_url,
             &request.url,
         )
-        .is_none()
+        .is_some()
     {
-        return false;
+        let dispatch = ServiceWorkerFetchDispatch {
+            internal_id: 0,
+            request: host.service_worker_fetch_request(
+                request_context.client_id,
+                request.url.clone(),
+                request.method.clone(),
+                request.request_headers.clone(),
+                request.body.clone(),
+                ServiceWorkerRequestDestination::Report,
+                request.request_mode,
+                request.credentials_mode,
+                request.redirect_mode,
+                request.priority_hints.fetch_priority,
+                service_worker_fetch_request_metadata(&request),
+            ),
+            request_body_text: report_request_body_text(&request),
+            cors_preflight_request_headers: Vec::new(),
+            request_cookie_report: info.request_cookie_report,
+            network_context: AsyncSubresourceNetworkContext {
+                frame_id: info.frame_id,
+                document_url: info.document_url,
+                resource_type: SubresourceResourceType::CspReport,
+                policy_context: request_context.policy_context,
+            },
+            result_tx: ServiceWorkerFetchResultSender::CspReport(resource.clone()),
+            request_client: request_context.request_client.clone(),
+            resource_task_runner: request_context.resource_loader.task_runner(),
+            cancel_handle,
+        };
+        if !host.dispatch_service_worker_fetch(dispatch) {
+            resource.fail("service worker csp report fetch dispatch failed".into());
+        }
+    } else {
+        resource.fetch(
+            request_context.request_client.clone(),
+            request,
+            cancel_handle,
+        );
     }
-
-    let cancel_handle = FetchCancelHandle::new();
-    let load = request_context.register_report_load(Some(cancel_handle.clone()));
-    let internal_id = host.record_async_subresource_csp_report(
-        request_context.identity,
-        request_context.client_id,
-        load,
-        request_context.network_partition_key.clone(),
-        request_context.policy_context,
-        info.clone(),
-    );
-    let request_body_text = report_request_body_text(&request);
-    let dispatch = ServiceWorkerFetchDispatch {
-        internal_id,
-        request: host.service_worker_fetch_request(
-            request_context.client_id,
-            request.url.clone(),
-            request.method.clone(),
-            request.request_headers.clone(),
-            request.body.clone(),
-            ServiceWorkerRequestDestination::Report,
-            request.request_mode,
-            request.credentials_mode,
-            request.redirect_mode,
-            request.priority_hints.fetch_priority,
-            service_worker_fetch_request_metadata(&request),
-        ),
-        request_body_text: request_body_text.clone(),
-        cors_preflight_request_headers: Vec::new(),
-        request_cookie_report: info.request_cookie_report.clone(),
-        network_context: AsyncSubresourceNetworkContext {
-            frame_id: info.frame_id.clone(),
-            document_url: info.document_url.clone(),
-            resource_type: SubresourceResourceType::CspReport,
-            policy_context: request_context.policy_context,
-        },
-        result_tx: ServiceWorkerFetchResultSender::Page(host.resource_completion_sender()),
-        request_client: request_context.request_client.clone(),
-        resource_task_runner: request_context.resource_loader.task_runner(),
-        cancel_handle,
-    };
-    if host.dispatch_service_worker_fetch(dispatch) {
-        return true;
-    }
-
-    let _ =
-        host.resource_completion_sender()
-            .send_async_subresource(AsyncSubresourceFetchCompletion {
-                internal_id,
-                request_url: request.url,
-                request_method: request.method,
-                request_headers: request.request_headers,
-                request_body: request_body_text,
-                response_status_text: None,
-                skip_fetch_security_validation: true,
-                response_filter: Default::default(),
-                network_error_text: None,
-                result: Err("service worker csp report fetch dispatch failed".to_owned()),
-            });
-    true
-}
-
-fn spawn_content_security_policy_report_fetch(
-    host: &mut JsContextHost,
-    request_client: ResourceRequestClient,
-    request_context: &WindowCspReportRequestContext,
-    info: PendingSubresourceFetchInfo,
-    request: Request,
-) {
-    let cancel_handle = FetchCancelHandle::new();
-    let load = request_context.register_report_load(Some(cancel_handle.clone()));
-    let task_runner = load.task_runner();
-    let internal_id = host.record_async_subresource_csp_report(
-        request_context.identity,
-        request_context.client_id,
-        load,
-        request_context.network_partition_key.clone(),
-        request_context.policy_context,
-        info.clone(),
-    );
-    let request_body_text = report_request_body_text(&request);
-    spawn_async_subresource_fetch(
-        task_runner,
-        host.resource_completion_sender(),
-        request_client,
-        request.clone(),
-        Some(cancel_handle),
-        Vec::new(),
-        internal_id,
-        AsyncSubresourceNetworkContext {
-            frame_id: info.frame_id,
-            document_url: info.document_url,
-            resource_type: SubresourceResourceType::CspReport,
-            policy_context: request_context.policy_context,
-        },
-        request.url,
-        request.method,
-        request.request_headers,
-        request_body_text,
-    );
 }
 
 fn report_subresource_fetch_info(
@@ -447,8 +388,21 @@ fn window_csp_report_request_context_for_identity(
                 popup_id,
             )),
     };
+    let source = host.renderer_network_source();
+    #[cfg(test)]
+    let source = source.or_else(|| {
+        Some((
+            crate::runtime::RendererOwnerLocalHostId::new_for_testing(1),
+            host.root_document_lifecycle_identity()?,
+        ))
+    });
+    let (owner, document) = source?;
     Some(WindowCspReportRequestContext {
         identity,
+        network: host
+            .browser_context_runtime()
+            .network_for_document(owner, document),
+        completion_tx: host.resource_completion_sender(),
         request_client: resource_loader.frozen_request_client(),
         resource_loader,
         frame_id,
@@ -473,19 +427,22 @@ fn report_request_body_text(request: &Request) -> Option<String> {
         .map(|body| String::from_utf8_lossy(body).into_owned())
 }
 
-fn record_content_security_policy_report_failure(
-    host: &mut JsContextHost,
-    info: PendingSubresourceFetchInfo,
-    message: String,
-) {
-    host.record_subresource_network(SubresourceNetworkRecord::failure(
-        info.frame_id,
-        info.document_url,
-        info.url,
-        info.method,
-        info.request_headers,
-        info.request_body,
-        SubresourceResourceType::CspReport,
-        message,
-    ));
+pub(crate) fn csp_report_request_started(
+    network: &crate::runtime::RendererNetworkRequest,
+    info: &PendingSubresourceFetchInfo,
+) -> moli_page_types::SubresourceRequestStarted {
+    moli_page_types::SubresourceRequestStarted::new(
+        network.handle(),
+        info.frame_id.clone(),
+        info.document_url.clone(),
+        info.url.clone(),
+        info.method.clone(),
+        info.request_headers.clone(),
+        info.request_body.clone(),
+        info.resource_type,
+        moli_page_types::SubresourceRequestInitiatorType::Script,
+        info.request_cookie_report.clone(),
+    )
+    .with_request_body_bytes(info.request_body_bytes.clone())
+    .with_keepalive(true)
 }

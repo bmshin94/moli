@@ -519,7 +519,7 @@ pub(crate) fn service_worker_fetch_request_metadata(
         integrity: subresource_metadata
             .and_then(|metadata| metadata.integrity.clone())
             .unwrap_or_default(),
-        keepalive: false,
+        keepalive: request.resource_type == moli_fetch::RequestResourceType::CspReport,
     }
 }
 
@@ -732,14 +732,47 @@ pub(crate) struct ServiceWorkerFetchDispatch {
 
 pub(crate) enum ServiceWorkerFetchResultSender {
     Page(RendererResourceCompletionSender),
+    CspReport(std::sync::Arc<crate::network_host::CspReportResource>),
     Direct(tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>),
 }
 
 impl ServiceWorkerFetchResultSender {
-    pub(super) fn page(&self) -> Option<&RendererResourceCompletionSender> {
+    pub(super) fn stream_sender(&self) -> Option<ServiceWorkerFetchStreamSender> {
         match self {
-            Self::Page(sender) => Some(sender),
+            Self::Page(sender) => Some(ServiceWorkerFetchStreamSender::Page(sender.clone())),
+            Self::CspReport(resource) => {
+                Some(ServiceWorkerFetchStreamSender::CspReport(resource.clone()))
+            }
             Self::Direct(_) => None,
+        }
+    }
+}
+
+pub(super) enum ServiceWorkerFetchStreamSender {
+    Page(RendererResourceCompletionSender),
+    CspReport(std::sync::Arc<crate::network_host::CspReportResource>),
+}
+
+impl ServiceWorkerFetchStreamSender {
+    pub(super) fn response_started(&self, started: crate::types::AsyncSubresourceStreamingStarted) {
+        match self {
+            Self::Page(sender) => {
+                let _ = sender.send_async_subresource_event(
+                    crate::types::AsyncSubresourceFetchEvent::StreamingStarted(Box::new(started)),
+                );
+            }
+            Self::CspReport(resource) => resource.response_started(started.head),
+        }
+    }
+
+    pub(super) fn data_received(&self, chunk: crate::types::AsyncSubresourceStreamingChunk) {
+        match self {
+            Self::Page(sender) => {
+                let _ = sender.send_async_subresource_event(
+                    crate::types::AsyncSubresourceFetchEvent::StreamingChunk(chunk),
+                );
+            }
+            Self::CspReport(resource) => resource.data_received(&chunk.bytes),
         }
     }
 }

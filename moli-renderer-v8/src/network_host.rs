@@ -65,10 +65,12 @@ pub(crate) use self::body_source::{
 pub(in crate::network_host) use self::browser_response::http_status_text;
 pub(crate) use self::browser_response::{local_url_response, local_url_response_result};
 pub(crate) use self::csp_reports::{
-    WindowCspReportRequestContext, capture_window_csp_report_request_context,
+    CompletedCspReport, CspReportResource, WindowCspReportRequestContext,
+    capture_window_csp_report_request_context, csp_report_request_started,
+    fetch_buffered_csp_report, finish_report_result,
     send_content_security_policy_reports_for_lightweight_popup,
     send_content_security_policy_reports_for_window,
-    send_content_security_policy_violation_report_from_window_context,
+    send_content_security_policy_violation_report_from_window_context, send_report_completion,
 };
 pub(crate) use self::event_source::{
     EVENT_SOURCE_CLOSED, EventSourceMessage, EventSourceParser, EventSourceTerminalMode,

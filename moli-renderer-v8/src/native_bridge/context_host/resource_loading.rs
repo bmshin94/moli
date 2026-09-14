@@ -215,6 +215,20 @@ impl JsContextHost {
         self.note_subresource_activity();
     }
 
+    pub(crate) fn record_native_resource_observation(
+        &mut self,
+        observation: crate::runtime::RendererNetworkObservation,
+    ) {
+        let crate::runtime::RendererNetworkOutputItem::Resource(item) = observation.item() else {
+            unreachable!("resource completion carries a resource observation");
+        };
+        self.pending_network_output.push(item.as_ref().clone());
+        self.append_live_turn_observation(crate::runtime::RendererProtocolObservation::Network(
+            observation,
+        ));
+        self.note_subresource_activity();
+    }
+
     pub(crate) fn push_network_output_item(&mut self, mut item: ScriptNetworkOutputItem) {
         // Complete-only producers still need an exact occurrence identity. Do
         // not synthesize a request-start event at the time completion arrives.
@@ -1038,43 +1052,6 @@ impl JsContextHost {
         internal_id
     }
 
-    pub(crate) fn record_async_subresource_csp_report(
-        &mut self,
-        identity: super::WindowDocumentNetworkRequestIdentity,
-        client_id: crate::service_worker_runtime::ServiceWorkerClientId,
-        load: ResourceLoadLease,
-        network_partition_key: Option<String>,
-        policy_context: crate::types::SubresourcePolicyContext,
-        mut info: PendingSubresourceFetchInfo,
-    ) -> u64 {
-        self.assign_pending_subresource_fetch_identity(&mut info);
-        let internal_id = info.internal_id;
-        debug_assert_eq!(
-            load.kind(),
-            crate::network::loads::ResourceLoadKind::CspReport
-        );
-        debug_assert_eq!(load.disposition(), ResourceLoadDisposition::Keepalive);
-        self.record_pending_subresource_request_started(&info, load.disposition());
-        self.pending_subresource_fetches.insert(
-            internal_id,
-            PendingSubresourceFetchState {
-                info,
-                load,
-                execution_context: PendingSubresourceExecutionContext::window_document_network_only(
-                    identity,
-                ),
-                credentials_mode: moli_fetch::RequestCredentialsMode::SameOrigin,
-                request_mode: moli_fetch::RequestMode::NoCors,
-                network_partition_key,
-                policy_context,
-                continuation: PendingSubresourceContinuation::CspReport { client_id },
-                deferred_request_started: false,
-            },
-        );
-        self.note_subresource_activity();
-        internal_id
-    }
-
     pub(crate) fn record_pending_subresource_beacon(
         &mut self,
         execution_context: super::WindowExecutionContextIdentity,
@@ -1115,6 +1092,7 @@ impl JsContextHost {
         identity: super::WindowDocumentNetworkRequestIdentity,
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
         load: ResourceLoadLease,
+        network: std::sync::Arc<crate::network::ResourceTransfer>,
         network_partition_key: Option<String>,
         policy_context: crate::types::SubresourcePolicyContext,
         mut info: PendingSubresourceFetchInfo,
@@ -1139,7 +1117,7 @@ impl JsContextHost {
                 request_mode: moli_fetch::RequestMode::NoCors,
                 network_partition_key,
                 policy_context,
-                continuation: PendingSubresourceContinuation::CspReport { client_id },
+                continuation: PendingSubresourceContinuation::CspReport { client_id, network },
                 deferred_request_started: false,
             },
         );
@@ -1308,7 +1286,8 @@ impl JsContextHost {
                 .streaming_subresource_fetches
                 .get(&internal_id)
                 .is_some_and(|state| state.body_source_id == body_source_id),
-            AsyncSubresourceFetchEventTarget::ObservedNetworkRecord => true,
+            AsyncSubresourceFetchEventTarget::ObservedNetworkRecord
+            | AsyncSubresourceFetchEventTarget::NativeNetwork => true,
         }
     }
 
@@ -1317,15 +1296,6 @@ impl JsContextHost {
         internal_id: u64,
     ) -> Option<PendingSubresourceFetchState> {
         self.pending_subresource_fetches.remove(&internal_id)
-    }
-
-    pub(crate) fn restore_pending_subresource_fetch(
-        &mut self,
-        state: PendingSubresourceFetchState,
-    ) {
-        self.pending_subresource_fetches
-            .insert(state.info.internal_id, state);
-        self.note_subresource_activity();
     }
 
     pub(crate) fn record_running_subresource_fetch(&mut self, state: RunningSubresourceFetchState) {

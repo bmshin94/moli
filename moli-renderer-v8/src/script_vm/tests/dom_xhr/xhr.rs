@@ -2057,77 +2057,15 @@ async fn streaming_subresource_finish_preserves_response_head_cache_state() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn async_subresource_failure_network_error_override_preserves_fetch_rejection_message() {
-    let load_owner =
-        crate::network::ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
-            .expect("async subresource failure test loader");
-    let load_client = load_owner.handle();
     let mut vm = new_storage_test_vm("https://sw-non-stream-failure.test/");
-    let internal_id = 91;
-    let document_url =
-        Url::parse("https://sw-non-stream-failure.test/").expect("document URL should parse");
-    let request_url =
-        Url::parse("https://sw-non-stream-failure.test/data").expect("request URL should parse");
+    let request_url = Url::parse("https://sw-non-stream-failure.test/data").unwrap();
     let rejection_message = "FetchEvent.respondWith rejected an error Response";
-
-    let context_ptr: *const v8::Global<v8::Context> = &vm.page_default_context as *const _;
-    let context_host = vm._context_host.clone();
-    vm.renderer_document_isolate
-        .with_entered_renderer_document_isolate({
-            let document_url = document_url.clone();
-            let request_url = request_url.clone();
-            move |isolate| {
-                let scope = std::pin::pin!(v8::HandleScope::new(isolate));
-                let scope = &mut scope.init();
-                let context = unsafe { v8::Local::new(scope, &*context_ptr) };
-                let scope = &mut v8::ContextScope::new(scope, context);
-                let resolver = v8::PromiseResolver::new(scope).expect("resolver should be created");
-                let promise = resolver.get_promise(scope);
-                let global = context.global(scope);
-                let _ = global.set(
-                    scope,
-                    v8str(scope, "__swNonStreamFailurePromise").into(),
-                    promise.into(),
-                );
-                let continuation =
-                    pending_fetch_continuation(scope, resolver, &context_host.borrow());
-
-                context_host.borrow_mut().restore_pending_subresource_fetch(
-                    super::PendingSubresourceFetchState {
-                        info: crate::types::PendingSubresourceFetchInfo {
-                            internal_id,
-                            network_request_handle: None,
-                            frame_id: Some("FRAME-1".to_owned()),
-                            document_url,
-                            url: request_url.clone(),
-                            websocket_socket_id: None,
-                            method: "GET".to_owned(),
-                            request_headers: Vec::new(),
-                            request_body: None,
-                            request_body_bytes: None,
-                            resource_type: crate::types::SubresourceResourceType::Fetch,
-                            request_cookie_report: None,
-                        },
-                        execution_context:
-                            crate::types::PendingSubresourceExecutionContext::adapter(
-                                crate::native_bridge::OwnerDispatchScope::Top,
-                                v8::Global::new(scope, context),
-                            ),
-                        credentials_mode: moli_fetch::RequestCredentialsMode::SameOrigin,
-                        request_mode: moli_fetch::RequestMode::Cors,
-                        network_partition_key: None,
-                        policy_context: Default::default(),
-                        continuation,
-                        load: crate::network::loads::resource_load_lease_for_test(
-                            load_client,
-                            None,
-                        ),
-                        deferred_request_started: false,
-                    },
-                );
-                Ok(())
-            }
-        })
-        .expect("pending fetch fixture should be recorded");
+    vm.set_fetch_subresource_interception(true, Some(crate::types::SubresourceResourceType::Fetch));
+    vm.eval("globalThis.__swNonStreamFailurePromise = fetch('/data')")
+        .unwrap();
+    let pending = vm.take_pending_subresource_fetch_infos();
+    assert_eq!(pending.len(), 1);
+    let internal_id = pending[0].internal_id;
 
     vm.eval(
         r#"

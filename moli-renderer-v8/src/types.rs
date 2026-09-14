@@ -67,6 +67,7 @@ pub(super) enum PendingSubresourceContinuation {
     Beacon,
     CspReport {
         client_id: crate::service_worker_runtime::ServiceWorkerClientId,
+        network: std::sync::Arc<crate::network::ResourceTransfer>,
     },
     EventSource(v8::Global<v8::Object>),
     Fetch(PendingWindowFetchContinuation),
@@ -638,12 +639,15 @@ pub(crate) enum AsyncSubresourceFetchEventTarget {
     /// A producer-captured network fact has no live JS request owner. It is
     /// still namespaced by the root Document in the Page task envelope.
     ObservedNetworkRecord,
+    NativeNetwork,
 }
 
 #[derive(Debug)]
 pub(super) enum AsyncSubresourceFetchEvent {
     Completion(Box<AsyncSubresourceFetchCompletion>),
+    CspReport(Box<crate::network_host::CompletedCspReport>),
     ObservedNetworkRecord(Box<SubresourceNetworkRecord>),
+    NativeNetwork(crate::runtime::RendererNetworkObservation),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
     StreamingChunk(AsyncSubresourceStreamingChunk),
     StreamingFinished(AsyncSubresourceStreamingFinished),
@@ -655,6 +659,10 @@ impl AsyncSubresourceFetchEvent {
             Self::Completion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id,
             },
+            Self::CspReport(completion) => AsyncSubresourceFetchEventTarget::Completion {
+                internal_id: completion.internal_id(),
+            },
+            Self::NativeNetwork(_) => AsyncSubresourceFetchEventTarget::NativeNetwork,
             Self::ObservedNetworkRecord(_) => {
                 AsyncSubresourceFetchEventTarget::ObservedNetworkRecord
             }

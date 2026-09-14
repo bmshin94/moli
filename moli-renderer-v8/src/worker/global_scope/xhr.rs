@@ -42,7 +42,7 @@ impl PreparedWorkerXhrSendRequest {
 
 fn record_worker_xhr_started(
     state: &WorkerGlobalState,
-    network: &crate::runtime::RendererWorkerNetworkRequest,
+    network: &crate::runtime::RendererNetworkRequest,
     prepared: &PreparedWorkerXhrSendRequest,
 ) {
     publish_worker_network_item(

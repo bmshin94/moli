@@ -26,6 +26,7 @@ impl PageVm {
             let output_effect = if matches!(
                 event.target(),
                 AsyncSubresourceFetchEventTarget::ObservedNetworkRecord
+                    | AsyncSubresourceFetchEventTarget::NativeNetwork
             ) {
                 let _ = self
                     .vm_mut()
