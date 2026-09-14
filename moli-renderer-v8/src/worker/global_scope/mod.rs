@@ -65,6 +65,9 @@ use crate::context_bootstrap::{
     simple_object_event_set_ordered_handler,
 };
 use crate::network::loads::{ResourceLoadDisposition, ResourceLoadKind, ResourceLoadLease};
+use crate::network::{
+    ResourceResponseFailure, ResourceResponseHead, ResourceResponseObserver, ResourceTransfer,
+};
 use crate::network_host::{
     ABORTED_ERROR_TEXT, BLOCKED_BY_CLIENT_ERROR_TEXT, FAILED_ERROR_TEXT,
     FetchResponseSecurityViolation, HeadersGuard, PreparedXhrSendBody, XHR_ABORTED_SLOT,
@@ -73,7 +76,6 @@ use crate::network_host::{
     XHR_TIMEOUT_TIMER_SLOT, XHR_URL_SLOT, XHR_WITH_CREDENTIALS_SLOT,
     append_default_body_content_type, apply_xhr_failure, apply_xhr_response,
     apply_xhr_response_body_source, apply_xhr_timeout,
-    build_fetch_response_object_from_body_source_for_request_mode,
     build_fetch_response_object_from_stream_for_request_mode,
     build_fetch_response_object_from_subresource_body_for_request_mode,
     close_pending_network_body_stream, dispatch_xhr_upload_abort_if_in_progress,
@@ -1097,9 +1099,9 @@ pub(super) struct PendingWorkerFetch {
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
     pub(super) request_body: Option<Vec<u8>>,
-    pub(super) network: crate::runtime::RendererNetworkRequest,
+    pub(super) network: Arc<ResourceTransfer>,
     pub(super) network_record: Option<PendingWorkerFetchNetworkRecord>,
-    pub(super) paused_response: Option<PausedWorkerSubresourceResponse>,
+    pub(super) paused_response: Option<WorkerResourceResponse>,
     pub(super) streaming_body_source_id: Option<NetworkBodySourceId>,
 }
 
@@ -1114,44 +1116,14 @@ pub(super) enum WorkerFetchEvent {
 pub(super) struct WorkerRequestCompletion {
     id: u32,
     network_request_headers: Option<Vec<(String, String)>>,
-    result: Result<WorkerResourceResponse, WorkerRequestError>,
+    result: Result<WorkerResourceResponse, ResourceResponseFailure>,
 }
 
-#[derive(Clone)]
-pub(super) enum WorkerRequestError {
-    Message(String),
-    PartialBody {
-        message: String,
-        body: SubresourceResponseBody,
-    },
-}
-
-impl From<String> for WorkerRequestError {
-    fn from(message: String) -> Self {
-        Self::Message(message)
-    }
-}
-
-impl WorkerRequestError {
-    fn message(&self) -> &str {
-        match self {
-            Self::Message(message) | Self::PartialBody { message, .. } => message,
-        }
-    }
-
-    fn into_native_body(
-        self,
-        handle: SubresourceNetworkRequestHandle,
-    ) -> moli_page_types::SubresourceBodyFinished {
-        match self {
-            Self::Message(message) => {
-                moli_page_types::SubresourceBodyFinished::failed(handle, message)
-            }
-            Self::PartialBody { message, body } => {
-                moli_page_types::SubresourceBodyFinished::failed_with_partial_body(
-                    handle, message, body,
-                )
-            }
+impl WorkerRequestCompletion {
+    fn publish(&self, network: &ResourceTransfer) {
+        match &self.result {
+            Ok(response) => response.publish(network, self.network_request_headers.clone()),
+            Err(error) => fetch::publish_worker_request_failure(network, error.clone()),
         }
     }
 }
@@ -1159,8 +1131,7 @@ impl WorkerRequestError {
 /// The VM claims delivery before applying policy/interception. If it is gone,
 /// dropping the packet still settles the original native transport request.
 pub(super) struct WorkerRequestDelivery {
-    network: crate::runtime::RendererNetworkRequest,
-    observer: crate::worker::WorkerNetworkObserver,
+    network: Arc<ResourceTransfer>,
     completion: Option<Box<WorkerRequestCompletion>>,
 }
 
@@ -1169,11 +1140,8 @@ impl WorkerRequestDelivery {
         self.completion.as_ref().expect("unclaimed delivery").id
     }
 
-    fn claim(
-        mut self,
-        request: &crate::runtime::RendererNetworkRequest,
-    ) -> Option<WorkerRequestCompletion> {
-        if request.handle() != self.network.handle() {
+    fn claim(mut self, request: &Arc<ResourceTransfer>) -> Option<WorkerRequestCompletion> {
+        if !Arc::ptr_eq(request, &self.network) {
             return None;
         }
         Some(*self.completion.take().expect("VM delivery is claimed once"))
@@ -1193,104 +1161,68 @@ pub(super) struct WorkerFetchStreamingChunk {
 }
 
 pub(super) struct WorkerFetchStreamingFinished {
-    fetch_id: u32,
     body_source_id: NetworkBodySourceId,
-    network: crate::runtime::RendererNetworkRequest,
-    observer: crate::worker::WorkerNetworkObserver,
-    result: moli_page_types::SubresourceBodyFinished,
+    delivery: WorkerRequestDelivery,
 }
 
-impl Drop for WorkerFetchStreamingFinished {
-    fn drop(&mut self) {
-        // Settling the real transport survives a dropped VM completion queue.
-        // The observation is weak; only the native request lease owns this tail.
-        self.observer.publish(self.network.report(
-            moli_page_types::ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(
-                self.result.clone(),
-            )),
-        ));
+pub(super) struct WorkerResourceResponse {
+    head: ResponseHead,
+    body: SubresourceResponseBody,
+}
+
+impl From<Response> for WorkerResourceResponse {
+    fn from(response: Response) -> Self {
+        Self {
+            head: response.head(),
+            body: SubresourceResponseBody::from_fetch_response(&response),
+        }
     }
-}
-
-pub(super) enum WorkerResourceResponse {
-    Materialized(Box<Response>),
-    Buffered {
-        head: Box<ResponseHead>,
-        body: SubresourceResponseBody,
-    },
-    /// The physical response head and chunks are already native facts.
-    Streamed {
-        head: Box<ResponseHead>,
-        body: SubresourceResponseBody,
-    },
 }
 
 impl WorkerResourceResponse {
     fn head(&self) -> ResponseHead {
-        match self {
-            Self::Materialized(response) => response.head(),
-            Self::Buffered { head, .. } | Self::Streamed { head, .. } => head.as_ref().clone(),
-        }
+        self.head.clone()
     }
 
     fn subresource_response_body(&self) -> SubresourceResponseBody {
-        match self {
-            Self::Materialized(response) => SubresourceResponseBody::from_fetch_response(response),
-            Self::Buffered { body, .. } | Self::Streamed { body, .. } => body.clone(),
-        }
+        self.body.clone()
     }
 
-    fn native_head(&self) -> Option<ResponseHead> {
-        (!matches!(self, Self::Streamed { .. })).then(|| self.head())
-    }
-
-    fn native_body(
+    fn publish(
         &self,
-        handle: SubresourceNetworkRequestHandle,
-    ) -> moli_page_types::SubresourceBodyFinished {
-        let body = self.subresource_response_body();
-        if matches!(self, Self::Streamed { .. }) {
-            moli_page_types::SubresourceBodyFinished::ready_after_streaming(handle, body)
-        } else {
-            moli_page_types::SubresourceBodyFinished::ready(handle, body)
+        network: &ResourceTransfer,
+        network_request_headers: Option<Vec<(String, String)>>,
+    ) {
+        network.body_completed(
+            ResourceResponseHead {
+                head: self.head.clone(),
+                network_request_headers,
+            },
+            self.body.clone(),
+        );
+    }
+
+    fn failure(
+        &self,
+        message: String,
+        network_request_headers: Option<Vec<(String, String)>>,
+    ) -> ResourceResponseFailure {
+        ResourceResponseFailure::PartialBody {
+            message,
+            response: Arc::new(ResourceResponseHead {
+                head: self.head.clone(),
+                network_request_headers,
+            }),
+            body: self.body.clone(),
         }
     }
 
-    fn into_fetch_parts(self) -> WorkerFetchResponseParts {
-        match self {
-            Self::Materialized(response) => {
-                let (head, body) = response.into_body();
-                WorkerFetchResponseParts::Materialized {
-                    head,
-                    body: Box::new(body),
-                }
-            }
-            Self::Buffered { head, body } | Self::Streamed { head, body } => {
-                WorkerFetchResponseParts::Subresource { head: *head, body }
-            }
-        }
+    fn body_source(&self) -> Result<ResponseBody, String> {
+        self.body
+            .materialize_bytes()
+            .map(ResponseBody::materialized_bytes)
+            .map_err(|error| format!("failed to materialize worker XHR body: {error}"))
     }
-
-    fn into_body_source(self) -> Result<(ResponseHead, ResponseBody), String> {
-        match self {
-            Self::Materialized(response) => Ok(response.into_body()),
-            Self::Buffered { head, body } | Self::Streamed { head, body } => body
-                .materialize_bytes()
-                .map(|bytes| (*head, ResponseBody::materialized_bytes(bytes)))
-                .map_err(|error| format!("failed to materialize worker XHR body: {error}")),
-        }
-    }
-}
-
-enum WorkerFetchResponseParts {
-    Materialized {
-        head: ResponseHead,
-        body: Box<ResponseBody>,
-    },
-    Subresource {
-        head: ResponseHead,
-        body: SubresourceResponseBody,
-    },
 }
 
 #[derive(Clone)]
@@ -1314,9 +1246,9 @@ pub(super) struct PendingWorkerXhr {
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
     pub(super) request_body: Option<Vec<u8>>,
-    pub(super) network: crate::runtime::RendererNetworkRequest,
+    pub(super) network: Arc<ResourceTransfer>,
     pub(super) network_record: Option<PendingWorkerFetchNetworkRecord>,
-    pub(super) paused_response: Option<PausedWorkerSubresourceResponse>,
+    pub(super) paused_response: Option<WorkerResourceResponse>,
 }
 
 pub(super) struct WorkerCspReport {
@@ -1331,18 +1263,13 @@ pub(super) struct WorkerCspReport {
         Option<crate::service_worker_runtime::ServiceWorkerClientId>,
 }
 
-pub(super) struct PausedWorkerSubresourceResponse {
-    pub(super) head: ResponseHead,
-    pub(super) body: SubresourceResponseBody,
-}
-
 pub(super) enum WorkerXhrCompletion {
     Completion(Box<WorkerRequestCompletion>),
     TransportCompletion(WorkerRequestDelivery),
 }
 
 impl WorkerXhrCompletion {
-    fn decision(id: u32, result: Result<WorkerResourceResponse, WorkerRequestError>) -> Self {
+    fn decision(id: u32, result: Result<WorkerResourceResponse, ResourceResponseFailure>) -> Self {
         Self::Completion(Box::new(WorkerRequestCompletion {
             id,
             network_request_headers: None,

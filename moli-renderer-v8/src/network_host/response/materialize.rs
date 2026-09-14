@@ -166,22 +166,6 @@ pub(crate) fn build_fetch_response_object_for_request_mode<'s>(
     response: Response,
 ) -> v8::Local<'s, v8::Object> {
     let (head, body) = response.into_body();
-    build_fetch_response_object_from_body_source_for_request_mode(
-        scope,
-        document_url,
-        request_mode,
-        head,
-        body,
-    )
-}
-
-pub(crate) fn build_fetch_response_object_from_body_source_for_request_mode<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    document_url: &url::Url,
-    request_mode: RequestMode,
-    head: moli_fetch::ResponseHead,
-    body: moli_fetch::ResponseBody,
-) -> v8::Local<'s, v8::Object> {
     build_fetch_response_object_from_body_source_for_request_mode_with_filter(
         scope,
         document_url,
