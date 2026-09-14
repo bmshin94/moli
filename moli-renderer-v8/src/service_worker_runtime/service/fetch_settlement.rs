@@ -308,8 +308,8 @@ impl ServiceWorkerRuntimeService {
                     job.redirect_chain,
                 );
             }
-            ServiceWorkerFetchResultSender::CspReport(resource) => {
-                resource.fetch(job.request_client, request, job.cancel_handle);
+            ServiceWorkerFetchResultSender::CspReport { resource, request } => {
+                resource.fetch(job.request_client, *request, job.cancel_handle);
             }
             ServiceWorkerFetchResultSender::Page {
                 completion_tx,
@@ -661,7 +661,7 @@ impl ServiceWorkerRuntimeService {
                 sender.complete(Ok(response), None);
                 return;
             }
-            ServiceWorkerFetchResultSender::CspReport(resource) => {
+            ServiceWorkerFetchResultSender::CspReport { resource, .. } => {
                 resource.response_completed(&navigation_response);
                 return;
             }
@@ -731,7 +731,7 @@ impl ServiceWorkerRuntimeService {
                 sender.complete(Err(failure), None);
                 return;
             }
-            ServiceWorkerFetchResultSender::CspReport(resource) => {
+            ServiceWorkerFetchResultSender::CspReport { resource, .. } => {
                 resource.fail(network_error_text.unwrap_or(message));
                 return;
             }

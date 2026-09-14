@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// A keepalive resource without a JS consumer keeps its request and resource lease until
-/// transport completion. The Page is only an observer of its native receipts.
+/// transport completion. Its originating context observes the native receipts.
 pub(crate) struct KeepaliveResource {
     pub(crate) network: Arc<ResourceTransfer>,
     load: ResourceLoadLease,
