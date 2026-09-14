@@ -628,7 +628,7 @@ impl JsContextHost {
         &mut self,
         fetch_context: super::WindowFetchContext,
         resolver: v8::Global<v8::PromiseResolver>,
-        keepalive: bool,
+        options: crate::network_host::WindowFetchOptions,
         connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
         csp_report_context: crate::network_host::WindowCspReportRequestContext,
         credentials_mode: moli_fetch::RequestCredentialsMode,
@@ -638,7 +638,7 @@ impl JsContextHost {
         mut info: PendingSubresourceFetchInfo,
     ) {
         let network = self.admit_pending_subresource_fetch(&mut info);
-        let disposition = if keepalive {
+        let disposition = if options.metadata.keepalive {
             ResourceLoadDisposition::Keepalive
         } else {
             ResourceLoadDisposition::Ordinary
@@ -672,7 +672,7 @@ impl JsContextHost {
                 network_partition_key,
                 policy_context,
                 continuation: PendingSubresourceContinuation::Fetch(
-                    crate::types::PendingWindowFetchContinuation::new(resolver, keepalive),
+                    crate::types::PendingWindowFetchContinuation::new(resolver, options),
                 ),
             },
         );
@@ -683,7 +683,7 @@ impl JsContextHost {
         &mut self,
         fetch_context: super::WindowFetchContext,
         resolver: v8::Global<v8::PromiseResolver>,
-        keepalive: bool,
+        options: crate::network_host::WindowFetchOptions,
         connect_policy: crate::document_runtime::DocumentConnectPolicySnapshot,
         csp_report_context: crate::network_host::WindowCspReportRequestContext,
         cancel_handle: Option<moli_fetch::FetchCancelHandle>,
@@ -695,7 +695,7 @@ impl JsContextHost {
     ) -> u64 {
         let network = self.admit_pending_subresource_fetch(&mut info);
         let internal_id = info.internal_id;
-        let disposition = if keepalive {
+        let disposition = if options.metadata.keepalive {
             ResourceLoadDisposition::Keepalive
         } else {
             ResourceLoadDisposition::Ordinary
@@ -728,7 +728,7 @@ impl JsContextHost {
                 network_partition_key,
                 policy_context,
                 continuation: PendingSubresourceContinuation::Fetch(
-                    crate::types::PendingWindowFetchContinuation::new(resolver, keepalive),
+                    crate::types::PendingWindowFetchContinuation::new(resolver, options),
                 ),
             },
         );

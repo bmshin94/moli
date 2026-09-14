@@ -2326,7 +2326,7 @@ fn install_streaming_fetch_response_fixture(
             let continuation = crate::types::PendingSubresourceContinuation::Fetch(
                 crate::types::PendingWindowFetchContinuation::new(
                     v8::Global::new(scope, resolver),
-                    false,
+                    Default::default(),
                 ),
             );
 
@@ -2428,7 +2428,7 @@ async fn streaming_fetch_body_cancel_aborts_streaming_subresource() {
                 let continuation = crate::types::PendingSubresourceContinuation::Fetch(
                     crate::types::PendingWindowFetchContinuation::new(
                         v8::Global::new(scope, resolver),
-                        false,
+                        Default::default(),
                     ),
                 );
 

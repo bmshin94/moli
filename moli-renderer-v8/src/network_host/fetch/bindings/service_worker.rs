@@ -1,8 +1,7 @@
 use super::super::*;
 use super::request::PreparedWindowFetchRequest;
 use crate::service_worker_runtime::{
-    ServiceWorkerFetchDispatch, ServiceWorkerFetchRequestMetadata, ServiceWorkerFetchResultSender,
-    ServiceWorkerRequestDestination,
+    ServiceWorkerFetchDispatch, ServiceWorkerFetchResultSender, ServiceWorkerRequestDestination,
 };
 use moli_fetch::FetchCancelHandle;
 
@@ -45,7 +44,7 @@ pub(super) fn dispatch_service_worker_fetch(
     let internal_id = host.record_async_subresource_fetch(
         prepared.fetch_context.duplicate(scope),
         v8::Global::new(scope, resolver),
-        prepared.keepalive,
+        prepared.options.clone(),
         prepared.connect_policy.clone(),
         prepared.csp_report_context.clone(),
         Some(cancel_handle.clone()),
@@ -77,15 +76,9 @@ pub(super) fn dispatch_service_worker_fetch(
         ServiceWorkerRequestDestination::Empty,
         prepared.request_mode,
         prepared.credentials_mode,
-        prepared.redirect_mode,
-        prepared.priority,
-        ServiceWorkerFetchRequestMetadata {
-            cache: prepared.cache.clone(),
-            referrer: prepared.referrer.clone(),
-            referrer_policy: prepared.referrer_policy.clone(),
-            integrity: prepared.integrity.clone(),
-            keepalive: prepared.keepalive,
-        },
+        prepared.options.redirect_mode,
+        prepared.options.priority,
+        prepared.options.metadata.clone(),
     );
     let dispatch = ServiceWorkerFetchDispatch {
         internal_id,

@@ -396,7 +396,13 @@ fn register_pending_window_fetch_for_test(
     let internal_id = host.record_async_subresource_fetch(
         fetch_context,
         v8::Global::new(scope, resolver),
-        keepalive,
+        crate::network_host::WindowFetchOptions {
+            metadata: crate::service_worker_runtime::ServiceWorkerFetchRequestMetadata {
+                keepalive,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         connect_policy,
         csp_report_context,
         Some(cancel_handle.clone()),
@@ -549,7 +555,13 @@ fn register_pending_window_fetch_with_connect_policy_for_test(
     let internal_id = host.record_async_subresource_fetch(
         fetch_context,
         v8::Global::new(scope, resolver),
-        keepalive,
+        crate::network_host::WindowFetchOptions {
+            metadata: crate::service_worker_runtime::ServiceWorkerFetchRequestMetadata {
+                keepalive,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         crate::document_runtime::DocumentConnectPolicySnapshot::from_policy_container(&policy),
         csp_report_context,
         Some(cancel_handle.clone()),
@@ -15229,6 +15241,7 @@ mod post_parse;
 mod queue_microtask;
 mod rendering_update;
 mod request_body;
+mod request_options;
 mod script_terminal_completion;
 mod streams;
 mod webidl_collections;

@@ -180,7 +180,7 @@ impl PendingSubresourceContinuation {
 
 pub(super) struct PendingWindowFetchContinuation {
     promise: PendingWindowFetchPromise,
-    keepalive: bool,
+    pub(super) options: crate::network_host::WindowFetchOptions,
 }
 
 enum PendingWindowFetchPromise {
@@ -189,15 +189,18 @@ enum PendingWindowFetchPromise {
 }
 
 impl PendingWindowFetchContinuation {
-    pub(super) fn new(resolver: v8::Global<v8::PromiseResolver>, keepalive: bool) -> Self {
+    pub(super) fn new(
+        resolver: v8::Global<v8::PromiseResolver>,
+        options: crate::network_host::WindowFetchOptions,
+    ) -> Self {
         Self {
             promise: PendingWindowFetchPromise::Active(resolver),
-            keepalive,
+            options,
         }
     }
 
     pub(super) fn keepalive(&self) -> bool {
-        self.keepalive
+        self.options.metadata.keepalive
     }
 
     pub(super) fn is_detached(&self) -> bool {
@@ -205,7 +208,7 @@ impl PendingWindowFetchContinuation {
     }
 
     pub(super) fn detach(&mut self) -> bool {
-        if !self.keepalive || self.is_detached() {
+        if !self.keepalive() || self.is_detached() {
             return false;
         }
         self.promise = PendingWindowFetchPromise::DetachedKeepalive;

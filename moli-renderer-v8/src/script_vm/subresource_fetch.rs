@@ -34,6 +34,62 @@ use crate::types::{
 };
 use crate::util::v8_string;
 
+fn pending_subresource_request(
+    pending: &PendingSubresourceFetchState,
+    url: &Url,
+    method: &str,
+    headers: &[(String, String)],
+) -> Result<moli_fetch::Request> {
+    let request = moli_fetch::Request::new_bytes(
+        method,
+        url.as_str(),
+        pending.info.request_body_bytes.clone(),
+        headers.to_vec(),
+    )?
+    .with_initiator_url(&pending.info.document_url)
+    .with_request_mode(pending.request_mode)
+    .with_credentials_mode(pending.credentials_mode)
+    .with_network_partition_key(pending.network_partition_key.clone())
+    .with_subframe_context(pending.info.frame_id.is_some());
+    let request = match pending.info.resource_type {
+        SubresourceResourceType::Script
+        | SubresourceResourceType::Stylesheet
+        | SubresourceResourceType::Image
+        | SubresourceResourceType::Font
+        | SubresourceResourceType::Audio
+        | SubresourceResourceType::Video
+        | SubresourceResourceType::Media
+        | SubresourceResourceType::TextTrack
+        | SubresourceResourceType::Ping
+        | SubresourceResourceType::CspReport
+        | SubresourceResourceType::Dictionary => {
+            match crate::network::request_resource_type_for_subresource(pending.info.resource_type)
+            {
+                Some(resource_type) => request.with_resource_type(resource_type),
+                None => request,
+            }
+        }
+        SubresourceResourceType::Fetch => {
+            request.with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Fetch)
+        }
+        SubresourceResourceType::Manifest => request
+            .with_resource_type(moli_fetch::RequestResourceType::Manifest)
+            .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Manifest),
+        SubresourceResourceType::EventSource => request
+            .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::EventSource)
+            .with_cache_mode(moli_fetch::RequestCacheMode::NoStore)
+            .without_request_timeout(),
+        SubresourceResourceType::Xhr => {
+            request.with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Xhr)
+        }
+        SubresourceResourceType::WebSocket => request,
+    };
+    Ok(match pending.continuation.window_fetch() {
+        Some(fetch) => fetch.options.apply(request),
+        None => request,
+    })
+}
+
 fn document_connect_csp_redirect_failure_message<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     context_host: &Rc<RefCell<JsContextHost>>,
@@ -656,51 +712,8 @@ impl ScriptVm {
         // up the ambient Page loader here would silently rebind policy/backend
         // to a newer Document identity.
         let loader = pending.load.request_client();
-        let mut request = moli_fetch::Request::new_bytes(
-            &request_method,
-            request_url.as_str(),
-            pending.info.request_body_bytes.clone(),
-            request_headers.clone(),
-        )?
-        .with_initiator_url(&pending.info.document_url)
-        .with_request_mode(pending.request_mode)
-        .with_credentials_mode(pending.credentials_mode)
-        .with_network_partition_key(pending.network_partition_key.clone())
-        .with_subframe_context(pending.info.frame_id.is_some());
-        request = match pending.info.resource_type {
-            SubresourceResourceType::Script
-            | SubresourceResourceType::Stylesheet
-            | SubresourceResourceType::Image
-            | SubresourceResourceType::Font
-            | SubresourceResourceType::Audio
-            | SubresourceResourceType::Video
-            | SubresourceResourceType::Media
-            | SubresourceResourceType::TextTrack
-            | SubresourceResourceType::Ping
-            | SubresourceResourceType::CspReport
-            | SubresourceResourceType::Dictionary => {
-                match crate::network::request_resource_type_for_subresource(
-                    pending.info.resource_type,
-                ) {
-                    Some(resource_type) => request.with_resource_type(resource_type),
-                    None => request,
-                }
-            }
-            SubresourceResourceType::Fetch => {
-                request.with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Fetch)
-            }
-            SubresourceResourceType::Manifest => request
-                .with_resource_type(moli_fetch::RequestResourceType::Manifest)
-                .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Manifest),
-            SubresourceResourceType::EventSource => request
-                .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::EventSource)
-                .with_cache_mode(moli_fetch::RequestCacheMode::NoStore)
-                .without_request_timeout(),
-            SubresourceResourceType::Xhr => {
-                request.with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Xhr)
-            }
-            SubresourceResourceType::WebSocket => request,
-        };
+        let request =
+            pending_subresource_request(&pending, &request_url, &request_method, &request_headers)?;
         let cancel_handle = moli_fetch::FetchCancelHandle::new();
         pending.load.attach_cancel_handle(cancel_handle.clone());
         self.spawn_running_subresource_fetch(
@@ -888,51 +901,13 @@ impl ScriptVm {
             response: _,
         } = pending;
         let loader = pending_fetch.load.request_client();
-        let mut request = moli_fetch::Request::new_bytes(
+        let request = pending_subresource_request(
+            &pending_fetch,
+            &request_url,
             &request_method,
-            request_url.as_str(),
-            pending_fetch.info.request_body_bytes.clone(),
-            original_request_headers.clone(),
+            &original_request_headers,
         )?
-        .with_initiator_url(&pending_fetch.info.document_url)
-        .with_request_mode(pending_fetch.request_mode)
-        .with_credentials_mode(pending_fetch.credentials_mode)
-        .with_auth(auth.into())
-        .with_subframe_context(pending_fetch.info.frame_id.is_some());
-        request = match pending_fetch.info.resource_type {
-            SubresourceResourceType::Script
-            | SubresourceResourceType::Stylesheet
-            | SubresourceResourceType::Image
-            | SubresourceResourceType::Font
-            | SubresourceResourceType::Audio
-            | SubresourceResourceType::Video
-            | SubresourceResourceType::Media
-            | SubresourceResourceType::TextTrack
-            | SubresourceResourceType::Ping
-            | SubresourceResourceType::CspReport
-            | SubresourceResourceType::Dictionary => {
-                match crate::network::request_resource_type_for_subresource(
-                    pending_fetch.info.resource_type,
-                ) {
-                    Some(resource_type) => request.with_resource_type(resource_type),
-                    None => request,
-                }
-            }
-            SubresourceResourceType::Fetch => {
-                request.with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Fetch)
-            }
-            SubresourceResourceType::Manifest => request
-                .with_resource_type(moli_fetch::RequestResourceType::Manifest)
-                .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Manifest),
-            SubresourceResourceType::EventSource => request
-                .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::EventSource)
-                .with_cache_mode(moli_fetch::RequestCacheMode::NoStore)
-                .without_request_timeout(),
-            SubresourceResourceType::Xhr => {
-                request.with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Xhr)
-            }
-            SubresourceResourceType::WebSocket => request,
-        };
+        .with_auth(auth.into());
         let request_headers = original_request_headers;
         if self._context_host.borrow().network_offline() {
             let activity = self.resolve_pending_subresource_fetch_body(
