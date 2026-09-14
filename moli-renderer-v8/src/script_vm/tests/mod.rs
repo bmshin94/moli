@@ -3961,6 +3961,13 @@ async fn service_worker_window_requests_bind_and_retire_exact_document_owners() 
         "https://service-worker-owner.test/page.html",
         &loader,
     );
+    // This fixture supplies registration completions itself. Hold real install
+    // jobs before launch so they cannot publish competing lifecycle callbacks.
+    vm._context_host
+        .borrow()
+        .browser_context_runtime()
+        .service_worker_runtime()
+        .set_pause_new_workers_on_start_for_devtools(true);
     let main_owner = vm
         .current_main_document_task_owner()
         .expect("initial main document owner");
@@ -4217,8 +4224,6 @@ async fn service_worker_window_requests_bind_and_retire_exact_document_owners() 
         "#,
     )
     .expect("child lifecycle listener should install");
-    // Registration completions may precede lifecycle notifications in this FIFO.
-    // Drain the admitted tasks before checking the listener, including rejection.
     vm.current_service_worker_task_sender_for_test()
         .send_service_worker_lifecycle(crate::types::ServiceWorkerLifecycleNotification {
             document_owner: binding_owner.window_document_owner(),
