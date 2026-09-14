@@ -38,24 +38,19 @@ impl Drop for WorkerRequestDelivery {
         let Some(completion) = self.completion.take() else {
             return;
         };
-        let body = match completion.result {
-            Ok(response) => {
-                if let Some(head) = response.native_head() {
-                    record_worker_fetch_response(
-                        &self.observer,
-                        &self.network,
-                        head,
-                        completion.network_request_headers,
-                    );
-                }
-                response.native_body(self.network.handle())
-            }
-            Err(error) => error.into_native_body(self.network.handle()),
+        let (head, body) = match completion.result {
+            Ok(response) => (
+                response.native_head(),
+                response.native_body(self.network.handle()),
+            ),
+            Err(error) => (None, error.into_native_body(self.network.handle())),
         };
-        publish_worker_network_item(
+        publish_worker_response(
             &self.observer,
             &self.network,
-            ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(body)),
+            head,
+            body,
+            completion.network_request_headers,
         );
     }
 }
@@ -169,6 +164,26 @@ pub(in crate::worker) fn record_worker_fetch_response(
         observer,
         network,
         ScriptNetworkOutputItem::SubresourceResponseStarted(Arc::new(response)),
+    );
+}
+
+// The caller owns completion (a claimed pending request or an undelivered
+// transport result). This only serializes its response, preserving whether the
+// physical head and data were already published by the streaming path.
+pub(super) fn publish_worker_response(
+    observer: &crate::worker::WorkerNetworkObserver,
+    network: &crate::runtime::RendererWorkerNetworkRequest,
+    head: Option<ResponseHead>,
+    body: SubresourceBodyFinished,
+    network_request_headers: Option<Vec<(String, String)>>,
+) {
+    if let Some(head) = head {
+        record_worker_fetch_response(observer, network, head, network_request_headers);
+    }
+    publish_worker_network_item(
+        observer,
+        network,
+        ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(body)),
     );
 }
 
@@ -2671,20 +2686,12 @@ fn record_worker_fetch_success(
         .as_ref()
         .and_then(|record| record.initial_network_request_headers.clone())
         .or(network_request_headers);
-    if let Some(head) = response.native_head() {
-        record_worker_fetch_response(
-            &state.parent_tx.network_observer(),
-            &pending.network,
-            head,
-            network_request_headers,
-        );
-    }
-    publish_worker_network_item(
+    publish_worker_response(
         &state.parent_tx.network_observer(),
         &pending.network,
-        ScriptNetworkOutputItem::SubresourceBodyFinished(Arc::new(
-            response.native_body(pending.network.handle()),
-        )),
+        response.native_head(),
+        response.native_body(pending.network.handle()),
+        network_request_headers,
     );
 }
 
