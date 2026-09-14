@@ -4205,6 +4205,8 @@ async fn service_worker_window_requests_bind_and_retire_exact_document_owners() 
         "#,
     )
     .expect("child lifecycle listener should install");
+    // Registration completions may precede lifecycle notifications in this FIFO.
+    // Drain the admitted tasks before checking the listener, including rejection.
     vm.current_service_worker_task_sender_for_test()
         .send_service_worker_lifecycle(crate::types::ServiceWorkerLifecycleNotification {
             document_owner: binding_owner.window_document_owner(),
@@ -4213,12 +4215,7 @@ async fn service_worker_window_requests_bind_and_retire_exact_document_owners() 
             events: vec![crate::types::ServiceWorkerLifecycleClientEvent::UpdateFound],
         })
         .expect("wrong-partition lifecycle completion should enter the typed Page source");
-    run_page_service_worker_internal_task_for_test(
-        &mut vm,
-        &loader,
-        "wrong-partition lifecycle completion",
-    )
-    .await;
+    drain_page_service_worker_internal_tasks_for_test(&mut vm, &loader).await;
     assert_eq!(
         vm.eval(
             "globalThis.__serviceWorkerOwnerFrame.contentWindow.__serviceWorkerOwnerLifecycle",
@@ -4235,12 +4232,7 @@ async fn service_worker_window_requests_bind_and_retire_exact_document_owners() 
             events: vec![crate::types::ServiceWorkerLifecycleClientEvent::UpdateFound],
         })
         .expect("owner-bound lifecycle completion should enter the typed Page source");
-    run_page_service_worker_internal_task_for_test(
-        &mut vm,
-        &loader,
-        "owner-bound lifecycle completion",
-    )
-    .await;
+    drain_page_service_worker_internal_tasks_for_test(&mut vm, &loader).await;
     assert_eq!(
         vm.eval(
             "globalThis.__serviceWorkerOwnerFrame.contentWindow.__serviceWorkerOwnerLifecycle",
