@@ -355,6 +355,109 @@ fn popover_user_agent_display_tracks_open_state() {
 }
 
 #[test]
+fn dialog_user_agent_colors_follow_its_color_scheme() {
+    let mut vm = new_parsed_test_vm(
+        "https://dialog-user-agent-colors.test/",
+        r#"<!doctype html>
+<style>:root { color: CanvasText; background-color: Canvas }</style>
+<dialog id="default" open></dialog>
+<dialog id="light" open style="color-scheme: only light"></dialog>
+<dialog id="dark" open style="color-scheme: only dark"></dialog>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = getComputedStyle(document.documentElement);
+  const fallback = getComputedStyle(document.getElementById('default'));
+  const light = getComputedStyle(document.getElementById('light'));
+  const dark = getComputedStyle(document.getElementById('dark'));
+  return JSON.stringify({
+    defaultMatchesRoot:
+      fallback.color === root.color && fallback.backgroundColor === root.backgroundColor,
+    schemesDiffer:
+      light.color !== dark.color && light.backgroundColor !== dark.backgroundColor
+  });
+})()
+"#,
+        )
+        .expect("dialog user-agent colors should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"defaultMatchesRoot":true,"schemesDiffer":true}"#
+    );
+}
+
+#[test]
+fn modal_dialog_user_agent_visibility_overrides_inheritance() {
+    let mut vm = new_parsed_test_vm(
+        "https://modal-dialog-user-agent-visibility.test/",
+        r#"<!doctype html>
+<div style="visibility: hidden"><dialog id="target">Dialog</dialog></div>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const dialog = document.getElementById('target');
+  dialog.show();
+  const values = [getComputedStyle(dialog).visibility];
+  dialog.close();
+
+  dialog.showModal();
+  values.push(getComputedStyle(dialog).visibility);
+  dialog.close();
+
+  dialog.style.visibility = 'hidden';
+  dialog.showModal();
+  values.push(getComputedStyle(dialog).visibility);
+  return values.join('|');
+})()
+"#,
+        )
+        .expect("modal dialog user-agent visibility should evaluate");
+
+    assert_eq!(result, "hidden|visible|hidden");
+}
+
+#[test]
+fn modal_dialog_top_layer_adjusts_non_absolute_positions() {
+    let mut vm = new_parsed_test_vm(
+        "https://modal-dialog-top-layer-position.test/",
+        r#"<!doctype html><dialog id="target"></dialog>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const dialog = document.getElementById('target');
+  const values = [];
+  for (const position of ['static', 'relative', 'sticky', 'absolute', 'fixed']) {
+    dialog.style.position = position;
+    values.push(getComputedStyle(dialog).position);
+    dialog.showModal();
+    values.push(getComputedStyle(dialog).position);
+    dialog.close();
+    values.push(getComputedStyle(dialog).position);
+  }
+  return values.join('|');
+})()
+"#,
+        )
+        .expect("modal dialog top-layer position should evaluate");
+
+    assert_eq!(
+        result,
+        "static|absolute|static|relative|absolute|relative|sticky|absolute|sticky|\
+         absolute|absolute|absolute|fixed|fixed|fixed"
+    );
+}
+
+#[test]
 fn semantic_text_decoration_uses_user_agent_defaults() {
     let mut vm = new_parsed_test_vm(
         "https://semantic-text-decoration.test/",
