@@ -488,6 +488,7 @@ pub(crate) struct ServiceWorkerFetchRequestMetadata {
     pub(crate) referrer_policy: String,
     pub(crate) integrity: String,
     pub(crate) keepalive: bool,
+    pub(crate) network_partition_key: Option<String>,
 }
 
 impl Default for ServiceWorkerFetchRequestMetadata {
@@ -498,6 +499,7 @@ impl Default for ServiceWorkerFetchRequestMetadata {
             referrer_policy: String::new(),
             integrity: String::new(),
             keepalive: false,
+            network_partition_key: None,
         }
     }
 }
@@ -520,6 +522,7 @@ pub(crate) fn service_worker_fetch_request_metadata(
             .and_then(|metadata| metadata.integrity.clone())
             .unwrap_or_default(),
         keepalive: request.resource_type == moli_fetch::RequestResourceType::CspReport,
+        network_partition_key: request.network_partition_key().map(str::to_owned),
     }
 }
 

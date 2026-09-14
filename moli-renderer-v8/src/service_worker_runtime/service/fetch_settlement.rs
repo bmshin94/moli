@@ -89,6 +89,7 @@ fn configure_service_worker_network_fallback_request(
         .with_initiator_url(&job.network_context.document_url)
         .with_request_mode(job.request_mode)
         .with_credentials_mode(job.credentials_mode)
+        .with_network_partition_key(job.metadata.network_partition_key.clone())
         .with_redirect_mode(if service_worker_fetch_is_navigation_request(job) {
             moli_fetch::RequestRedirectMode::Follow
         } else {
@@ -99,6 +100,11 @@ fn configure_service_worker_network_fallback_request(
             job.network_context.resource_type,
         ))
         .with_subframe_context(job.network_context.frame_id.is_some());
+    if let Some(resource_type) =
+        crate::network::request_resource_type_for_subresource(job.network_context.resource_type)
+    {
+        request = request.with_resource_type(resource_type);
+    }
     if service_worker_fetch_is_navigation_request(job) {
         request = if job.network_context.frame_id.is_some() {
             request.with_subframe_navigation_cookie_context()
@@ -148,7 +154,8 @@ fn service_worker_fetch_can_forward_stream(
         !matches!(job.result_tx, ServiceWorkerFetchResultSender::Direct(_))
             && !matches!(
                 job.network_context.resource_type,
-                crate::types::SubresourceResourceType::Audio
+                crate::types::SubresourceResourceType::CspReport
+                    | crate::types::SubresourceResourceType::Audio
                     | crate::types::SubresourceResourceType::Font
                     | crate::types::SubresourceResourceType::Image
                     | crate::types::SubresourceResourceType::Media
@@ -376,9 +383,13 @@ impl ServiceWorkerRuntimeService {
             // Followed redirect heads belong to the redirect chain. The final
             // physical head is independent of whether JS can receive a stream.
             let js_consumer = match (&job.result_tx, &forwarding) {
-                (ServiceWorkerFetchResultSender::Page { completion_tx, .. }, Ok(true)) => {
-                    Some(completion_tx.clone())
-                }
+                (
+                    ServiceWorkerFetchResultSender::Page {
+                        completion_tx,
+                        network,
+                    },
+                    Ok(true),
+                ) if !network.intercepts_response(&head) => Some(completion_tx.clone()),
                 _ => None,
             };
             if !is_redirect_status(head.status) {
@@ -1411,6 +1422,230 @@ mod tests {
             }
             other => panic!("expected streaming finish, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn csp_stream_preserves_native_phases_and_paused_partial_bodies() {
+        use crate::network::{ResourceResponseStream, ResourceTransfer};
+        use crate::runtime::{RendererNetworkOutputItem, RendererNetworkRequest};
+        use crate::types::{ScriptNetworkOutputItem, SubresourceRequestStarted};
+        use std::sync::Arc;
+
+        for intercepted in [false, true] {
+            for partial in [false, true] {
+                let service = new_service_worker_runtime_service();
+                let event_id = ServiceWorkerEventId(211);
+                let version_id = ServiceWorkerVersionId(1);
+                let run = RendererServiceWorkerRunIdentity::fresh();
+                let owner = ServiceWorkerRunOwner::new(version_id, run.clone());
+                let mut queue =
+                    crate::page_task_queue::RendererResourceCompletionTestHarness::new();
+                let request_url = insert_active_fetch_job(
+                    &service,
+                    event_id,
+                    version_id,
+                    &run,
+                    301,
+                    queue.sender(),
+                );
+                let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+                let received = events.clone();
+                let (network, started) = ResourceTransfer::start(
+                    RendererNetworkRequest::unobserved_for_test(),
+                    move |observation| {
+                        if let RendererNetworkOutputItem::Resource(item) = observation.item() {
+                            received.lock().push(item.clone());
+                        }
+                    },
+                    |request| {
+                        SubresourceRequestStarted::new(
+                            request.handle(),
+                            None,
+                            request_url.clone(),
+                            request_url.clone(),
+                            "POST".into(),
+                            Vec::new(),
+                            None,
+                            crate::types::SubresourceResourceType::CspReport,
+                            moli_page_types::SubresourceRequestInitiatorType::Script,
+                            None,
+                        )
+                    },
+                );
+                network.observe(started);
+                let response = ResourceResponseStream::new(network.clone());
+                response.configure_interception(intercepted, false);
+                {
+                    let mut state = service.inner.state.lock();
+                    let job = state.pending_fetch_jobs.get_mut(&event_id).unwrap();
+                    job.network_context.resource_type =
+                        crate::types::SubresourceResourceType::CspReport;
+                    job.destination = ServiceWorkerRequestDestination::Report;
+                    job.result_tx = ServiceWorkerFetchResultSender::Page {
+                        completion_tx: queue.sender(),
+                        network: response.clone(),
+                    };
+                }
+                service.finish_fetch_stream_started(ServiceWorkerFetchStreamStarted {
+                    event_id,
+                    owner: owner.clone(),
+                    body_source_id: 77,
+                    response_head: MaterializedServiceWorkerFetchResponseHead {
+                        final_url: Some(request_url.clone()),
+                        status: 202,
+                        status_text: None,
+                        headers: Vec::new(),
+                        response_type: "default".into(),
+                        redirected: false,
+                    },
+                });
+                assert_eq!(
+                    events.lock().len(),
+                    if intercepted { 1 } else { 2 },
+                    "only a pending response decision can hold the head"
+                );
+                service.finish_fetch_stream_chunk(ServiceWorkerFetchStreamChunk {
+                    event_id,
+                    body_source_id: 77,
+                    bytes: b"bo".to_vec(),
+                });
+                assert_eq!(
+                    events.lock().len(),
+                    if intercepted { 1 } else { 3 },
+                    "accepted data must precede completion"
+                );
+                assert!(
+                    queue.pop_next_async_subresource_event().is_none(),
+                    "a CSP report has no JS body consumer"
+                );
+                let result = if partial {
+                    ServiceWorkerFetchResult::Failure("truncated".into())
+                } else {
+                    ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
+                        final_url: Some(request_url),
+                        status: 202,
+                        status_text: "Accepted".into(),
+                        headers: Vec::new(),
+                        response_type: "default".into(),
+                        redirected: false,
+                        body: b"bo".to_vec(),
+                    })
+                };
+                service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
+                    event_id,
+                    owner,
+                    result,
+                });
+                let Some(AsyncSubresourceFetchEvent::TransportCompletion(completion)) =
+                    queue.pop_next_async_subresource_event()
+                else {
+                    panic!("one ordinary CSP completion")
+                };
+                let completion = completion
+                    .claim(&network)
+                    .expect("the original response owns completion");
+                match &completion.result {
+                    Ok(body) if !partial => assert_eq!(body.body.clone_body_bytes(), b"bo"),
+                    Err(crate::network::ResourceResponseFailure::PartialBody {
+                        response,
+                        body,
+                        message,
+                    }) if partial => {
+                        assert_eq!(response.head.status, 202);
+                        assert_eq!(body.clone_body_bytes(), b"bo");
+                        assert!(message.contains("truncated"));
+                    }
+                    result => panic!("retain the physical response: {result:?}"),
+                }
+                if intercepted && !partial {
+                    // The Document retires after EOF while its response
+                    // decision is pending. The physical response still survives.
+                    drop(completion);
+                } else {
+                    completion.publish_with(&network, |observation| network.observe(observation));
+                }
+                drop(response);
+                let events = events.lock();
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|item| matches!(
+                            item.as_ref(),
+                            ScriptNetworkOutputItem::SubresourceResponseStarted(_)
+                        ))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|item| matches!(
+                            item.as_ref(),
+                            ScriptNetworkOutputItem::SubresourceBodyFinished(_)
+                        ))
+                        .count(),
+                    1
+                );
+                if intercepted && !partial {
+                    let ScriptNetworkOutputItem::SubresourceBodyFinished(terminal) =
+                        events.last().unwrap().as_ref()
+                    else {
+                        panic!("retirement must terminate the original request")
+                    };
+                    let moli_page_types::SubresourceBodyFinishedResult::FailedWithPartialBody {
+                        partial_body,
+                        ..
+                    } = terminal.result()
+                    else {
+                        panic!("retirement must preserve received bytes")
+                    };
+                    assert_eq!(partial_body.clone_body_bytes(), b"bo");
+                }
+                assert!(queue.pop_next_async_subresource_event().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn csp_network_fallback_retains_the_originating_partition_and_resource_type() {
+        let service = new_service_worker_runtime_service();
+        let event_id = ServiceWorkerEventId(211);
+        let run = RendererServiceWorkerRunIdentity::fresh();
+        let queue = crate::page_task_queue::RendererResourceCompletionTestHarness::new();
+        let request_url = insert_active_fetch_job(
+            &service,
+            event_id,
+            ServiceWorkerVersionId(1),
+            &run,
+            301,
+            queue.sender(),
+        );
+        let request = moli_fetch::Request::new_bytes(
+            "POST",
+            request_url.as_str(),
+            Some(vec![0, 128, 255]),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_resource_type(moli_fetch::RequestResourceType::CspReport)
+        .with_redirect_mode(moli_fetch::RequestRedirectMode::Error)
+        .with_network_partition_key(Some("originating-partition".into()));
+        let mut state = service.inner.state.lock();
+        let job = state.pending_fetch_jobs.get_mut(&event_id).unwrap();
+        job.request_method = request.method.clone();
+        job.request_body_bytes = request.body.clone();
+        job.redirect_mode = request.redirect_mode;
+        job.metadata = service_worker_fetch_request_metadata(&request);
+        job.network_context.resource_type = crate::types::SubresourceResourceType::CspReport;
+        let fallback = service_worker_network_fallback_request_for_job(job).unwrap();
+        assert_eq!(
+            fallback.network_partition_key(),
+            request.network_partition_key()
+        );
+        assert_eq!(fallback.resource_type, request.resource_type);
+        assert_eq!(fallback.redirect_mode, request.redirect_mode);
+        assert_eq!(fallback.body, request.body);
+        assert_eq!(fallback.method, request.method);
     }
 
     #[test]

@@ -534,8 +534,6 @@ pub(super) struct PendingSubresourceAuthState {
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
     pub(super) request_body: Option<String>,
-    pub(super) intercept_response: bool,
-    pub(super) initial_network_request_headers: Option<Vec<(String, String)>>,
     pub(super) response: NavigationResponse,
 }
 
@@ -545,9 +543,6 @@ pub(super) struct RunningSubresourceFetchState {
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
     pub(super) request_body: Option<String>,
-    pub(super) intercept_response: bool,
-    pub(super) handle_auth_requests: bool,
-    pub(super) initial_auth_network_request_headers: Option<Vec<(String, String)>>,
 }
 
 #[derive(Debug)]

@@ -30,8 +30,17 @@ impl std::fmt::Debug for CompletedResourceFetch {
 impl CompletedResourceFetch {
     pub(crate) fn new(
         response: Arc<ResourceResponseStream>,
-        completion: AsyncSubresourceFetchCompletion,
+        mut completion: AsyncSubresourceFetchCompletion,
     ) -> Self {
+        completion.network_request_headers =
+            response.record_request_headers(completion.network_request_headers.take());
+        if let Err(ResourceResponseFailure::PartialBody { response: head, .. }) =
+            &mut completion.result
+        {
+            let head = Arc::make_mut(head);
+            head.network_request_headers =
+                response.record_request_headers(head.network_request_headers.take());
+        }
         Self {
             response,
             completion: Some(completion),
@@ -661,7 +670,7 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
     });
 }
 
-pub(crate) fn can_stream_subresource_response(request: &Request) -> bool {
+fn can_stream_subresource_response(request: &Request) -> bool {
     matches!(
         request.browser_request_metadata(),
         Some(
@@ -676,9 +685,7 @@ pub(crate) fn can_stream_subresource_response(request: &Request) -> bool {
         && request.request_mode != RequestMode::NoCors
 }
 
-/// Deliver an accepted physical response through the ordinary Window reader.
-/// Interception callers enter only after ruling out a pending response decision.
-pub(crate) async fn receive_async_subresource_response(
+async fn receive_async_subresource_response(
     completion_tx: RendererResourceCompletionSender,
     internal_id: u64,
     resource: Arc<ResourceResponseStream>,
@@ -707,7 +714,7 @@ pub(crate) async fn receive_async_subresource_response(
                 head: head.clone(),
                 network_request_headers: network_request_headers.clone(),
             });
-            if stream_to_js {
+            if stream_to_js && !resource.intercepts_response(&head) {
                 let id = new_network_body_source_id();
                 body_source_id = Some(id);
                 let _ = completion_tx.send_async_subresource_event(

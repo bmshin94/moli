@@ -29,11 +29,11 @@ use moli_webapi_declare::WebApiObject;
 use crate::network::ResourceRequestClient;
 
 pub(crate) use self::async_fetch::{
-    CompletedResourceFetch, can_stream_subresource_response,
+    CompletedResourceFetch,
     fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer,
-    fetch_browser_subresource_with_preflight_headers_and_observer,
-    receive_async_subresource_response, resource_request_started, send_resource_completion,
-    spawn_async_subresource_fetch, spawn_async_subresource_fetch_with_redirect_chain,
+    fetch_browser_subresource_with_preflight_headers_and_observer, resource_request_started,
+    send_resource_completion, spawn_async_subresource_fetch,
+    spawn_async_subresource_fetch_with_redirect_chain,
 };
 pub(crate) use self::beacon::{navigator_send_beacon_callback, send_link_audit_ping};
 pub(super) use self::bindings::install_window_network_bindings;
@@ -118,9 +118,7 @@ pub(crate) use self::image::{
     start_image_element_resource_fetch, start_scanned_image_preload,
 };
 pub(in crate::network_host) use self::js_values::{defined_object_string_property, v8_json_parse};
-pub(crate) use self::keepalive::{
-    KeepaliveResource, fetch_buffered_keepalive, keepalive_request_started,
-};
+pub(crate) use self::keepalive::{KeepaliveResource, keepalive_request_started};
 pub(crate) use self::media::{
     MediaElementResourceFetchStart, media_response_status_is_successful,
     start_media_element_resource_fetch,

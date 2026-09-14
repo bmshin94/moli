@@ -538,6 +538,7 @@ impl ScriptVm {
             pending.info.request_body_bytes = body.as_ref().map(|body| body.as_bytes().to_vec());
         }
         if let Some(network) = &pending.network {
+            network.configure_interception(intercept_response, handle_auth_requests);
             let info = &mut pending.info;
             let changed = url.as_ref().is_some_and(|url| url != &info.url)
                 || method.as_ref().is_some_and(|method| method != &info.method)
@@ -620,8 +621,6 @@ impl ScriptVm {
                         request_method.clone(),
                         request_headers.clone(),
                         request_body.clone(),
-                        intercept_response,
-                        handle_auth_requests,
                     )?;
                     let Some(pending) = maybe_pending else {
                         return Ok(AsyncSubresourceCommandExecution::without_window_realm(
@@ -634,8 +633,6 @@ impl ScriptVm {
                         request_method,
                         request_headers,
                         request_body,
-                        intercept_response,
-                        handle_auth_requests,
                     );
                 }
                 return self.continue_pending_subresource_fetch_via_loader(
@@ -644,8 +641,6 @@ impl ScriptVm {
                     request_method,
                     request_headers,
                     request_body,
-                    intercept_response,
-                    handle_auth_requests,
                 );
             }
             continuation => PendingSubresourceFetchState {
@@ -670,8 +665,6 @@ impl ScriptVm {
             request_method,
             request_headers,
             request_body,
-            intercept_response,
-            handle_auth_requests,
         )
     }
 
@@ -682,8 +675,6 @@ impl ScriptVm {
         request_method: String,
         request_headers: Vec<(String, String)>,
         request_body: Option<String>,
-        intercept_response: bool,
-        handle_auth_requests: bool,
     ) -> Result<AsyncSubresourceCommandExecution<PendingSubresourceContinueOutcome>> {
         let internal_id = pending.info.internal_id;
         if pending.load.network_offline() {
@@ -721,9 +712,6 @@ impl ScriptVm {
                 request_method,
                 request_headers,
                 request_body,
-                intercept_response,
-                handle_auth_requests,
-                initial_auth_network_request_headers: None,
             },
             Some(cancel_handle),
         );
@@ -740,8 +728,6 @@ impl ScriptVm {
         request_method: String,
         request_headers: Vec<(String, String)>,
         request_body: Option<String>,
-        intercept_response: bool,
-        handle_auth_requests: bool,
     ) -> Result<Option<PendingSubresourceFetchState>> {
         if self
             ._context_host
@@ -768,8 +754,6 @@ impl ScriptVm {
         let frame_id = pending.info.frame_id.clone();
         let completion_tx = self._context_host.borrow().resource_completion_sender();
         let response_stream = pending.response_stream().clone();
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let fallback = request.clone();
         let request_client = pending.load.request_client();
         let resource_task_runner = pending.load.task_runner();
         let dispatch = crate::service_worker_runtime::ServiceWorkerFetchDispatch {
@@ -796,9 +780,12 @@ impl ScriptVm {
                 resource_type: SubresourceResourceType::CspReport,
                 policy_context,
             },
-            result_tx: ServiceWorkerFetchResultSender::Direct(result_tx),
-            request_client: request_client.clone(),
-            resource_task_runner: resource_task_runner.clone(),
+            result_tx: ServiceWorkerFetchResultSender::Page {
+                completion_tx,
+                network: response_stream,
+            },
+            request_client,
+            resource_task_runner,
             cancel_handle: cancel_handle.clone(),
         };
 
@@ -811,55 +798,11 @@ impl ScriptVm {
                 request_method: request_method.clone(),
                 request_headers: request_headers.clone(),
                 request_body: request_body.clone(),
-                intercept_response,
-                handle_auth_requests,
-                initial_auth_network_request_headers: None,
             });
         }
         self._context_host
             .borrow()
             .dispatch_service_worker_fetch(dispatch);
-        resource_task_runner.spawn(async move {
-            use crate::service_worker_runtime::ServiceWorkerDirectFetchResult;
-            let (skip_fetch_security_validation, response_filter, result) = match result_rx.await {
-                Ok(ServiceWorkerDirectFetchResult::Response(response)) => {
-                    (true, response.response_filter, Ok(*response.response))
-                }
-                Ok(ServiceWorkerDirectFetchResult::Fallback) => (
-                    false,
-                    None,
-                    crate::network_host::fetch_buffered_keepalive(
-                        &request_client,
-                        fallback,
-                        cancel_handle,
-                        &response_stream.network,
-                    )
-                    .await,
-                ),
-                Ok(ServiceWorkerDirectFetchResult::Failure(message)) => (false, None, Err(message)),
-                Err(_) => (
-                    false,
-                    None,
-                    Err("service worker csp report fetch dispatch closed".into()),
-                ),
-            };
-            crate::network_host::send_resource_completion(
-                &completion_tx,
-                response_stream,
-                AsyncSubresourceFetchCompletion {
-                    internal_id,
-                    response_status_text: None,
-                    skip_fetch_security_validation,
-                    response_filter,
-                    network_error_text: None,
-                    network_request_headers: result
-                        .as_ref()
-                        .ok()
-                        .and_then(|response| response.network_request_headers().map(<[_]>::to_vec)),
-                    result: result.map(Into::into).map_err(Into::into),
-                },
-            );
-        });
         Ok(None)
     }
 
@@ -879,8 +822,6 @@ impl ScriptVm {
             request_method,
             request_headers: original_request_headers,
             request_body,
-            intercept_response,
-            initial_network_request_headers,
             response: _,
         } = pending;
         let loader = pending_fetch.load.request_client();
@@ -922,9 +863,6 @@ impl ScriptVm {
                 request_method,
                 request_headers,
                 request_body,
-                intercept_response,
-                handle_auth_requests: true,
-                initial_auth_network_request_headers: initial_network_request_headers,
             },
             Some(cancel_handle),
         );
@@ -969,14 +907,9 @@ impl ScriptVm {
             request_method,
             request_headers,
             request_body,
-            intercept_response,
-            initial_network_request_headers,
             response,
         } = pending;
-        let response = match initial_network_request_headers {
-            Some(headers) => response.with_network_request_headers(Some(headers)),
-            None => response,
-        };
+        let intercept_response = pending.response_stream().intercept_response();
         let response_info = PendingSubresourceResponseInfo {
             internal_id,
             url: request_url.clone(),
@@ -2051,10 +1984,6 @@ impl ScriptVm {
         let task_runner = state.pending.load.task_runner();
         let internal_id = state.pending.info.internal_id;
         let request_url = state.request_url.clone();
-        let intercept_response = state.intercept_response;
-        let handle_auth_requests = state.handle_auth_requests;
-        let initial_auth_headers = state.initial_auth_network_request_headers.clone();
-        let stream_to_js = crate::network_host::can_stream_subresource_response(&request);
         let response_stream = state.pending.response_stream().clone();
         let completion_tx = self._context_host.borrow().resource_completion_sender();
         let preflight_observer = state.pending.preflight_observer(completion_tx.clone());
@@ -2063,73 +1992,19 @@ impl ScriptVm {
             host.begin_active_subresource_request();
             host.record_running_subresource_fetch(state);
         }
-        task_runner.spawn(async move {
-            let preflight_headers = request.request_headers.clone();
-            let observed = crate::network_host::fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer(
-                &request_client,
-                request,
-                cancel_handle,
-                preflight_headers,
-                Some(&preflight_observer),
-            ).await;
-            let observed = match observed {
-                Ok(observed) if intercept_response || (handle_auth_requests
-                    && matches!(observed.response().status, 401 | 407)
-                    && crate::network_host::extract_subresource_auth_challenge(&observed.response().headers).is_some()) => observed,
-                mut result => {
-                    // Auth rounds share one browser request. Preserve its first
-                    // wire header block before publishing the accepted response.
-                    if let Some(headers) = initial_auth_headers {
-                        result = match result {
-                            Ok(observed) => Ok(moli_fetch::NetworkFetchResult::new(
-                                observed.into_response(),
-                                Some(moli_fetch::NetworkRequestObservation::new(headers)),
-                            )),
-                            Err(ResourceResponseFailure::PartialBody { message, mut response, body }) => {
-                                std::sync::Arc::make_mut(&mut response).network_request_headers = Some(headers);
-                                Err(ResourceResponseFailure::PartialBody { message, response, body })
-                            }
-                            result => result,
-                        };
-                    }
-                    crate::network_host::receive_async_subresource_response(
-                        completion_tx, internal_id, response_stream, request_url,
-                        result, stream_to_js, Vec::new(),
-                    ).await;
-                    return;
-                }
-            };
-            let network_request_headers = observed.request_observation()
-                .map(|request| request.headers().to_vec());
-            let (mut response, _) = observed.into_parts();
-            response_stream.buffer_head(std::sync::Arc::new(ResourceResponseHead {
-                head: response.head(),
-                status_text: None,
-                network_request_headers: network_request_headers.clone(),
-            }));
-            while let Some(bytes) = response.next_chunk().await {
-                response_stream.buffer_data(&bytes);
-            }
-            let result = match response.finish().await {
-                Ok(()) => Ok(response_stream.finish_response()
-                    .expect("buffered response retains its head")),
-                Err(error) => Err(response_stream.failure(format!("{error:#}"))),
-            };
-            let completion = AsyncSubresourceFetchCompletion {
-                internal_id,
-                response_status_text: None,
-                skip_fetch_security_validation: false,
-                response_filter: None,
-                network_error_text: None,
-                network_request_headers,
-                result,
-            };
-            crate::network_host::send_resource_completion(
-                &completion_tx,
-                response_stream.clone(),
-                completion,
-            );
-        });
+        let preflight_headers = request.request_headers.clone();
+        crate::network_host::spawn_async_subresource_fetch(
+            task_runner,
+            completion_tx,
+            request_client,
+            request,
+            cancel_handle,
+            preflight_headers,
+            internal_id,
+            response_stream,
+            preflight_observer,
+            request_url,
+        );
     }
 
     fn complete_running_subresource_fetch_body(
@@ -2147,10 +2022,9 @@ impl ScriptVm {
             request_method,
             request_headers,
             request_body,
-            intercept_response,
-            handle_auth_requests,
-            initial_auth_network_request_headers,
         } = running;
+        let intercept_response = pending.response_stream().intercept_response();
+        let handle_auth_requests = pending.response_stream().handle_auth_requests();
         let internal_id = pending.info.internal_id;
         let resource_type = pending.info.resource_type;
         let trace_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
@@ -2164,11 +2038,10 @@ impl ScriptVm {
 
         let activity = match result {
             Ok(response) => {
-                let response = if let Some(headers) = initial_auth_network_request_headers.clone() {
-                    response.with_network_request_headers(Some(headers))
-                } else {
-                    response
-                };
+                let headers = pending
+                    .response_stream()
+                    .record_request_headers(response.network_request_headers().map(<[_]>::to_vec));
+                let response = response.with_network_request_headers(headers);
                 if handle_auth_requests
                     && matches!(response.status, 401 | 407)
                     && let Some(challenge) =
@@ -2206,13 +2079,6 @@ impl ScriptVm {
                             request_method,
                             request_headers,
                             request_body,
-                            intercept_response,
-                            initial_network_request_headers: initial_auth_network_request_headers
-                                .or_else(|| {
-                                    response
-                                        .network_request_headers()
-                                        .map(|headers| headers.to_vec())
-                                }),
                             response,
                         });
                     self._context_host

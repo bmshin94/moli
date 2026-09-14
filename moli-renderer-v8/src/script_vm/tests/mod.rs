@@ -440,9 +440,6 @@ fn register_pending_window_fetch_for_test(
                     request_method: "GET".to_owned(),
                     request_headers: Vec::new(),
                     request_body: None,
-                    intercept_response: false,
-                    handle_auth_requests: false,
-                    initial_auth_network_request_headers: None,
                 });
             }
             PendingWindowFetchTestStage::Streaming => {
@@ -464,14 +461,13 @@ fn register_pending_window_fetch_for_test(
                         event_source_parser: None,
                         xhr_response: None,
                     };
-                    state
-                        .pending
-                        .response_stream()
-                        .buffer_head(std::sync::Arc::new(crate::network::ResourceResponseHead {
+                    state.pending.response_stream().response_started(
+                        crate::network::ResourceResponseHead {
                             status_text: None,
                             head: state.head.clone(),
                             network_request_headers: None,
-                        }));
+                        },
+                    );
                     let body_writer: crate::types::SubresourceResponseBodyWriter =
                         Default::default();
                     state
@@ -488,8 +484,6 @@ fn register_pending_window_fetch_for_test(
                     request_method: "GET".to_owned(),
                     request_headers: Vec::new(),
                     request_body: None,
-                    intercept_response: false,
-                    initial_network_request_headers: None,
                     response: crate::types::NavigationResponse::from_text_body(
                         url.clone(),
                         401,
@@ -2739,10 +2733,13 @@ fn cancel_pending_window_fetch_auth_preserves_401_for_response_stage() {
         .expect("pending Window Fetch auth should register");
     {
         let mut host = vm._context_host.borrow_mut();
-        let mut pending = host
+        let pending = host
             .take_pending_subresource_auth(internal_id)
             .expect("pending auth state");
-        pending.intercept_response = true;
+        pending
+            .pending
+            .response_stream()
+            .configure_interception(true, true);
         host.record_pending_subresource_auth(pending);
     }
 
