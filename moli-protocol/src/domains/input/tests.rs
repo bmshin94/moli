@@ -1777,7 +1777,7 @@ async fn coordinate_drag_event_completes_through_pending_layout_dispatch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn insert_text_marks_text_controls_user_edited_for_length_validity() {
+async fn insert_text_enforces_maxlength_and_marks_short_values_user_edited() {
     let mut ctx = TestContext::new();
     with_loaded_document(
         &mut ctx,
@@ -1847,7 +1847,7 @@ async fn insert_text_marks_text_controls_user_edited_for_length_validity() {
             "JSON.stringify({value: field.value, tooLong: field.validity.tooLong, valid: field.validity.valid})"
         )
         .await,
-        r#"{"value":"abcde","tooLong":true,"valid":false}"#
+        r#"{"value":"abcd","tooLong":false,"valid":true}"#
     );
 
     assert_eq!(
@@ -1877,7 +1877,7 @@ async fn insert_text_marks_text_controls_user_edited_for_length_validity() {
             "JSON.stringify({value: bio.value, tooLong: bio.validity.tooLong, valid: bio.validity.valid})"
         )
         .await,
-        r#"{"value":"abcd","tooLong":true,"valid":false}"#
+        r#"{"value":"abc","tooLong":false,"valid":true}"#
     );
 
     evaluate_string(
@@ -1898,7 +1898,7 @@ async fn insert_text_marks_text_controls_user_edited_for_length_validity() {
             "JSON.stringify({value: emoji.value, tooLong: emoji.validity.tooLong, valid: emoji.validity.valid})"
         )
         .await,
-        r#"{"value":"😀","tooLong":true,"valid":false}"#
+        r#"{"value":"","tooLong":false,"valid":true}"#
     );
 }
 
@@ -2414,6 +2414,42 @@ async fn dispatch_key_event_backspace_deletes_text_in_input() {
         evaluate_string(&mut ctx, "JSON.stringify(window.__editEvents)").await,
         r#"["ac"]"#
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatch_key_event_text_controls_preserve_surrogate_pairs() {
+    let mut ctx = TestContext::new();
+    with_loaded_document(
+        &mut ctx,
+        "<html><body><input id='field'><textarea id='bio'></textarea></body></html>",
+    )
+    .await;
+    let mut command_id = 5000;
+    for control in ["field", "bio"] {
+        for (key, caret, modifiers, expected) in [
+            ("Backspace", 3, 0, r#"["AB",1,1]"#),
+            ("Delete", 1, 0, r#"["AB",1,1]"#),
+            ("ArrowLeft", 3, 0, r#"["A😀B",1,1]"#),
+            ("ArrowRight", 1, 0, r#"["A😀B",3,3]"#),
+            ("ArrowLeft", 3, 8, r#"["A😀B",1,3]"#),
+            ("ArrowRight", 1, 8, r#"["A😀B",1,3]"#),
+        ] {
+            evaluate_string(&mut ctx, &format!(
+                "window.__utf16Control = document.getElementById('{control}'); __utf16Control.value = 'A😀B'; __utf16Control.focus(); __utf16Control.setSelectionRange({caret}, {caret}); 'ready'"
+            )).await;
+            ctx.process_async(json!({
+                "id": command_id,
+                "method": "Input.dispatchKeyEvent",
+                "params": {"type": "keyDown", "key": key, "code": key, "modifiers": modifiers}
+            }))
+            .await;
+            ctx.expect_result(command_id, json!({}), None);
+            command_id += 1;
+            assert_eq!(evaluate_string(&mut ctx,
+                "JSON.stringify([__utf16Control.value, __utf16Control.selectionStart, __utf16Control.selectionEnd])"
+            ).await, expected, "{control} {key} modifiers={modifiers}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

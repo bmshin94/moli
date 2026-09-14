@@ -8,15 +8,18 @@ use super::{
     is_html_document, throw_dom_exception,
 };
 use crate::native_bridge::element::{
-    char_offset_to_byte_index, contenteditable_editing_host, dispatch_text_control_event,
-    is_text_control, queue_text_control_document_selection_change_event,
-    replace_contenteditable_selection, replace_text_control_selection, text_control_value,
+    contenteditable_editing_host, dispatch_text_control_event, is_text_control,
+    queue_text_control_document_selection_change_event, replace_contenteditable_selection,
+    replace_text_control_selection, text_control_value,
 };
 use crate::{
     context_bootstrap::WINDOW_EVENT_HANDLER_PROPERTIES,
     custom_elements,
     document_runtime::DomHandle,
-    util::{call_object_method, node_wrapper_from_handle, v8str},
+    util::{
+        call_object_method, node_wrapper_from_handle, utf16_next_scalar_boundary,
+        utf16_previous_scalar_boundary, utf16_replace_units_range_lossy, utf16_units, v8str,
+    },
     webidl,
 };
 
@@ -730,7 +733,8 @@ fn exec_command_delete_text_control(
         return None;
     }
     let value = text_control_value(runtime, handle);
-    let value_len = value.chars().count() as u32;
+    let value_units = utf16_units(&value);
+    let value_len = value_units.len() as u32;
     let (start, end) = runtime
         .dom_host()
         .node(handle)
@@ -745,24 +749,36 @@ fn exec_command_delete_text_control(
             }
         })
         .unwrap_or((value_len, value_len));
-    let (from, to, caret) = if start != end {
-        (start, end, start)
-    } else if command == "forwarddelete" {
-        if start >= value_len {
-            return Some(true);
-        }
-        (start, start + 1, start)
+    let (from, to) = if start != end {
+        (start, end)
     } else {
-        if start == 0 {
-            return Some(true);
+        let caret = if start == 0 {
+            0
+        } else {
+            utf16_next_scalar_boundary(&value_units, start as usize - 1) as u32
+        };
+        if command == "forwarddelete" {
+            (
+                caret,
+                utf16_next_scalar_boundary(&value_units, caret as usize) as u32,
+            )
+        } else {
+            (
+                utf16_previous_scalar_boundary(&value_units, caret as usize) as u32,
+                caret,
+            )
         }
-        (start - 1, start, start - 1)
     };
+    if from == to {
+        return Some(true);
+    }
+    let caret = from;
 
-    let next_value = format!(
-        "{}{}",
-        &value[..char_offset_to_byte_index(&value, from)],
-        &value[char_offset_to_byte_index(&value, to)..]
+    let next_value = utf16_replace_units_range_lossy(
+        &value_units,
+        from as usize,
+        to.saturating_sub(from) as usize,
+        &[],
     );
     let runtime = unsafe { &mut *runtime_ptr };
     let changed = runtime.set_input_value_from_user_edit(handle, &next_value);

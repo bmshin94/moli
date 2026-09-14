@@ -1144,6 +1144,90 @@ async fn text_control_selectionchange_bubbles_across_shadow_and_exec_delete_targ
         "0|document"
     );
 }
+
+#[test]
+fn exec_command_insert_text_enforces_maxlength_in_utf16_units() {
+    let mut vm = new_storage_test_vm("https://exec-command-insert-text-maxlength.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.documentElement || document.appendChild(document.createElement('html'));
+  const body = document.body || root.appendChild(document.createElement('body'));
+  const input = document.createElement('input');
+  input.setAttribute('maxlength', ' +10tail');
+  body.append(input);
+  const events = [];
+  input.addEventListener('input', () => events.push('input'));
+  input.focus();
+  const returned = document.execCommand('insertText', false, '👨‍👩‍👧‍👦');
+
+  const lineInput = document.createElement('input');
+  body.append(lineInput);
+  lineInput.focus();
+  const lineReturned = document.execCommand('insertText', false, 'A\r\nB\n');
+
+  const rangeInput = document.createElement('input');
+  rangeInput.value = 'A😀B';
+  body.append(rangeInput);
+  rangeInput.setRangeText('x', 1, 3, 'end');
+
+  return JSON.stringify({
+    returned,
+    value: input.value,
+    valueLength: input.value.length,
+    selectionStart: input.selectionStart,
+    selectionEnd: input.selectionEnd,
+    events,
+    lineReturned,
+    lineValue: lineInput.value,
+    rangeValue: rangeInput.value,
+    rangeSelection: [rangeInput.selectionStart, rangeInput.selectionEnd]
+  });
+})()
+"#,
+        )
+        .expect("execCommand insertText maxlength probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"returned":true,"value":"👨‍👩‍👧‍","valueLength":9,"selectionStart":9,"selectionEnd":9,"events":["input"],"lineReturned":true,"lineValue":"A B","rangeValue":"AxB","rangeSelection":[2,2]}"#
+    );
+}
+
+#[test]
+fn exec_command_text_control_deletion_preserves_surrogate_pairs() {
+    let mut vm = new_storage_test_vm("https://exec-command-utf16-deletion.test/");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.documentElement || document.appendChild(document.createElement('html'));
+  const body = document.body || root.appendChild(document.createElement('body'));
+  return JSON.stringify(['input', 'textarea'].flatMap(tag => {
+    return [['delete', 3], ['forwardDelete', 1], ['delete', 2]].map(([command, caret]) => {
+      const control = document.createElement(tag);
+      body.append(control);
+      control.value = 'A😀B';
+      control.focus();
+      control.setSelectionRange(caret, caret);
+      const returned = document.execCommand(command);
+      const result = [returned, control.value, control.selectionStart, control.selectionEnd];
+      control.remove();
+      return result;
+    });
+  }));
+})()
+"#,
+        )
+        .expect("text control deletion should preserve complete surrogate pairs");
+    assert_eq!(
+        result,
+        r#"[[true,"AB",1,1],[true,"AB",1,1],[true,"AB",1,1],[true,"AB",1,1],[true,"AB",1,1],[true,"AB",1,1]]"#
+    );
+}
+
 #[test]
 fn input_file_value_setter_rejects_non_empty_values() {
     let mut vm = new_storage_test_vm("https://forms-input-file-value.test/");
