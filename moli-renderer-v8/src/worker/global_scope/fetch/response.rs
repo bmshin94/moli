@@ -1,4 +1,5 @@
 use super::*;
+use moli_fetch::StreamingRawResponse;
 
 /// A resource result returns to the Worker that admitted it. The response and
 /// load outlive the VM when its completion queue closes during transport.
@@ -101,7 +102,7 @@ impl WorkerFetchCompletionSender {
     }
 
     pub(crate) fn fetch_network(
-        mut self,
+        self,
         mut request: Request,
         cancel: FetchCancelHandle,
         preflight_headers: Vec<(String, String)>,
@@ -114,8 +115,6 @@ impl WorkerFetchCompletionSender {
             request.url = redirect.to_url.clone();
         }
         self.load.task_runner().spawn(async move {
-            let mut stream_sender = None;
-            let mut network_request_headers = None;
             let result = if matches!(request.url.scheme(), "data" | "blob") {
                 local_url_response(&request.url)
                     .map(ResourceBodyResponse::from)
@@ -140,37 +139,32 @@ impl WorkerFetchCompletionSender {
                 {
                     Ok(observed) => {
                         let (mut response, headers) = worker_network_result_parts(observed);
-                        network_request_headers = headers;
-                        let mut head = response.head();
+                        self.response.record_request_headers(headers);
                         if !redirects.is_empty() {
                             let mut chain = redirects;
-                            chain.append(&mut head.redirect_chain);
-                            head.redirect_chain = chain;
-                            head.redirected = true;
+                            chain.append(&mut response.redirect_chain);
+                            response.redirect_chain = chain;
+                            response.redirected = true;
                         }
-                        self.response.response_started(ResourceResponseHead {
-                            status_text: None,
-                            head: head.clone(),
-                            network_request_headers: network_request_headers.clone(),
-                        });
-                        if stream_to_script && !self.response.intercepts_response(&head) {
-                            let id = crate::network_host::new_network_body_source_id();
-                            let sender = self.stream_sender(id);
-                            sender.streaming_started(head);
-                            stream_sender = Some(sender);
+                        if self.response.handle_auth_requests()
+                            && matches!(response.status, 401 | 407)
+                            && extract_subresource_auth_challenge(&response.headers).is_some()
+                        {
+                            self.response.response_started(ResourceResponseHead {
+                                status_text: None,
+                                head: response.head(),
+                                network_request_headers: None,
+                            });
+                            let sender = self.sender.as_ref().expect("active producer").clone();
+                            let _ = sender.send(WorkerFetchEvent::AuthRequired(Box::new(
+                                WorkerFetchAuthResponse {
+                                    transfer: Some((self, response, stream_to_script)),
+                                },
+                            )));
+                        } else {
+                            self.receive_response(response, stream_to_script).await;
                         }
-                        while let Some(bytes) = response.next_chunk().await {
-                            self.response.data_received(&bytes);
-                            if let Some(sender) = &stream_sender {
-                                sender.streaming_chunk(bytes);
-                            }
-                        }
-                        match response.finish().await {
-                            Ok(()) => {
-                                Ok(self.response.finish_response().expect("received response"))
-                            }
-                            Err(error) => Err(self.response.failure(format!("fetch: {error}"))),
-                        }
+                        return;
                     }
                     Err(error) => {
                         let message = format!("fetch: {error}");
@@ -178,8 +172,173 @@ impl WorkerFetchCompletionSender {
                     }
                 }
             };
-            self.complete(result, network_request_headers);
+            self.complete(result, None);
         });
+    }
+
+    async fn receive_response(
+        mut self,
+        mut response: StreamingRawResponse,
+        stream_to_script: bool,
+    ) {
+        let head = response.head();
+        self.response.response_started(ResourceResponseHead {
+            status_text: None,
+            head: head.clone(),
+            network_request_headers: None,
+        });
+        let stream = if stream_to_script && !self.response.intercepts_response(&head) {
+            let stream = self.stream_sender(crate::network_host::new_network_body_source_id());
+            stream.streaming_started(head);
+            Some(stream)
+        } else {
+            None
+        };
+        while let Some(bytes) = response.next_chunk().await {
+            self.response.data_received(&bytes);
+            if let Some(stream) = &stream {
+                stream.streaming_chunk(bytes);
+            }
+        }
+        let result = match response.finish().await {
+            Ok(()) => Ok(self.response.finish_response().expect("received response")),
+            Err(error) => Err(self.response.failure(format!("fetch: {error}"))),
+        };
+        self.complete(result, None);
+    }
+
+    fn discard_response(&self, response: &mut StreamingRawResponse) {
+        response.cancellation_handle().cancel();
+        while let Some(bytes) = response.try_next_chunk() {
+            self.response.data_received(&bytes);
+        }
+    }
+}
+
+/// Authentication retains the actual response and its original completion
+/// authority. A retry discards that transport before starting the next one.
+pub(in crate::worker) struct WorkerFetchAuthResponse {
+    transfer: Option<(WorkerFetchCompletionSender, StreamingRawResponse, bool)>,
+}
+
+pub(in crate::worker) enum WorkerFetchPausedResponse {
+    Complete(Box<ResourceBodyResponse>),
+    Auth(Box<WorkerFetchAuthResponse>),
+}
+
+impl WorkerFetchPausedResponse {
+    pub(in crate::worker) fn discard(self) -> ResponseHead {
+        match self {
+            Self::Complete(response) => response.head,
+            Self::Auth(mut response) => {
+                let (mut producer, mut response, _) =
+                    response.transfer.take().expect("held response");
+                producer.discard_response(&mut response);
+                producer.sender.take();
+                response.head()
+            }
+        }
+    }
+
+    pub(in crate::worker) fn resume(
+        self,
+        sender: &mpsc::UnboundedSender<WorkerFetchEvent>,
+        fetch_id: u32,
+        response_code: Option<u16>,
+        response_headers: Option<Vec<(String, String)>>,
+    ) {
+        match self {
+            Self::Complete(mut response) => {
+                if let Some(status) = response_code {
+                    response.head.status = status;
+                }
+                if let Some(headers) = response_headers {
+                    response.head.headers = headers;
+                }
+                let _ = sender.send(WorkerFetchEvent::Completion(Box::new(
+                    WorkerRequestCompletion {
+                        id: fetch_id,
+                        network_request_headers: None,
+                        result: Ok(*response),
+                    },
+                )));
+            }
+            Self::Auth(mut response) => {
+                let (producer, mut response, stream) =
+                    response.transfer.take().expect("held response");
+                if let Some(status) = response_code {
+                    response.status = status;
+                }
+                if let Some(headers) = response_headers {
+                    response.headers = headers;
+                }
+                producer
+                    .load
+                    .task_runner()
+                    .spawn(producer.receive_response(response, stream));
+            }
+        }
+    }
+}
+
+impl WorkerFetchAuthResponse {
+    pub(super) fn pause(
+        self: Box<Self>,
+        scope: &mut v8::PinScope<'_, '_>,
+        state: &Rc<RefCell<WorkerGlobalState>>,
+    ) {
+        let (producer, response, _) = self.transfer.as_ref().expect("held response");
+        let fetch_id = producer.fetch_id;
+        if !state
+            .borrow()
+            .pending_fetches
+            .get(&fetch_id)
+            .is_some_and(|pending| {
+                Arc::ptr_eq(&pending.response, &producer.response) && !pending.load.is_cancelled()
+            })
+        {
+            return;
+        }
+        let head = response.head();
+        if let Some(message) = worker_fetch_response_csp_error(scope, state, fetch_id, &head) {
+            let mut response = self;
+            let (producer, mut response, _) = response.transfer.take().expect("held response");
+            producer.discard_response(&mut response);
+            drop(response);
+            let failure = producer.response.failure(message);
+            producer.complete(Err(failure), None);
+            return;
+        }
+        let challenge =
+            extract_subresource_auth_challenge(&head.headers).expect("authentication challenge");
+        pause_worker_fetch_auth(
+            state,
+            fetch_id,
+            &head,
+            WorkerFetchPausedResponse::Auth(self),
+            challenge,
+        );
+    }
+}
+
+impl Drop for WorkerFetchAuthResponse {
+    fn drop(&mut self) {
+        if let Some((producer, mut response, _)) = self.transfer.take() {
+            if producer.load.is_cancelled() {
+                producer.discard_response(&mut response);
+                let failure = producer.response.failure(ABORTED_ERROR_TEXT.into());
+                producer.complete(Err(failure), None);
+                return;
+            }
+            // Lost observers release the decision. The existing load lease has
+            // already cancelled ordinary retired requests; detached keepalive
+            // responses finish without retaining or re-entering the Worker VM.
+            producer.response.configure_interception(false, false);
+            producer
+                .load
+                .task_runner()
+                .spawn(producer.receive_response(response, false));
+        }
     }
 }
 
@@ -226,31 +385,10 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_worker_response_producer_settles_its_original_route() {
-        let client =
-            crate::network::ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
-                .unwrap();
         for streamed in [false, true] {
             let cancel = FetchCancelHandle::new();
-            let load = crate::network::loads::resource_load_lease_for_test(
-                client.handle(),
-                Some(cancel.clone()),
-            );
-            let response = ResourceResponseStream::unobserved_for_test();
-            let (send, mut receive) = mpsc::unbounded_channel();
-            let mut producer = WorkerFetchCompletionSender {
-                response: response.clone(),
-                load,
-                fetch_id: 42,
-                sender: Some(send),
-                body_source_id: None,
-                preflight: crate::network_host::CorsPreflightNetworkObserver {
-                    request: response.network.request(),
-                    observer: Arc::new(|_| {}),
-                    frame_id: None,
-                    resource_type: SubresourceResourceType::Fetch,
-                    keepalive: false,
-                },
-            };
+            let (mut producer, mut receive) = producer_for_test(cancel.clone());
+            let response = producer.response.clone();
             let stream = streamed
                 .then(|| producer.stream_sender(crate::network_host::new_network_body_source_id()));
             drop(producer);
@@ -284,5 +422,82 @@ mod tests {
                 "only one completion is sent"
             );
         }
+    }
+
+    fn producer_for_test(
+        cancel: FetchCancelHandle,
+    ) -> (
+        WorkerFetchCompletionSender,
+        mpsc::UnboundedReceiver<WorkerFetchEvent>,
+    ) {
+        let client =
+            crate::network::ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
+                .unwrap();
+        let load = crate::network::loads::resource_load_lease_for_test(
+            client.handle(),
+            Some(cancel.clone()),
+        );
+        let response = ResourceResponseStream::unobserved_for_test();
+        let (send, receive) = mpsc::unbounded_channel();
+        let producer = WorkerFetchCompletionSender {
+            response: response.clone(),
+            load,
+            fetch_id: 42,
+            sender: Some(send),
+            body_source_id: None,
+            preflight: crate::network_host::CorsPreflightNetworkObserver {
+                request: response.network.request(),
+                observer: Arc::new(|_| {}),
+                frame_id: None,
+                resource_type: SubresourceResourceType::Fetch,
+                keepalive: false,
+            },
+        };
+        (producer, receive)
+    }
+
+    #[tokio::test]
+    async fn discarded_auth_response_retains_queued_bytes_without_completing_the_request() {
+        let cancel = FetchCancelHandle::new();
+        let (producer, mut receive) = producer_for_test(cancel.clone());
+        let resource = producer.response.clone();
+        let load = producer.load.clone();
+        let mut head = crate::network_host::local_url_response(&Url::parse("data:,auth").unwrap())
+            .unwrap()
+            .head();
+        head.status = 401;
+        head.headers = vec![("www-authenticate".into(), "Basic realm=held".into())];
+        resource.configure_interception(false, true);
+        resource.response_started(ResourceResponseHead {
+            status_text: None,
+            head: head.clone(),
+            network_request_headers: None,
+        });
+        let (chunks, receiver) = mpsc::unbounded_channel();
+        chunks.send(vec![0, 128]).unwrap();
+        chunks.send(vec![255, 65]).unwrap();
+        let (_finished, completion) = tokio::sync::oneshot::channel();
+        let response =
+            StreamingRawResponse::new_with_head(head, receiver, cancel.clone(), completion);
+        let paused = WorkerFetchPausedResponse::Auth(Box::new(WorkerFetchAuthResponse {
+            transfer: Some((producer, response, true)),
+        }));
+        assert_eq!(paused.discard().status, 401);
+        assert!(cancel.is_cancelled());
+        assert!(
+            !load.is_cancelled(),
+            "the same admission must still allow the authentication retry"
+        );
+        assert!(
+            receive.try_recv().is_err(),
+            "discard does not invent a request completion"
+        );
+        let ResourceResponseFailure::PartialBody { response, body, .. } =
+            resource.failure("stopped".into())
+        else {
+            panic!("received head and bytes must survive")
+        };
+        assert_eq!(response.head.status, 401);
+        assert_eq!(body.clone_body_bytes(), [0, 128, 255, 65]);
     }
 }

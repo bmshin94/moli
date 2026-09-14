@@ -2460,11 +2460,6 @@ pub struct PendingSubresourceAuthInfo {
     pub network_request_headers: Option<Vec<(String, String)>>,
     pub challenge: SubresourceAuthChallenge,
     pub intercept_response: bool,
-    pub response_final_url: Url,
-    pub response_status: u16,
-    pub response_headers: Vec<(String, String)>,
-    pub response_body: SubresourceResponseBody,
-    pub response_from_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -896,11 +896,7 @@ pub(in crate::worker) fn drain_worker_xhr_completion(
                     && let Some(challenge) =
                         extract_subresource_auth_challenge(&response_head.headers)
                 {
-                    let response_body = response.subresource_response_body();
-                    pending.paused_response = Some(ResourceBodyResponse {
-                        head: response_head.clone(),
-                        body: response_body.clone(),
-                    });
+                    pending.paused_response = Some(response.clone());
                     Some(PendingSubresourceAuthInfo {
                         internal_id: pending.response.network.handle().get(),
                         url: record.url.clone(),
@@ -912,11 +908,6 @@ pub(in crate::worker) fn drain_worker_xhr_completion(
                         network_request_headers: pending.response.record_request_headers(None),
                         challenge,
                         intercept_response: pending.response.intercept_response(),
-                        response_final_url: response_head.final_url.clone(),
-                        response_status: response_head.status,
-                        response_headers: response_head.headers.clone(),
-                        response_body,
-                        response_from_cache: response_head.from_cache,
                     })
                 } else {
                     None

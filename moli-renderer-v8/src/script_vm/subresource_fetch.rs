@@ -2060,11 +2060,6 @@ impl ScriptVm {
                             .map(|headers| headers.to_vec()),
                         challenge,
                         intercept_response,
-                        response_final_url: response.final_url.clone(),
-                        response_status: response.status,
-                        response_headers: response.headers.clone(),
-                        response_body: SubresourceResponseBody::from_navigation_response(&response),
-                        response_from_cache: response.from_cache,
                     };
                     trace_async_subresource_stage(
                         "async_subresource_complete_running_auth_required",

@@ -34,6 +34,7 @@ async fn accepted_xhr_auth_response_retains_partial_body() {
 
 async fn accepted_response(resource_type: SubresourceResourceType, auth: bool, partial: bool) {
     ensure_v8();
+    let is_fetch = resource_type == SubresourceResourceType::Fetch;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (prefix_tx, prefix_rx) = tokio::sync::oneshot::channel();
@@ -55,7 +56,18 @@ async fn accepted_response(resource_type: SubresourceResourceType, auth: bool, p
                 .unwrap();
             assert_eq!(body, [0, 128, 255, 65]);
             if auth && !authenticated {
-                stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"worker-stage\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                let length = if is_fetch { 4 } else { 0 };
+                stream.write_all(format!("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"worker-stage\"\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                if is_fetch {
+                    // The challenge body stays withheld. Providing credentials
+                    // must close this transport before the retry can proceed.
+                    let mut byte = [0];
+                    match tokio::io::AsyncReadExt::read(&mut stream, &mut byte).await {
+                        Ok(0) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                        other => panic!("challenge transport must close: {other:?}"),
+                    }
+                }
                 continue;
             }
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
@@ -74,7 +86,6 @@ async fn accepted_response(resource_type: SubresourceResourceType, auth: bool, p
             return;
         }
     });
-    let is_fetch = resource_type == SubresourceResourceType::Fetch;
     let script = if is_fetch {
         "onmessage=async()=>{try{const r=await fetch('/probe',{method:'POST',body:new Uint8Array([0,128,255,65])});postMessage('headers');postMessage(await r.text());}catch(e){postMessage('rejected');}close();};"
     } else {
@@ -201,6 +212,232 @@ async fn accepted_response(resource_type: SubresourceResourceType, auth: bool, p
     };
     expected.push(if partial { "\"rejected\"" } else { "\"body\"" });
     assert_eq!(posts, expected);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HeldAuthAction {
+    Cancel,
+    Release,
+    Fail,
+    Fulfill,
+    Abort,
+    Retire,
+    RetireKeepalive,
+}
+
+#[tokio::test]
+async fn worker_auth_retirement_closes_the_challenge_transport() {
+    held_auth_response(HeldAuthAction::Retire).await;
+}
+
+#[tokio::test]
+async fn worker_auth_retirement_releases_the_keepalive_challenge() {
+    held_auth_response(HeldAuthAction::RetireKeepalive).await;
+}
+
+#[tokio::test]
+async fn worker_auth_cancel_streams_the_challenge_body() {
+    held_auth_response(HeldAuthAction::Cancel).await;
+}
+
+#[tokio::test]
+async fn worker_auth_release_streams_the_challenge_body() {
+    held_auth_response(HeldAuthAction::Release).await;
+}
+
+#[tokio::test]
+async fn worker_auth_failure_closes_the_challenge_transport() {
+    held_auth_response(HeldAuthAction::Fail).await;
+}
+
+#[tokio::test]
+async fn worker_auth_fulfillment_closes_the_challenge_transport() {
+    held_auth_response(HeldAuthAction::Fulfill).await;
+}
+
+#[tokio::test]
+async fn worker_auth_abort_closes_the_challenge_transport() {
+    held_auth_response(HeldAuthAction::Abort).await;
+}
+
+async fn held_auth_response(action: HeldAuthAction) {
+    use tokio::io::AsyncReadExt;
+    ensure_v8();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (prefix_tx, prefix_rx) = tokio::sync::oneshot::channel();
+    let (tail_tx, tail_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request_head(&mut socket).await.unwrap();
+        assert!(request.starts_with("POST /probe "));
+        let mut upload = [0; 4];
+        socket.read_exact(&mut upload).await.unwrap();
+        assert_eq!(upload, [0, 128, 255, 65]);
+        socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"held-worker\"\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
+        let mut byte = [0];
+        tokio::select! {
+            closed = socket.read(&mut byte) => {
+                match closed {
+                    Ok(0) => {},
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {},
+                    other => panic!("challenge must close without another upload: {other:?}"),
+                }
+                return true;
+            }
+            ready = prefix_rx => ready.unwrap(),
+        }
+        socket.write_all(b"bo").await.unwrap();
+        tail_rx.await.unwrap();
+        socket.write_all(b"dy").await.unwrap();
+        assert_eq!(
+            socket.read(&mut byte).await.unwrap(),
+            0,
+            "completed transport closes after the whole challenge body"
+        );
+        false
+    });
+    // The surrounding Context survives Worker retirement, including its
+    // transport executor. Retiring the test handle must not destroy it too.
+    let client = ResourceRequestClient::new(&FetchConfig::default()).unwrap();
+    let mut worker = spawn_worker_with_request_client(
+        "const controller=new AbortController();onmessage=async e=>{if(e.data==='abort'){controller.abort();return;}try{const r=await fetch('/probe',{method:'POST',body:new Uint8Array([0,128,255,65]),signal:controller.signal,keepalive:KEEPALIVE});postMessage('headers:'+r.status);postMessage(await r.text());}catch(e){postMessage('rejected');}close();};".replace("KEEPALIVE", if matches!(action, HeldAuthAction::RetireKeepalive) { "true" } else { "false" }),
+        format!("{origin}/worker.js"),
+        client.handle(),
+    );
+    worker.set_fetch_subresource_interception(true, Some(SubresourceResourceType::Fetch));
+    worker.post_message(serialize_test_string("go"));
+    let mut records = WorkerNetworkRecords::default();
+    let request = records.recv_pause(&mut worker).await;
+    continue_worker_request(&request, false, true).await;
+    let auth = records.recv_pause(&mut worker).await;
+    let crate::runtime::RendererWorkerFetchStage::Auth(info) = auth.stage() else {
+        panic!("challenge before body")
+    };
+    assert_eq!(info.challenge.realm, "held-worker");
+    assert_eq!(auth.handle(), request.handle());
+    use crate::runtime::WorkerFetchDecision;
+    let decision = match action {
+        HeldAuthAction::Retire | HeldAuthAction::RetireKeepalive => {
+            worker.terminate_and_join();
+            let keepalive = matches!(action, HeldAuthAction::RetireKeepalive);
+            if keepalive {
+                prefix_tx.send(()).unwrap();
+                tail_tx.send(()).unwrap();
+            }
+            assert_eq!(timeout(TIMEOUT, server).await.unwrap().unwrap(), !keepalive);
+            return;
+        }
+        HeldAuthAction::Cancel => Some(WorkerFetchDecision::CancelAuth),
+        HeldAuthAction::Release => Some(WorkerFetchDecision::Release),
+        HeldAuthAction::Fail => Some(WorkerFetchDecision::Fail("held auth rejected".into())),
+        HeldAuthAction::Fulfill => Some(WorkerFetchDecision::Fulfill {
+            response_code: 202,
+            response_headers: vec![("content-type".into(), "text/plain".into())],
+            response_body: crate::RendererSyntheticResponseBody::from_bytes(b"mock".to_vec()),
+        }),
+        HeldAuthAction::Abort => {
+            worker.post_message(serialize_test_string("abort"));
+            None
+        }
+    };
+    if let Some(decision) = decision {
+        decide_worker_pause(&auth, decision).await;
+    }
+    let resumed = matches!(action, HeldAuthAction::Cancel | HeldAuthAction::Release);
+    let mut prefix_tx = Some(prefix_tx);
+    let mut tail_tx = Some(tail_tx);
+    let mut posts = Vec::new();
+    let mut heads = 0;
+    let mut bytes = 0;
+    let mut terminals = 0;
+    timeout(TIMEOUT, async {
+        while let Some(message) = worker.recv().await {
+            match message {
+                WorkerToParentMessage::Post(payload) => posts.push(stringify_payload(&payload)),
+                WorkerToParentMessage::Network(observation) => {
+                    let RendererNetworkOutputItem::Resource(item) = observation.item() else {
+                        panic!("resource fact")
+                    };
+                    match item.as_ref() {
+                        ScriptNetworkOutputItem::SubresourceResponseStarted(head) => {
+                            assert_eq!(head.handle(), request.handle());
+                            assert_eq!(
+                                head.status(),
+                                if matches!(action, HeldAuthAction::Fulfill) {
+                                    202
+                                } else {
+                                    401
+                                }
+                            );
+                            heads += 1;
+                        }
+                        ScriptNetworkOutputItem::SubresourceDataReceived(data) => {
+                            assert_eq!(data.handle(), request.handle());
+                            assert_eq!((heads, terminals), (1, 0));
+                            assert_eq!(data.data_length(), 2);
+                            bytes += data.data_length();
+                            if let Some(release) = tail_tx.take() {
+                                release.send(()).unwrap();
+                            }
+                        }
+                        ScriptNetworkOutputItem::SubresourceBodyFinished(terminal) => {
+                            assert_eq!(terminal.handle(), request.handle());
+                            terminals += 1;
+                            match terminal.result() {
+                                SubresourceBodyFinishedResult::Ready(body) => {
+                                    assert!(resumed || matches!(action, HeldAuthAction::Fulfill));
+                                    assert_eq!(
+                                        body.clone_body_bytes(),
+                                        if resumed { b"body" } else { b"mock" }
+                                    );
+                                    assert_eq!(terminal.data_was_streamed(), resumed);
+                                }
+                                SubresourceBodyFinishedResult::FailedWithPartialBody {
+                                    partial_body,
+                                    ..
+                                } => {
+                                    assert!(matches!(
+                                        action,
+                                        HeldAuthAction::Fail | HeldAuthAction::Abort
+                                    ));
+                                    assert!(partial_body.is_empty());
+                                }
+                                other => panic!("unexpected terminal for {action:?}: {other:?}"),
+                            }
+                        }
+                        other => panic!("no repeated request admission: {other:?}"),
+                    }
+                }
+                other => panic!("unexpected output for {action:?}: {other:?}"),
+            }
+            if resumed
+                && heads == 1
+                && posts.iter().any(|post| post == "\"headers:401\"")
+                && let Some(release) = prefix_tx.take()
+            {
+                release.send(()).unwrap();
+            }
+        }
+    })
+    .await
+    .expect("decision must settle or resume before the held body is released");
+    worker.terminate_and_join();
+    assert_eq!(timeout(TIMEOUT, server).await.unwrap().unwrap(), !resumed);
+    assert_eq!(
+        (heads, bytes, terminals),
+        (1, if resumed { 4 } else { 0 }, 1)
+    );
+    assert_eq!(
+        posts,
+        if resumed {
+            vec!["\"headers:401\"", "\"body\""]
+        } else if matches!(action, HeldAuthAction::Fulfill) {
+            vec!["\"headers:202\"", "\"mock\""]
+        } else {
+            vec!["\"rejected\""]
+        }
+    );
 }
 
 #[tokio::test]

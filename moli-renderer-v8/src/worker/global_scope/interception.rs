@@ -330,15 +330,7 @@ fn cancel_worker_auth(
             pending
                 .response
                 .configure_interception(intercept_response, false);
-            let _ = state
-                .fetch_completion_tx
-                .send(WorkerFetchEvent::Completion(Box::new(
-                    WorkerRequestCompletion {
-                        id: fetch_id,
-                        network_request_headers: None,
-                        result: Ok(response),
-                    },
-                )));
+            response.resume(&state.fetch_completion_tx, fetch_id, None, None);
         }
         WorkerFetchTarget::Xhr(xhr_id) => {
             let pending = state

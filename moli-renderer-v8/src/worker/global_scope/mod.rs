@@ -1100,13 +1100,14 @@ pub(super) struct PendingWorkerFetch {
     pub(super) request_body: Option<Vec<u8>>,
     pub(super) response: Arc<ResourceResponseStream>,
     pub(super) request_override: Option<WorkerRequestOverride>,
-    pub(super) paused_response: Option<ResourceBodyResponse>,
+    pub(super) paused_response: Option<fetch::WorkerFetchPausedResponse>,
     pub(super) streaming_body_source_id: Option<NetworkBodySourceId>,
 }
 
 pub(super) enum WorkerFetchEvent {
     Completion(Box<WorkerRequestCompletion>),
     TransportCompletion(WorkerRequestDelivery),
+    AuthRequired(Box<fetch::WorkerFetchAuthResponse>),
     StreamingStarted(Box<WorkerFetchStreamingStarted>),
     StreamingChunk(WorkerFetchStreamingChunk),
     StreamingFinished(WorkerFetchStreamingFinished),
