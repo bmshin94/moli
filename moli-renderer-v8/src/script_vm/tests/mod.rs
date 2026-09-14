@@ -14159,6 +14159,49 @@ fn new_parsed_test_vm_with_loader_and_resource_completion_queue(
     (vm, resource_completion_queue)
 }
 
+#[tokio::test]
+async fn initial_document_registration_preserves_admitted_network_policy() {
+    let url = Url::parse("https://policy.test/document").unwrap();
+    let blocked = Url::parse("https://policy.test/blocked/script.js").unwrap();
+    for offline in [false, true] {
+        let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
+        loader.set_extra_http_headers(&[("x-admitted".into(), "retained".into())]);
+        loader.set_blocked_url_patterns(&["https://policy.test/blocked/*".into()]);
+        loader.set_network_offline(offline);
+        let (_vm, _queue) = new_parsed_test_vm_with_loader_and_resource_completion_queue(
+            url.as_str(),
+            "<!doctype html><title>policy</title>",
+            &loader,
+        );
+        // Initial registration runs before PageVm installs its environment.
+        // Concurrent preloads must still see the policy admitted with this loader.
+        let policy = loader.page_network_policy().snapshot();
+        assert!(
+            policy.blocks_url(&blocked),
+            "initial registration cleared the blocked URL policy"
+        );
+        assert_eq!(policy.network_offline(), offline);
+        let request = moli_fetch::Request::get(url.as_str())
+            .unwrap()
+            .with_page_network_policy();
+        match policy.apply_to_request(request) {
+            Ok(request) => {
+                assert!(!offline);
+                assert!(
+                    request
+                        .request_headers
+                        .iter()
+                        .any(|(name, value)| name == "x-admitted" && value == "retained")
+                );
+            }
+            Err(error) => {
+                assert!(offline);
+                assert_eq!(error.to_string(), "Network emulation offline");
+            }
+        }
+    }
+}
+
 #[test]
 fn cached_connected_modulepreload_never_acquires_a_load_delay() {
     let mut vm = new_parsed_test_vm(
