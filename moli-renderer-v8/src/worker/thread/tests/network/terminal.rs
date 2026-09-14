@@ -204,6 +204,143 @@ async fn accepted_response(resource_type: SubresourceResourceType, auth: bool, p
 }
 
 #[tokio::test]
+async fn worker_body_cancellation_preserves_live_clones_and_closes_the_last_consumer() {
+    use tokio::io::AsyncReadExt;
+    ensure_v8();
+    for cancel_last in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (prefix_tx, prefix_rx) = tokio::sync::oneshot::channel();
+        let (tail_tx, tail_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request_head(&mut stream).await.unwrap();
+            assert!(request.starts_with("GET /probe "));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            prefix_rx.await.unwrap();
+            stream.write_all(b"bo").await.unwrap();
+            let mut byte = [0];
+            tokio::select! {
+                result = stream.read(&mut byte) => {
+                    assert!(cancel_last, "a surviving clone must retain its transport");
+                    match result {
+                        Ok(0) => {},
+                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {},
+                        other => panic!("last consumer must close its transport: {other:?}"),
+                    }
+                }
+                result = tail_rx => {
+                    result.unwrap();
+                    assert!(!cancel_last, "cancellation must precede the held tail");
+                    stream.write_all(b"dy").await.unwrap();
+                }
+            }
+        });
+        let script = format!(
+            r#"
+            (async()=>{{
+                const response = await fetch('/probe');
+                const clone = response.clone();
+                const canceled = response.body.cancel('first');
+                postMessage('first-canceled');
+                const reader = clone.body.getReader();
+                const decoder = new TextDecoder();
+                const prefix = decoder.decode((await reader.read()).value);
+                onmessage = async()=>{{
+                    if ({cancel_last}) {{
+                        await reader.cancel('last');
+                        await canceled;
+                        postMessage('last-canceled');
+                    }} else {{
+                        let body = prefix;
+                        for (;;) {{
+                            const part = await reader.read();
+                            if (part.done) break;
+                            body += decoder.decode(part.value);
+                        }}
+                        postMessage(body);
+                    }}
+                }};
+                postMessage(prefix);
+            }})().catch(error=>postMessage(String(error)));
+        "#
+        );
+        let mut worker = spawn_worker_with_request_client(
+            script,
+            format!("{origin}/worker.js"),
+            ResourceRequestClient::new(&FetchConfig::default()).unwrap(),
+        );
+        let mut prefix_tx = Some(prefix_tx);
+        let mut tail_tx = Some(tail_tx);
+        let mut terminal = false;
+        let mut posts = Vec::new();
+        timeout(TIMEOUT, async {
+            while let Some(message) = worker.recv().await {
+                match message {
+                    WorkerToParentMessage::Post(payload) => {
+                        let value = stringify_payload(&payload);
+                        if value == "\"first-canceled\"" {
+                            prefix_tx.take().unwrap().send(()).unwrap();
+                        } else if value == "\"bo\"" {
+                            worker.post_message(serialize_test_string("finish"));
+                            if !cancel_last {
+                                tail_tx.take().unwrap().send(()).unwrap();
+                            }
+                        }
+                        posts.push(value);
+                    }
+                    WorkerToParentMessage::Network(observation) => {
+                        if let RendererNetworkOutputItem::Resource(item) = observation.item()
+                            && let ScriptNetworkOutputItem::SubresourceBodyFinished(finished) =
+                                item.as_ref()
+                        {
+                            assert!(!terminal, "only one terminal result");
+                            terminal = true;
+                            match finished.result() {
+                                SubresourceBodyFinishedResult::Ready(body) if !cancel_last => {
+                                    assert_eq!(body.clone_body_bytes(), b"body")
+                                }
+                                SubresourceBodyFinishedResult::FailedWithPartialBody {
+                                    partial_body,
+                                    ..
+                                } if cancel_last => {
+                                    assert_eq!(partial_body.clone_body_bytes(), b"bo")
+                                }
+                                other => panic!("unexpected body result: {other:?}"),
+                            }
+                        }
+                    }
+                    other => panic!("unexpected Worker result: {other:?}"),
+                }
+                if terminal && posts.len() == 3 {
+                    break;
+                }
+            }
+            assert_eq!(
+                posts,
+                [
+                    "\"first-canceled\"",
+                    "\"bo\"",
+                    if cancel_last {
+                        "\"last-canceled\""
+                    } else {
+                        "\"body\""
+                    }
+                ]
+            );
+            assert!(terminal);
+            server.await.unwrap();
+        })
+        .await
+        .expect("body cancellation must release only the last consumer's transport");
+        worker.terminate_and_join();
+    }
+}
+
+#[tokio::test]
 async fn intercepted_fetch_failure_retains_physical_head_and_prefix() {
     intercepted_failure(SubresourceResourceType::Fetch).await;
 }

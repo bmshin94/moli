@@ -2,6 +2,25 @@ use super::*;
 use crate::service_worker_runtime::ServiceWorkerFetchResultSender;
 
 impl ServiceWorkerRuntimeService {
+    pub(crate) fn attach_fetch_cancellation(
+        &self,
+        load: &crate::network::loads::ResourceLoadLease,
+        response: &Arc<crate::network::ResourceResponseStream>,
+    ) {
+        let service = self.downgrade();
+        let response = Arc::downgrade(response);
+        let runner = load.task_runner();
+        load.attach_consumer_cancel(move || {
+            // Producer Drop can run under the service lock. Return cancellation
+            // through the resource executor without retaining either owner.
+            runner.spawn(async move {
+                if let (Some(service), Some(response)) = (service.upgrade(), response.upgrade()) {
+                    service.abort_controlled_fetch(&response);
+                }
+            });
+        });
+    }
+
     pub(crate) fn abort_controlled_fetch(
         &self,
         response: &Arc<crate::network::ResourceResponseStream>,

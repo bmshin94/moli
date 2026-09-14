@@ -7256,6 +7256,7 @@ self.addEventListener("message", event => {
 
     #[test]
     fn force_update_page_load_install_reports_devtools_warning() {
+        ensure_v8_for_test();
         let service = new_service_worker_runtime_service();
         let registration_id = ServiceWorkerRegistrationId(1);
         let active_version_id = ServiceWorkerVersionId(1);
@@ -8886,6 +8887,135 @@ self.addEventListener("message", event => {
                 .as_deref(),
             Some("restart script load failed")
         );
+    }
+
+    #[tokio::test]
+    async fn controlled_fetch_lease_retirement_cancels_before_or_after_binding() {
+        use crate::network::loads::{
+            ResourceLoadDisposition, ResourceLoadKind, ResourceLoadRegistry,
+        };
+        for retired_before_binding in [false, true] {
+            let service = new_service_worker_runtime_service();
+            let version_id = ServiceWorkerVersionId(1);
+            let run = RendererServiceWorkerRunIdentity::fresh();
+            let event_id = ServiceWorkerEventId(17);
+            let document = url("https://example.test/app/page.html");
+            insert_registered_version(
+                &service,
+                ServiceWorkerRegistrationId(1),
+                version_id,
+                url("https://example.test/app/sw.js"),
+                url("https://example.test/app/"),
+                [document.clone()],
+            );
+            let client_id = client_id_for_document(&service, &document);
+            let queue = async_subresource_completion_queue();
+            let cancel = moli_fetch::FetchCancelHandle::new();
+            let registry = ResourceLoadRegistry::new(
+                crate::network::RendererResourceTaskRunner::from_current_tokio().unwrap(),
+            );
+            let load = registry
+                .register(
+                    ResourceLoadKind::Fetch,
+                    ResourceLoadDisposition::Ordinary,
+                    test_request_client(&service),
+                    Some(cancel.clone()),
+                )
+                .unwrap();
+            let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (_parent_tx, parent_rx) = tokio::sync::mpsc::unbounded_channel();
+            let handle = crate::worker::WorkerHandle::new(
+                worker_tx,
+                parent_rx,
+                std::thread::spawn(|| {}),
+                Arc::new(parking_lot::Mutex::new(None)),
+            );
+            {
+                let mut state = service.inner.state.lock();
+                let version = state.versions.get_mut(&version_id).unwrap();
+                version.run = run.clone();
+                version.running_state = ServiceWorkerVersionRunningState::Running {
+                    host: new_running_test_host_with_handle(version_id, &run, handle),
+                };
+                version.in_flight_event_count = 1;
+                let mut job = test_fetch_job(
+                    &service,
+                    1,
+                    version_id,
+                    &run,
+                    client_id,
+                    document,
+                    url("https://example.test/app/data.txt"),
+                    queue.sender(),
+                    cancel.clone(),
+                );
+                job.body_stream = Some(ServiceWorkerFetchBodyStream {
+                    body_source_id: 77,
+                    js_consumer: None,
+                });
+                state.pending_fetch_jobs.insert(event_id, job);
+            }
+            let response = test_fetch_response(&service, event_id);
+            if retired_before_binding {
+                registry.begin_detach();
+            }
+            service.attach_fetch_cancellation(&load, &response);
+            if !retired_before_binding {
+                registry.begin_detach();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let Some(crate::worker::WorkerMessage::ServiceWorkerFetchRequestSignalAbort {
+                    event_id: actual_event,
+                    reason,
+                }) = worker_rx.recv().await
+                else {
+                    panic!("retirement must abort the original request signal")
+                };
+                assert_eq!(actual_event, event_id);
+                assert!(reason.is_none());
+                let Some(crate::worker::WorkerMessage::ServiceWorkerFetchStreamCancel {
+                    event_id: actual_event,
+                    body_source_id,
+                }) = worker_rx.recv().await
+                else {
+                    panic!("retirement must cancel the admitted body reader")
+                };
+                assert_eq!(actual_event, event_id);
+                assert_eq!(body_source_id, 77);
+            })
+            .await
+            .expect("lease retirement must reach the service consumer");
+            assert!(cancel.is_cancelled());
+            assert!(service.inner.state.lock().pending_fetch_jobs.is_empty());
+            assert_eq!(
+                service.inner.state.lock().versions[&version_id].in_flight_event_count,
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn controlled_fetch_cancellation_binding_does_not_retain_its_owners() {
+        let service = new_service_worker_runtime_service();
+        let response = crate::network::ResourceResponseStream::unobserved_for_test();
+        let weak_service = service.downgrade();
+        let weak_response = Arc::downgrade(&response);
+        let load = crate::network::loads::resource_load_lease_for_test(
+            test_request_client(&service),
+            None,
+        );
+        service.attach_fetch_cancellation(&load, &response);
+        drop(service);
+        drop(response);
+        assert!(
+            weak_service.upgrade().is_none(),
+            "a live resource lease cannot retain its service owner"
+        );
+        assert!(
+            weak_response.upgrade().is_none(),
+            "the callback cannot retain the response it cancels"
+        );
+        load.finish();
     }
 
     #[test]

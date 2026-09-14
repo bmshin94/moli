@@ -255,8 +255,13 @@ fn start_worker_fetch(
             resource_task_runner: pending.load.task_runner(),
             cancel_handle: cancel,
         };
+        let load = pending.load.clone();
+        let response = pending.response.clone();
         drop(state);
         runtime.dispatch_controlled_fetch(dispatch);
+        // Bind after admission: a retirement that already canceled the lease
+        // invokes the hook immediately, with the service job now addressable.
+        runtime.attach_fetch_cancellation(&load, &response);
     } else {
         let headers = headers.to_vec();
         drop(state);
@@ -1913,6 +1918,22 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
     rv.set(promise.into());
 }
 
+impl WorkerGlobalState {
+    pub(crate) fn cancel_streaming_fetch(&mut self, body_source_id: NetworkBodySourceId) {
+        let Some(fetch_id) = self.pending_fetches.iter().find_map(|(fetch_id, pending)| {
+            (pending.streaming_body_source_id == Some(body_source_id)).then_some(*fetch_id)
+        }) else {
+            return;
+        };
+        let pending = self
+            .pending_fetches
+            .remove(&fetch_id)
+            .expect("streaming fetch selected from the same map");
+        pending.load.cancel();
+        record_worker_fetch_failure(&pending, ABORTED_ERROR_TEXT.to_owned());
+    }
+}
+
 pub(in crate::worker) fn reject_worker_fetches_for_signal(
     scope: &mut v8::PinScope<'_, '_>,
     signal_id: u32,
@@ -1940,9 +1961,6 @@ pub(in crate::worker) fn reject_worker_fetches_for_signal(
     };
     for pending in rejected {
         pending.load.cancel();
-        if let Some(runtime) = state.borrow().service_worker_runtime.clone() {
-            runtime.abort_controlled_fetch(&pending.response);
-        }
         record_worker_fetch_failure(&pending, ABORTED_ERROR_TEXT.to_owned());
         if let Some(body_source_id) = pending.streaming_body_source_id {
             let abort_reason = worker_abort_error_value(scope);

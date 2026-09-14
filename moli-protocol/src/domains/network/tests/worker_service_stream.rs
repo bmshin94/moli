@@ -29,6 +29,11 @@ async fn worker_service_stream_abort_does_not_cancel_another_worker() {
     response_stages(Case::AbortSecond).await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_service_stream_termination_closes_only_its_upstream() {
+    response_stages(Case::TerminateSecond).await;
+}
+
 #[derive(Clone, Copy)]
 enum Case {
     Network,
@@ -36,6 +41,7 @@ enum Case {
     Stream,
     Partial,
     AbortSecond,
+    TerminateSecond,
 }
 
 async fn evaluate(
@@ -62,7 +68,7 @@ async fn response_stages(case: Case) {
     let controlled = !matches!(case, Case::Network);
     let streamed = !matches!(case, Case::Network | Case::Fallback);
     let partial = matches!(case, Case::Partial);
-    let count = if matches!(case, Case::AbortSecond) {
+    let count = if matches!(case, Case::AbortSecond | Case::TerminateSecond) {
         2
     } else {
         1
@@ -79,6 +85,7 @@ async fn response_stages(case: Case) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (wire_tx, mut wire_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel();
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
@@ -94,6 +101,7 @@ async fn response_stages(case: Case) {
             };
             let gates = gates.clone();
             let wire_tx = wire_tx.clone();
+            let closed_tx = closed_tx.clone();
             connections.spawn(async move {
                 let mut bytes = Vec::new();
                 while !bytes.ends_with(b"\r\n\r\n") {
@@ -121,7 +129,19 @@ async fn response_stages(case: Case) {
                         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
                         if prefix.await.is_err() { return; }
                         socket.write_all(b"bo").await.unwrap();
-                        if tail.await.is_err() { return; }
+                        let mut peer_byte = [0];
+                        tokio::select! {
+                            result = socket.read(&mut peer_byte) => {
+                                match result {
+                                    Ok(0) => {},
+                                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {},
+                                    other => panic!("unexpected client data while body is gated: {other:?}"),
+                                }
+                                closed_tx.send(client).unwrap();
+                                return;
+                            },
+                            result = tail => if result.is_err() { return; },
+                        }
                         if !partial { socket.write_all(b"dy").await.unwrap(); }
                         return;
                     }
@@ -255,7 +275,29 @@ async fn response_stages(case: Case) {
             true
         );
     }
+    if matches!(case, Case::TerminateSecond) {
+        assert_eq!(
+            evaluate(&mut ctx, 30, "SID-1", "runs[1].worker.terminate();true").await,
+            true
+        );
+        wait_until_scheduler_message(&mut ctx, "terminated Worker detach", |m| {
+            m["sessionId"] == "SID-1"
+                && m["method"] == "Target.detachedFromTarget"
+                && m["params"]["sessionId"] == workers[1].0
+        })
+        .await;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), closed_rx.recv())
+                .await
+                .expect("Worker termination must close its physical upstream before body release"),
+            Some(1)
+        );
+    }
     for (client, (session, id, tail)) in workers.into_iter().enumerate() {
+        if matches!(case, Case::TerminateSecond) && client == 1 {
+            drop(tail);
+            continue;
+        }
         let aborted = matches!(case, Case::AbortSecond) && client == 1;
         if aborted {
             drop(tail);
