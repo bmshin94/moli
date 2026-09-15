@@ -18,7 +18,7 @@ pub use devtools_runtime::*;
 
 pub use conn::{
     AgentHostDispatchResult, BackgroundCommandResponsePayload, BackgroundProtocolEvent,
-    CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition, CdpRendererCommandReplacement,
+    CdpConnection, CdpInitialStoragePartition, CdpRendererCommandReplacement,
     CdpRendererCommandReplayDispatch, CdpRendererOwnerTurnOutcome, CdpSchedulerEvent,
     CdpTargetHostLifecycleDelta, CdpTargetHostLifecycleObserver, CdpTurnOutcome,
     CommandDispatchContext, CommandResponseFlushContext, CommandResponseFlushPermit,

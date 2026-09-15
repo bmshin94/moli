@@ -4,6 +4,10 @@
 //! owner/page handles, the native bridge, script and module execution, Web API
 //! bootstrap, and the renderer-side `ResourceRequestClient` wrapper used by the facade crate.
 
+// Release codegen checks Send/Sync through the resource, output-fence and task
+// queue types; that finite ownership graph exceeds rustc's default depth of 128.
+#![recursion_limit = "256"]
+
 #[path = "planning.rs"]
 mod script_planning;
 mod stylesheet_blocking;

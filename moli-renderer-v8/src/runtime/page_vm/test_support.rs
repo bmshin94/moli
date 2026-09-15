@@ -195,15 +195,10 @@ impl PageVmTaskExecutorTestHarness {
             .await
     }
 
-    pub(crate) fn next_resource_completion_is_native_network(&self) -> bool {
-        matches!(self.page_resource_completion_source.next_ready_owner().map(|owner| owner.local_owner()),
-            Some(crate::page_resource_completion::RendererPageResourceCompletionLocalOwner::AsyncSubresource(
-                crate::types::AsyncSubresourceFetchEventTarget::NativeNetwork
-            )))
-    }
-
     /// Execute one exact Networking resource terminal through the production
     /// selected-task dispatcher and its unique task-end coordinator.
+    /// Preceding native progress receipts run through the same dispatcher but
+    /// do not count as a resource callback.
     ///
     /// Tests that only inspect the resource owner's body effect may use
     /// `apply_one_page_resource_terminal_owner_admission`. Complete Page
@@ -212,11 +207,25 @@ impl PageVmTaskExecutorTestHarness {
     pub(crate) async fn run_one_page_resource_completion_selected_task_executor_turn(
         &mut self,
     ) -> anyhow::Result<bool> {
-        self.selected_task_local_set
-            .run_until(self.page_vm.run_exact_selected_page_task_for_test(
-                PageSelectedTaskTestSelector::ResourceCompletion,
-            ))
-            .await
+        while let Some(owner) = self.page_resource_completion_source.next_ready_owner() {
+            // This harness is the sole consumer. Once a FIFO head exists,
+            // arrivals can only append behind the task we are about to run.
+            assert!(
+                self.selected_task_local_set
+                    .run_until(self.page_vm.run_exact_selected_page_task_for_test(
+                        PageSelectedTaskTestSelector::ResourceCompletion,
+                    ))
+                    .await?,
+                "the observed resource task must remain available to its owner"
+            );
+            if !matches!(owner.local_owner(),
+                crate::page_resource_completion::RendererPageResourceCompletionLocalOwner::AsyncSubresource(
+                    crate::types::AsyncSubresourceFetchEventTarget::NativeNetwork))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Advance Page timers only through the production selected-task

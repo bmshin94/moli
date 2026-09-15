@@ -2270,19 +2270,6 @@ impl BrowserContextHandle {
 
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
-    pub fn document_renderer_devtools_agent_token_for_test(
-        &self,
-        document: super::DocumentHandle,
-    ) -> Option<crate::page::RendererDevToolsAgentToken> {
-        self.read_live(move |context| {
-            context
-                .page_for_test(document)
-                .map(crate::page::Page::renderer_devtools_agent_token)
-        })
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
     pub fn document_response_status_for_test(
         &self,
         document: super::DocumentHandle,

@@ -5044,7 +5044,6 @@ async fn wait_for_one_page_resource_completion_selected_task_executor_test_turn(
 ) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let native = page.next_resource_completion_is_native_network();
         if page
             .run_one_page_resource_completion_selected_task_executor_turn()
             .await
@@ -5052,9 +5051,6 @@ async fn wait_for_one_page_resource_completion_selected_task_executor_test_turn(
                 panic!("{context}: selected resource completion task failed: {error:#}")
             })
         {
-            if native {
-                continue;
-            }
             return;
         }
         let arrived = tokio::time::timeout_at(deadline, page.wait_for_task_executor_work_arrival())
@@ -7308,7 +7304,7 @@ async fn child_lifecycle_queues_only_the_ready_sibling_for_host_load() {
 
 #[tokio::test]
 async fn child_external_classic_script_load_executes_as_frame_script_job() {
-    let (script_url, request_path_rx, server) =
+    let (script_url, request_path_rx, release_response, server) =
         spawn_child_external_classic_frame_script_job_server().await;
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm_with_loader(
@@ -7363,6 +7359,22 @@ async fn child_external_classic_script_load_executes_as_frame_script_job() {
         "pending external classic script must block later inline script and child load"
     );
 
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), request_path_rx)
+            .await
+            .expect("child script request should reach the server before its response is released")
+            .expect("child external classic server should report request path"),
+        "/child-classic.js"
+    );
+    assert!(
+        !vm.run_one_page_resource_completion_selected_task_executor_turn()
+            .await
+            .expect("native request progress should use the selected-task dispatcher"),
+        "the request-start receipt must not be mistaken for the script completion"
+    );
+    release_response
+        .send(())
+        .expect("release child script response");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
         "child external classic completion",
@@ -7422,12 +7434,6 @@ async fn child_external_classic_script_load_executes_as_frame_script_job() {
     )
     .await;
 
-    assert_eq!(
-        request_path_rx
-            .await
-            .expect("child external classic server should report request path"),
-        "/child-classic.js"
-    );
     server
         .await
         .expect("child external classic test server should finish");
@@ -9387,6 +9393,7 @@ async fn child_inline_classic_throw_reports_to_child_window_and_continues() {
 async fn spawn_child_external_classic_frame_script_job_server() -> (
     String,
     tokio::sync::oneshot::Receiver<String>,
+    tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -9396,6 +9403,7 @@ async fn spawn_child_external_classic_frame_script_job_server() -> (
         .local_addr()
         .expect("child external classic frame job server addr");
     let (path_tx, path_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -9416,6 +9424,9 @@ async fn spawn_child_external_classic_frame_script_job_server() -> (
             .unwrap_or("")
             .to_owned();
         let _ = path_tx.send(request_path);
+        release_rx
+            .await
+            .expect("child script response must be released");
         let body = r#"parent.__childExternalClassicJobEvents.push("external:" + (globalThis === self));
 parent.__childExternalClassicJobEvents.push("external-current:" + document.currentScript.id);
 document.write("<span id='external-write'>written</span>");
@@ -9437,7 +9448,12 @@ globalThis.__childExternalClassicValue = 73;"#;
             .await
             .expect("write child external classic frame job response");
     });
-    (format!("http://{addr}/child-classic.js"), path_rx, server)
+    (
+        format!("http://{addr}/child-classic.js"),
+        path_rx,
+        release_tx,
+        server,
+    )
 }
 
 async fn spawn_gated_media_resource_server(

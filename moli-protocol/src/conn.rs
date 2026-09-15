@@ -134,10 +134,11 @@ pub(crate) use cookie_owner::{
 };
 pub use devtools_command::DevToolsCommandDispatchOutcome;
 pub(crate) use devtools_command::DevToolsCommandExecutionOutput;
+#[cfg(test)]
+pub(crate) use dispatch::CdpCommandTaskStep;
 pub use dispatch::{
-    AgentHostDispatchResult, CdpCommandTaskStep, CompletedCdpCommandDispatch,
-    PendingCdpCommandDispatch, RendererDispatch, RendererDispatchBinding, RendererDispatchLane,
-    RendererPageDispatchBinding,
+    AgentHostDispatchResult, CompletedCdpCommandDispatch, PendingCdpCommandDispatch,
+    RendererDispatch, RendererDispatchBinding, RendererDispatchLane, RendererPageDispatchBinding,
 };
 pub(crate) use fetch_support::{
     ClaimedFetchNavigation, ClaimedFetchResponseNavigation, ClaimedSubresourceContinueRequest,
@@ -1065,8 +1066,7 @@ pub struct CdpConnection {
     scheduler_hooks: CdpSchedulerHooks,
     target_host_lifecycle_observer: Option<CdpTargetHostLifecycleObserver>,
 
-    // Scheduler-visible queues that are still stored on the connection while
-    // source-specific queue ownership is being migrated outward.
+    // Connection-local protocol work consumed by the shared DevTools scheduler.
     scheduler_state: CdpConnectionSchedulerState,
 
     // Defaults only. Live engines belong to Core WebContents, never DevTools.
