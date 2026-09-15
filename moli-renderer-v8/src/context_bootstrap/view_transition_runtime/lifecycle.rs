@@ -301,10 +301,7 @@ pub(crate) fn run_view_transition_update_callback<'s>(
             |scope, callback, receiver, arguments| {
                 let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
                 let mut scope = try_catch.init();
-                let result = crate::script_execution::run(&mut scope, |scope| {
-                    callback.call(scope, receiver, arguments)
-                })
-                .ok_or_else(|| {
+                let result = callback.call(&scope, receiver, arguments).ok_or_else(|| {
                     ViewTransitionUpdateInvocationFailure::CallbackThrew(
                         scope
                             .exception()

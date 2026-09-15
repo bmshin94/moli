@@ -160,9 +160,7 @@ fn invoke_and_convert_policy_callback<'s>(
     arguments: &[v8::Local<'s, v8::Value>],
     kind: TrustedTypeKind,
 ) -> Result<Option<String>, ()> {
-    let result =
-        crate::script_execution::run(scope, |scope| callback.call(scope, receiver, arguments))
-            .ok_or(())?;
+    let result = callback.call(scope, receiver, arguments).ok_or(())?;
     if result.is_null() || result.is_undefined() {
         return Ok(None);
     }

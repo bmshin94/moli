@@ -32,7 +32,8 @@ pub(crate) fn invoke_synchronous_webidl_callback_function<'s>(
         receiver,
         arguments,
         |scope, callback, receiver, arguments| {
-            crate::script_execution::run(scope, |scope| callback.call(scope, receiver, arguments))
+            callback
+                .call(scope, receiver, arguments)
                 .map(|value| v8::Global::new(scope, value))
                 .ok_or(())
         },
@@ -79,33 +80,31 @@ pub(crate) fn invoke_synchronous_webidl_callback_interface<'s, R>(
     let mut scope = try_catch.init();
     let result =
         with_webidl_callback_contexts(&mut scope, relevant_context, incumbent_context, |scope| {
-            crate::script_execution::run(scope, |scope| {
-                let callback_object = callback.callback(scope);
-                invoke_webidl_callback(
-                    scope,
-                    WebIdlCallbackInvocation::new(
-                        callback_object,
-                        callback_this,
-                        callback.callable_at_conversion(),
-                        operation_name,
-                        arguments,
-                    ),
-                    |scope, callback, receiver, arguments| {
-                        let value = callback
-                            .call(scope, receiver, arguments)
-                            .ok_or(Failure::Pending)?;
-                        convert_return(scope, value).ok_or(Failure::Pending)
-                    },
-                    |scope, failure| {
-                        Failure::Captured(Box::new(build_event_handler_exception_report(
-                            scope,
-                            failure.exception(),
-                            failure.message(),
-                            failure.stack_trace(),
-                        )))
-                    },
-                )
-            })
+            let callback_object = callback.callback(scope);
+            invoke_webidl_callback(
+                scope,
+                WebIdlCallbackInvocation::new(
+                    callback_object,
+                    callback_this,
+                    callback.callable_at_conversion(),
+                    operation_name,
+                    arguments,
+                ),
+                |scope, callback, receiver, arguments| {
+                    let value = callback
+                        .call(scope, receiver, arguments)
+                        .ok_or(Failure::Pending)?;
+                    convert_return(scope, value).ok_or(Failure::Pending)
+                },
+                |scope, failure| {
+                    Failure::Captured(Box::new(build_event_handler_exception_report(
+                        scope,
+                        failure.exception(),
+                        failure.message(),
+                        failure.stack_trace(),
+                    )))
+                },
+            )
         });
 
     match result {
@@ -208,9 +207,9 @@ impl CallbackInvoker {
             invocation.relevant_context,
             invocation.incumbent_context,
             |scope| {
-                crate::script_execution::run(scope, |scope| {
-                    let relevant_context = invocation.relevant_context;
-                    let previous_window_event = invocation
+                let relevant_context = invocation.relevant_context;
+                let previous_window_event =
+                    invocation
                         .host_ptr
                         .and(invocation.current_event)
                         .map(|event| {
@@ -223,45 +222,44 @@ impl CallbackInvoker {
                             previous
                         });
 
-                    let webidl_invocation = WebIdlCallbackInvocation::new(
-                        invocation.callback,
-                        invocation.callback_this,
-                        invocation.is_callable,
-                        invocation.operation_name,
-                        invocation.arguments,
-                    );
-                    let result = invoke_webidl_callback(
-                        scope,
-                        webidl_invocation,
-                        |scope, callback, receiver, arguments| {
-                            invoke_callback_with_report(
-                                scope,
-                                callback_kind,
-                                log_label,
-                                log_level,
-                                callback_name,
-                                callback,
-                                receiver,
-                                arguments,
-                            )
-                        },
-                        |scope, failure| {
-                            capture_callback_resolution_failure(
-                                scope,
-                                log_label,
-                                log_level,
-                                callback_name,
-                                failure,
-                            )
-                        },
-                    );
+                let webidl_invocation = WebIdlCallbackInvocation::new(
+                    invocation.callback,
+                    invocation.callback_this,
+                    invocation.is_callable,
+                    invocation.operation_name,
+                    invocation.arguments,
+                );
+                let result = invoke_webidl_callback(
+                    scope,
+                    webidl_invocation,
+                    |scope, callback, receiver, arguments| {
+                        invoke_callback_with_report(
+                            scope,
+                            callback_kind,
+                            log_label,
+                            log_level,
+                            callback_name,
+                            callback,
+                            receiver,
+                            arguments,
+                        )
+                    },
+                    |scope, failure| {
+                        capture_callback_resolution_failure(
+                            scope,
+                            log_label,
+                            log_level,
+                            callback_name,
+                            failure,
+                        )
+                    },
+                );
 
-                    if let Some(previous) = previous_window_event {
-                        let global = relevant_context.global(scope);
-                        let _ = global.set(scope, v8str(scope, WINDOW_EVENT_SLOT).into(), previous);
-                    }
-                    result
-                })
+                if let Some(previous) = previous_window_event {
+                    let global = relevant_context.global(scope);
+                    let _ = global.set(scope, v8str(scope, WINDOW_EVENT_SLOT).into(), previous);
+                }
+                result
             },
         );
 

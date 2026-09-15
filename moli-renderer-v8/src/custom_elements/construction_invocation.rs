@@ -19,7 +19,7 @@ pub(super) fn invoke_custom_element_constructor(
         let mut scope = try_catch.init();
         let created = {
             let _reaction = enter_custom_element_reaction(host_ptr);
-            crate::script_execution::run(&mut scope, |scope| constructor.new_instance(scope, &[]))
+            crate::script_execution::construct(&mut scope, constructor, &[])
         };
         match created {
             Some(object) => {

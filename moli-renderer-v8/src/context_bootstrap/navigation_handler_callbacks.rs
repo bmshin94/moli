@@ -188,9 +188,7 @@ fn invoke_navigation_handler<'s>(
         |scope, callback, receiver, arguments| {
             let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
             let mut scope = try_catch.init();
-            match crate::script_execution::run(&mut scope, |scope| {
-                callback.call(scope, receiver, arguments)
-            }) {
+            match callback.call(&scope, receiver, arguments) {
                 Some(result) => {
                     let current_context = scope.get_current_context();
                     if let Ok(promise) = v8::Local::<v8::Promise>::try_from(result)
