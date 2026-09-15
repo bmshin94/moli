@@ -31,7 +31,11 @@ pub(super) fn upgrade_existing_custom_element_with_constructor<'s>(
         .custom_elements_mut_for_node_handle(handle)
         .begin_construction(scope, constructor, wrapper, handle);
     let _dynamic_markup = enter_upgrade_dynamic_markup_insertion(host_ptr, handle);
-    match invoke_custom_element_constructor(scope, host_ptr, constructor) {
+    let invocation = invoke_custom_element_constructor(scope, host_ptr, constructor);
+    let consumed_pending_wrapper = unsafe { &*host_ptr }
+        .custom_elements_for_node_handle(handle)
+        .is_some_and(|store| store.pending_construction_is_already_constructed(handle));
+    match invocation {
         CustomElementConstructorInvocation::Created(created) => {
             let created = v8::Local::new(scope, &created);
             if !validate_existing_custom_element_upgrade_result(wrapper, created) {
@@ -45,7 +49,9 @@ pub(super) fn upgrade_existing_custom_element_with_constructor<'s>(
                     ),
                     failure_prototype,
                 );
-                finalize_wrapper_custom_element_prototype(scope, wrapper, constructor);
+                if consumed_pending_wrapper {
+                    finalize_wrapper_custom_element_prototype(scope, wrapper, constructor);
+                }
                 return true;
             }
             finalize_wrapper_custom_element_prototype(scope, wrapper, constructor);
@@ -53,10 +59,13 @@ pub(super) fn upgrade_existing_custom_element_with_constructor<'s>(
             true
         }
         CustomElementConstructorInvocation::Exception(exception) => {
-            finalize_wrapper_custom_element_prototype(scope, wrapper, constructor);
-            if let Some(canonical) = unsafe { &mut *host_ptr }
-                .native_bridge_mut()
-                .wrap_handle(scope, host_ptr, handle)
+            if consumed_pending_wrapper {
+                finalize_wrapper_custom_element_prototype(scope, wrapper, constructor);
+            }
+            if consumed_pending_wrapper
+                && let Some(canonical) = unsafe { &mut *host_ptr }
+                    .native_bridge_mut()
+                    .wrap_handle(scope, host_ptr, handle)
             {
                 if canonical.strict_equals(wrapper.into()) {
                     synchronize_custom_element_prototype_between_wrappers(
@@ -90,7 +99,9 @@ pub(super) fn upgrade_existing_custom_element_with_constructor<'s>(
                 ConstructionFailure::Exception(exception),
                 failure_prototype,
             );
-            finalize_wrapper_custom_element_prototype(scope, wrapper, constructor);
+            if consumed_pending_wrapper {
+                finalize_wrapper_custom_element_prototype(scope, wrapper, constructor);
+            }
             true
         }
         CustomElementConstructorInvocation::Empty => {

@@ -6890,6 +6890,58 @@ fn custom_element_constructor_error_reports_to_definition_window() {
 }
 
 #[test]
+fn failed_existing_upgrade_before_super_keeps_original_prototype() {
+    let mut vm = new_storage_test_vm("https://ce-before-super.test/");
+    let result = vm.eval(r#"
+        (() => {
+          window.addEventListener("error", event => event.preventDefault());
+          const html = document.documentElement || document.appendChild(document.createElement("html"));
+          const body = document.body || html.appendChild(document.createElement("body"));
+          const frame = body.appendChild(document.createElement("iframe"));
+          const results = [];
+          for (const [realm, w] of [["main", window], ["child", frame.contentWindow]]) {
+            for (const failure of ["throw", "return-object"]) {
+              const doc = w.document;
+              const name = `before-super-${failure}`;
+              const element = doc.createElement(name);
+              element.setAttribute("data-value", "before");
+              (doc.body || doc.documentElement || doc).appendChild(element);
+              const original = Object.getPrototypeOf(element);
+              const log = [];
+              class FailedBeforeSuper extends w.HTMLElement {
+                constructor() {
+                  log.push("constructor");
+                  if (failure === "throw") throw new Error("before super");
+                  return {};
+                }
+                static get observedAttributes() { return ["data-value"]; }
+                attributeChangedCallback() { log.push("attribute"); }
+                connectedCallback() { log.push("connected"); }
+              }
+              w.customElements.define(name, FailedBeforeSuper);
+              results.push({realm, failure,
+                unchanged: Object.getPrototypeOf(element) === original,
+                custom: element instanceof FailedBeforeSuper, log});
+            }
+          }
+          return JSON.stringify(results);
+        })()
+    "#).expect("failed upgrades before super should report their original prototypes");
+    let results: serde_json::Value = serde_json::from_str(&result).expect("upgrade results");
+    let results = results.as_array().expect("four upgrade cases");
+    assert_eq!(results.len(), 4);
+    for result in results {
+        assert_eq!(result["unchanged"], true, "{result}");
+        assert_eq!(result["custom"], false, "{result}");
+        assert_eq!(
+            result["log"],
+            serde_json::json!(["constructor"]),
+            "{result}"
+        );
+    }
+}
+
+#[test]
 fn failed_existing_upgrade_preserves_definition_prototype_and_clears_reactions() {
     let mut vm = new_storage_test_vm("https://ce-failed-upgrade.test/");
 
