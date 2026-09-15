@@ -4239,9 +4239,9 @@ fn selection_to_string_uses_rendered_native_range_projection() {
   rangeFromElementEnd.setEnd(table.querySelector("#right").firstChild, 4);
 
   const basic = document.createElement("div");
-  basic.innerHTML = "a<span style='user-select: none;'>b</span>c";
+  basic.innerHTML = "\n  a<span style='user-select: none;'>b</span>c\n";
   const nested = document.createElement("div");
-  nested.innerHTML = "start <span style='user-select: none;'>unselectable <strong>nested</strong> text</span> end";
+  nested.innerHTML = "\n  start <span style='user-select: none;'>unselectable <strong>nested</strong> text</span> end\n";
   const container = document.createElement("div");
   container.style.userSelect = "none";
   container.innerHTML = "<span style='user-select: text;'>selectable</span> unselectable <span style='user-select: text;'>text</span>";

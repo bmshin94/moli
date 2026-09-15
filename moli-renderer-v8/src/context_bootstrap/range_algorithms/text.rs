@@ -499,7 +499,7 @@ fn append_rendered_text_node(out: &mut String, text: &str) {
         out.push(' ');
     }
     out.push_str(&body);
-    if trailing.chars().any(char::is_whitespace) {
+    if trailing.chars().any(char::is_whitespace) && !trailing.contains('\n') {
         out.push(' ');
     }
 }
