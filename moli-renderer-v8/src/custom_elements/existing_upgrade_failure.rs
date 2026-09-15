@@ -36,7 +36,7 @@ pub(super) fn fail_existing_custom_element_construction<'s>(
     if let Some(wrapper) = wrapper {
         match failure_prototype {
             FailedExistingConstructionPrototype::ResetToUnknown => {
-                set_wrapper_failed_custom_element_prototype(scope, wrapper);
+                set_wrapper_failed_custom_element_prototype(scope, host_ptr, handle, wrapper);
             }
             FailedExistingConstructionPrototype::PreserveCurrent => {}
         }
@@ -46,12 +46,23 @@ pub(super) fn fail_existing_custom_element_construction<'s>(
 
 fn set_wrapper_failed_custom_element_prototype<'s>(
     scope: &mut v8::PinScope<'s, '_>,
+    host_ptr: *mut JsContextHost,
+    handle: DomHandle,
     wrapper: v8::Local<'s, v8::Object>,
 ) {
-    let Some(prototype) = global_constructor_prototype(scope, "HTMLUnknownElement") else {
+    let host = unsafe { &mut *host_ptr };
+    let child = host
+        .dom_host()
+        .owner_document_handle(handle)
+        .and_then(|document| host.child_browsing_context_host_for_document_handle(document));
+    let prototype = child
+        .and_then(|child| {
+            host.child_browsing_context_constructor_prototype(scope, child, "HTMLUnknownElement")
+        })
+        .or_else(|| global_constructor_prototype(scope, "HTMLUnknownElement").map(Into::into));
+    let Some(prototype) = prototype else {
         return;
     };
-    let prototype = prototype.into();
     let _ = wrapper.set_prototype(scope, prototype);
     if let Some(foreign) = get_private_object(scope, wrapper, DOM_PARSER_FOREIGN_NODE_SLOT) {
         let _ = foreign.set_prototype(scope, prototype);

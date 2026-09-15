@@ -2209,6 +2209,28 @@ impl JsContextHost {
             .is_some_and(|store| store.is_upgraded_handle(handle))
     }
 
+    pub(crate) fn custom_element_handle_preserves_wrapper_prototype(
+        &self,
+        handle: DomHandle,
+    ) -> bool {
+        let Some(element) = self
+            .dom_host()
+            .node(handle)
+            .and_then(|node| node.as_element())
+        else {
+            return false;
+        };
+        if element.custom_element_state() == crate::dom::native::CustomElementState::Uncustomized {
+            return false;
+        }
+        self.custom_elements_for_node_handle(handle)
+            .is_some_and(|store| {
+                store.is_upgraded_handle(handle)
+                    || store.is_pending_construction_handle(handle)
+                    || store.is_failed_construction_handle(handle)
+            })
+    }
+
     pub(crate) fn custom_elements_mut_for_node_handle(
         &mut self,
         handle: DomHandle,

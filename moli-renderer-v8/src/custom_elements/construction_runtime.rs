@@ -4,9 +4,7 @@ use super::construction_invocation::{
     CustomElementConstructorInvocation, invoke_custom_element_constructor,
 };
 use super::construction_result::{
-    finalize_wrapper_custom_element_prototype,
-    synchronize_custom_element_prototype_between_wrappers,
-    validate_custom_element_construction_result,
+    synchronize_custom_element_prototype_for_handle, validate_custom_element_construction_result,
 };
 use super::element_state::{
     create_element_with_owner_document, set_dom_custom_element_is_name,
@@ -80,23 +78,7 @@ pub(super) fn create_custom_element_for_registry_key<'s>(
             if let Some(prefix) = post_construction_prefix {
                 set_dom_element_prefix(host_ptr, handle, Some(prefix.to_owned()));
             }
-            finalize_wrapper_custom_element_prototype(scope, created, constructor);
-            if let Some(canonical) = unsafe { &mut *host_ptr }
-                .native_bridge_mut()
-                .wrap_handle(scope, host_ptr, handle)
-            {
-                if canonical.strict_equals(created.into()) {
-                    synchronize_custom_element_prototype_between_wrappers(
-                        scope, created, canonical,
-                    );
-                } else {
-                    super::construction_result::set_wrapper_custom_element_constructor_prototype(
-                        scope,
-                        canonical,
-                        constructor,
-                    );
-                }
-            }
+            synchronize_custom_element_prototype_for_handle(scope, host_ptr, handle, created);
             unsafe { &mut *host_ptr }
                 .custom_elements_mut_for_registry_key(registry_key)
                 .mark_upgraded_handle(handle, definition_name);
@@ -104,18 +86,6 @@ pub(super) fn create_custom_element_for_registry_key<'s>(
             unsafe { &mut *host_ptr }
                 .custom_elements_mut_for_registry_key(registry_key)
                 .finish_construction(handle);
-            finalize_wrapper_custom_element_prototype(scope, created, constructor);
-            if let Some(canonical) = unsafe { &mut *host_ptr }
-                .native_bridge_mut()
-                .wrap_handle(scope, host_ptr, handle)
-                && !canonical.strict_equals(created.into())
-            {
-                super::construction_result::set_wrapper_custom_element_constructor_prototype(
-                    scope,
-                    canonical,
-                    constructor,
-                );
-            }
             dispatch_form_association_callback_if_needed(scope, host_ptr, handle);
             dispatch_form_disabled_callback_if_needed(scope, host_ptr, handle);
             Some(created)

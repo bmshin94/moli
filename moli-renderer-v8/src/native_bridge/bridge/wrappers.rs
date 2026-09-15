@@ -51,7 +51,16 @@ impl NativeDomBridge {
     ) -> Option<v8::Local<'s, v8::Object>> {
         let reflector_id = self.identity.reflector_id(&handle);
         if let Some(wrapper) = self.identity.cached_wrapper(scope, reflector_id) {
-            if !matches!(&handle, BridgeHandle::Window) {
+            // Once custom element construction starts, preserve the prototype
+            // chosen by JavaScript, including when an upgrade fails.
+            let preserve_prototype = match &handle {
+                BridgeHandle::Window => true,
+                BridgeHandle::Node(handle) => {
+                    unsafe { &*host_ptr }.custom_element_handle_preserves_wrapper_prototype(*handle)
+                }
+                _ => false,
+            };
+            if !preserve_prototype {
                 self.bindings
                     .sync_wrapper_owner_realm_prototype(scope, host_ptr, &handle, wrapper);
             }

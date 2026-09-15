@@ -1472,6 +1472,123 @@ fn child_custom_elements_upgrade_accepts_child_document_node_root() {
 }
 
 #[test]
+fn custom_element_constructor_selected_prototypes_survive_wrapper_lookup() {
+    let mut vm = new_storage_test_vm("https://ce-selected-prototypes.test/");
+    let result = vm.eval(r#"
+        (() => {
+          window.addEventListener("error", event => event.preventDefault());
+          const html = document.documentElement || document.appendChild(document.createElement("html"));
+          const body = document.body || html.appendChild(document.createElement("body"));
+          const frame = body.appendChild(document.createElement("iframe"));
+          const failures = [];
+          let cases = 0;
+          for (const [realm, w] of [["main", window], ["child", frame.contentWindow]]) {
+            const doc = w.document;
+            const root = doc.body || doc.documentElement || doc;
+            for (const mode of ["create", "upgrade", "failed-upgrade"]) {
+              for (const kind of ["null", "object", "inherited", "base", "same-name", "html-name", "getter"]) {
+                const name = `selected-${mode}-${kind}`;
+                let selected;
+                let constructorReads = 0;
+                let sameDuring = false;
+                let prototypeDuring = false;
+                const callbacks = [];
+                class SelectedElement extends w.HTMLElement {
+                  constructor() {
+                    super();
+                    Object.setPrototypeOf(this, selected);
+                    const lookedUp = mode === "create" ? doc.adoptNode(this) : doc.querySelector(name);
+                    sameDuring = lookedUp === this;
+                    prototypeDuring = Object.getPrototypeOf(lookedUp) === selected;
+                    if (mode === "failed-upgrade") throw new Error("after super");
+                  }
+                  connectedCallback() { callbacks.push(Object.getPrototypeOf(this) === selected); }
+                }
+                switch (kind) {
+                  case "null": selected = null; break;
+                  case "object": selected = {}; break;
+                  case "inherited": selected = Object.create(SelectedElement.prototype); break;
+                  case "base": selected = w.HTMLElement.prototype; break;
+                  case "same-name": selected = (class SelectedElement extends w.HTMLElement {}).prototype; break;
+                  case "html-name": selected = (class HTMLReplacementElement extends w.HTMLElement {}).prototype; break;
+                  case "getter":
+                    selected = Object.create(w.HTMLElement.prototype);
+                    Object.defineProperty(selected, "constructor", {get() {
+                      constructorReads++;
+                      throw new Error("prototype.constructor must not be read");
+                    }});
+                    break;
+                }
+                let element;
+                if (mode !== "create") {
+                  element = doc.createElement(name);
+                  root.appendChild(element);
+                }
+                w.customElements.define(name, SelectedElement);
+                if (mode === "create") {
+                  element = doc.createElement(name);
+                  root.appendChild(element);
+                }
+                const lookedUp = doc.querySelector(name);
+                const after = Object.getPrototypeOf(element) === selected;
+                const afterLookup = Object.getPrototypeOf(lookedUp) === selected;
+                const sameAfter = lookedUp === element;
+                const callbacksCorrect = JSON.stringify(callbacks) ===
+                    (mode === "failed-upgrade" ? "[]" : "[true]");
+                if (!sameDuring || !prototypeDuring || !after || !afterLookup || !sameAfter ||
+                    constructorReads !== 0 || !callbacksCorrect) {
+                  failures.push({realm, mode, kind, sameDuring, prototypeDuring, after, afterLookup,
+                                 sameAfter, constructorReads, callbacks});
+                }
+                cases++;
+              }
+            }
+          }
+          return JSON.stringify({cases, failures});
+        })()
+    "#).expect("constructor-selected prototypes should remain observable");
+    assert_eq!(result, r#"{"cases":42,"failures":[]}"#);
+}
+
+#[test]
+fn child_failed_custom_element_creation_preserves_original_and_fallback_prototypes() {
+    let mut vm = new_storage_test_vm("https://ce-fallback-prototype.test/");
+    let result = vm
+        .eval(
+            r#"
+        (() => {
+          window.addEventListener("error", event => event.preventDefault());
+          const html = document.documentElement || document.appendChild(document.createElement("html"));
+          const body = document.body || html.appendChild(document.createElement("body"));
+          const frame = body.appendChild(document.createElement("iframe"));
+          const w = frame.contentWindow;
+          let constructed;
+          class InvalidElement extends w.HTMLElement {
+            constructor() {
+              super();
+              constructed = this;
+              this.setAttribute("invalid", "yes");
+              Object.setPrototypeOf(this, null);
+            }
+          }
+          w.customElements.define("invalid-created-element", InvalidElement);
+          const element = w.document.createElement("invalid-created-element");
+          (w.document.body || w.document.documentElement).appendChild(element);
+          const lookedUp = w.document.querySelector("invalid-created-element");
+          const original = w.document.adoptNode(constructed);
+          return [element instanceof w.HTMLUnknownElement,
+                  Object.getPrototypeOf(element) === w.HTMLUnknownElement.prototype,
+                  element instanceof InvalidElement, element.hasAttribute("invalid"),
+                  lookedUp === element, element !== constructed, original === constructed,
+                  Object.getPrototypeOf(original) === null].join(":");
+        })()
+    "#,
+        )
+        .expect("failed construction should preserve the original and initialize its fallback");
+    assert_eq!(result, "true:true:false:false:true:true:true:true");
+}
+
+#[test]
 fn existing_upgrade_preserves_prototype_selected_by_wrapping_constructor() {
     let mut vm = new_storage_test_vm("https://example.com/");
 
