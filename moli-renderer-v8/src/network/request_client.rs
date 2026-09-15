@@ -277,31 +277,6 @@ impl ResourceRequestClient {
             .await
     }
 
-    pub(crate) async fn fetch_text_stream_with_network_metadata(
-        &self,
-        request: Request,
-    ) -> Result<NetworkFetchResult<Response>> {
-        self.fetch_text_stream_with_cancel_and_network_metadata(request, FetchCancelHandle::new())
-            .await
-    }
-
-    pub(crate) async fn fetch_text_stream_with_cancel_and_network_metadata(
-        &self,
-        request: Request,
-        cancel_handle: FetchCancelHandle,
-    ) -> Result<NetworkFetchResult<Response>> {
-        let request = self.apply_network_policy(request)?;
-        let observed = self
-            .fetch_raw_stream_with_cancel_after_policy_and_network_metadata(request, cancel_handle)
-            .await?;
-        let (response, observation_journal) = observed.into_parts_with_observation_journal();
-        let response = collect_streaming_raw_response_as_text(response).await?;
-        Ok(NetworkFetchResult::with_observation_journal(
-            response,
-            observation_journal,
-        ))
-    }
-
     pub(crate) fn fetch_cacheable_script_text_callback_with_load<F>(
         &self,
         request: Request,

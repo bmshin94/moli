@@ -1382,17 +1382,6 @@ pub(super) struct LoadedChildScriptSource {
     pub(super) source: String,
 }
 
-#[cfg(test)]
-#[derive(Debug)]
-pub(super) struct ModuleGraphFetchCompletion {
-    pub(super) load_id: u64,
-    pub(super) requester: ModuleGraphFetchRequester,
-    pub(super) ordering: ModuleGraphFetchOrdering,
-    pub(super) request_url: Url,
-    pub(super) result: std::result::Result<crate::module_runtime::ModuleGraphFetchedSource, String>,
-    pub(super) network_result: Option<SharedNavigationResponseResult>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ModuleGraphFetchRequester {
     ParserOwnedModuleScript,

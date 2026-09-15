@@ -1,7 +1,5 @@
 use super::{JsContextHost, OwnerDispatchScope};
 use crate::network::loads::{ResourceLoadDisposition, ResourceLoadKind, ResourceLoadLease};
-#[cfg(test)]
-use crate::types::{SubresourceBodyFinished, SubresourceResponseStarted};
 use crate::{
     module_runtime::{
         ModuleAttributesKey, ModuleMapKey, ModuleSource, PendingDynamicModuleImport,
@@ -16,7 +14,7 @@ use crate::{
         PendingWebSocketConnection, PendingWebSocketResponseState, RunningSubresourceFetchState,
         ScriptNetworkOutput, ScriptNetworkOutputItem, StreamingSubresourceFetchState,
         SubresourceNetworkRecord, SubresourceNetworkRequestHandle, SubresourceRequestInitiatorType,
-        SubresourceRequestStarted, SubresourceResourceType, SubresourceResponseBody,
+        SubresourceResourceType, SubresourceResponseBody,
     },
 };
 
@@ -175,24 +173,6 @@ impl JsContextHost {
         self.note_subresource_activity();
     }
 
-    pub(crate) fn record_subresource_request_started(
-        &mut self,
-        request: SubresourceRequestStarted,
-    ) {
-        self.push_network_output_item(ScriptNetworkOutputItem::SubresourceRequestStarted(
-            std::sync::Arc::new(request),
-        ));
-        self.note_subresource_activity();
-    }
-
-    #[cfg(test)]
-    fn record_subresource_response_started(&mut self, response: SubresourceResponseStarted) {
-        self.push_network_output_item(ScriptNetworkOutputItem::SubresourceResponseStarted(
-            std::sync::Arc::new(response),
-        ));
-        self.note_subresource_activity();
-    }
-
     pub(crate) fn record_subresource_event_source_message_received(
         &mut self,
         message: crate::types::SubresourceEventSourceMessageReceived,
@@ -200,14 +180,6 @@ impl JsContextHost {
         self.push_network_output_item(
             ScriptNetworkOutputItem::SubresourceEventSourceMessageReceived(Box::new(message)),
         );
-        self.note_subresource_activity();
-    }
-
-    #[cfg(test)]
-    fn record_subresource_body_finished(&mut self, body: SubresourceBodyFinished) {
-        self.push_network_output_item(ScriptNetworkOutputItem::SubresourceBodyFinished(
-            std::sync::Arc::new(body),
-        ));
         self.note_subresource_activity();
     }
 
@@ -276,38 +248,17 @@ impl JsContextHost {
         Some((owner_local_host_id, document))
     }
 
-    pub(crate) fn record_get_subresource_network_result_with_initiator(
+    pub(crate) fn record_local_subresource_response(
         &mut self,
         frame_id: Option<String>,
         document_url: url::Url,
         request_url: url::Url,
         resource_type: SubresourceResourceType,
         request_initiator_type: SubresourceRequestInitiatorType,
-        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
+        response: &crate::protocol_types::NavigationResponse,
     ) {
-        let record = Self::get_subresource_network_record_with_initiator(
-            frame_id,
-            document_url,
-            request_url,
-            resource_type,
-            request_initiator_type,
-            result,
-        );
-        self.record_subresource_network(record);
-    }
-
-    /// Publish a completed request from a retired Document without treating it
-    /// as activity of the currently installed Document.
-    fn get_subresource_network_record_with_initiator(
-        frame_id: Option<String>,
-        document_url: url::Url,
-        request_url: url::Url,
-        resource_type: SubresourceResourceType,
-        request_initiator_type: SubresourceRequestInitiatorType,
-        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
-    ) -> SubresourceNetworkRecord {
-        match result {
-            Ok(response) => SubresourceNetworkRecord::success_with_body(
+        self.record_subresource_network(
+            SubresourceNetworkRecord::success_with_body(
                 frame_id,
                 document_url,
                 request_url,
@@ -326,79 +277,8 @@ impl JsContextHost {
             .with_request_initiator_type(request_initiator_type)
             .with_from_cache(response.from_cache)
             .with_negotiated_http_version(response.negotiated_http_version)
-            .with_network_request_headers(
-                response
-                    .network_request_headers()
-                    .map(|headers| headers.to_vec()),
-            ),
-            Err(error_text) => SubresourceNetworkRecord::failure(
-                frame_id,
-                document_url,
-                request_url,
-                "GET".to_owned(),
-                Vec::new(),
-                None,
-                resource_type,
-                error_text.clone(),
-            )
-            .with_request_initiator_type(request_initiator_type),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_staged_get_subresource_network_result_with_initiator(
-        &mut self,
-        frame_id: Option<String>,
-        document_url: url::Url,
-        request_url: url::Url,
-        resource_type: SubresourceResourceType,
-        request_initiator_type: SubresourceRequestInitiatorType,
-        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
-    ) {
-        let handle = SubresourceNetworkRequestHandle::allocate();
-        self.record_subresource_request_started(SubresourceRequestStarted::new(
-            handle,
-            frame_id,
-            document_url,
-            request_url,
-            "GET".to_owned(),
-            Vec::new(),
-            None,
-            resource_type,
-            request_initiator_type,
-            None,
-        ));
-        match result {
-            Ok(response) => {
-                self.record_subresource_response_started(
-                    SubresourceResponseStarted::new(
-                        handle,
-                        response.redirect_chain.clone().into_iter().collect(),
-                        response.final_url.clone(),
-                        response.status,
-                        response.headers.clone(),
-                        response.cookie_set_reports.clone(),
-                    )
-                    .with_from_cache(response.from_cache)
-                    .with_negotiated_http_version(response.negotiated_http_version)
-                    .with_network_request_headers(
-                        response
-                            .network_request_headers()
-                            .map(|headers| headers.to_vec()),
-                    ),
-                );
-                self.record_subresource_body_finished(SubresourceBodyFinished::ready(
-                    handle,
-                    SubresourceResponseBody::from_navigation_response(response),
-                ));
-            }
-            Err(error_text) => {
-                self.record_subresource_body_finished(SubresourceBodyFinished::failed(
-                    handle,
-                    error_text.clone(),
-                ));
-            }
-        }
+            .with_network_request_headers(response.network_request_headers().map(<[_]>::to_vec)),
+        );
     }
 
     pub(crate) fn record_css_module_text_for_url(&mut self, url: &url::Url, css_text: String) {

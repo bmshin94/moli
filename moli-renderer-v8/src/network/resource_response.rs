@@ -28,6 +28,29 @@ pub(crate) enum ResourceResponseFailure {
 }
 
 impl ResourceResponseFailure {
+    /// Reject at the physical head without waiting for its body. Retain any
+    /// bytes already received and cancel the same transport.
+    pub(crate) fn from_rejected_response(
+        observed: moli_fetch::NetworkFetchResult<moli_fetch::StreamingRawResponse>,
+        message: String,
+    ) -> Self {
+        let (mut response, request) = observed.into_parts();
+        response.cancellation_handle().cancel();
+        let mut body = moli_page_types::SubresourceResponseBodyWriter::default();
+        while let Some(chunk) = response.try_next_chunk() {
+            body.append(&chunk);
+        }
+        Self::PartialBody {
+            message,
+            response: Arc::new(ResourceResponseHead {
+                status_text: None,
+                head: response.head(),
+                network_request_headers: request.map(|request| request.into_headers()),
+            }),
+            body: body.finish(),
+        }
+    }
+
     pub(crate) fn with_message(mut self, replacement: String) -> Self {
         match &mut self {
             Self::Request(message)

@@ -126,13 +126,13 @@ pub(crate) fn start_stylesheet_subresource_fetch(
         } else {
             StylesheetSubresourceFetchStart::Settled
         };
-        host.record_get_subresource_network_result_with_initiator(
+        host.record_local_subresource_response(
             frame_id,
             document_url,
             request_url,
             resource_type,
             SubresourceRequestInitiatorType::Css,
-            &Ok(response),
+            &response,
         );
         host.settle_stylesheet_subresource_load_delay(binding);
         return Ok(terminal);

@@ -49,12 +49,11 @@ use crate::types::{
     ChildBlockingStylesheetLoadCompletion, ChildClassicScriptLoadCompletion,
     ChildDynamicImportFetchCompletion, ChildModuleDependencyFetchCompletion,
     ChildModulepreloadFetchCompletion, ChildParserModuleRootFetchCompletion,
-    ChildStylesheetResponse, ModuleGraphFetchCompletion, ModuleGraphFetchOrdering,
-    ModuleGraphFetchRequester, ScriptKind, ScriptMode, ScriptNetworkOutput,
-    ScriptNetworkOutputItem, ScriptObservableOutput, ScriptObservableOutputItem, ScriptRun,
-    ScriptRunOutcome, ScriptSkipReason, ScriptSourceKind, SubresourceBodyFinishedResult,
-    SubresourceNetworkRecord, SubresourceRequestInitiatorType, SubresourceResponseWaitCriteria,
-    WebSocketLifecycleEvent, WebSocketNetworkEvent,
+    ChildStylesheetResponse, ScriptKind, ScriptMode, ScriptNetworkOutput, ScriptNetworkOutputItem,
+    ScriptObservableOutput, ScriptObservableOutputItem, ScriptRun, ScriptRunOutcome,
+    ScriptSkipReason, ScriptSourceKind, SubresourceBodyFinishedResult, SubresourceNetworkRecord,
+    SubresourceRequestInitiatorType, SubresourceResponseWaitCriteria, WebSocketLifecycleEvent,
+    WebSocketNetworkEvent,
 };
 use crate::types::{SubresourceNetworkOutcome, SubresourceResourceType};
 use moli_fetch::FetchConfig;
@@ -13674,71 +13673,87 @@ async fn stale_main_parser_module_terminal_drops_after_pending_script_retirement
     .await;
 }
 
-#[test]
-fn module_graph_network_result_records_staged_response_started_with_cache_state() {
-    let mut page_vm = test_page_vm_with_document_url(
-        Url::parse("https://example.com/page.html").expect("document URL"),
+#[tokio::test(flavor = "current_thread")]
+async fn cached_script_load_preserves_native_response_state_without_vm_completion() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let request_url = Url::parse(&format!(
+        "http://{}/module.js",
+        listener.local_addr().unwrap()
+    ))
+    .unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(stream.read_u8().await.unwrap());
+        }
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nCache-Control: max-age=60\r\nContent-Length: 17\r\nConnection: close\r\n\r\nexport default 1;").await.unwrap();
+    });
+    let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default()).unwrap();
+    let vm = crate::runtime::PageVmTaskExecutorTestHarness::new(
+        request_url.join("page").unwrap(),
+        &loader,
     );
-    let request_url = Url::parse("https://example.com/module.js").expect("request URL");
-    let response = crate::types::NavigationResponse::from_head_and_text_body(
-        moli_fetch::ResponseHead {
-            final_url: request_url.clone(),
-            status: 200,
-            headers: vec![("content-type".to_owned(), "text/javascript".to_owned())],
-            request_cookie_report: None,
-            cookie_set_reports: Vec::new(),
-            redirected: false,
-            redirect_chain: Vec::new(),
-            from_cache: true,
-            negotiated_http_version: None,
-        },
-        "export default 1;".to_owned(),
-    );
-    let completion = ModuleGraphFetchCompletion {
-        load_id: 7,
-        requester: ModuleGraphFetchRequester::DynamicImport,
-        ordering: ModuleGraphFetchOrdering::Runtime,
-        request_url: request_url.clone(),
-        result: Err("source is not used by this test".to_owned()),
-        network_result: None,
-    };
-
-    page_vm
-        .vm_mut()
-        .record_module_graph_subresource_network_result(&completion, &Ok(response));
-
-    let items: Vec<_> = page_vm
-        .vm_mut()
-        .take_network_output()
-        .into_items()
-        .collect();
+    let host = vm.context_host_weak_for_test().upgrade().unwrap();
+    let items = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let output = items.clone();
+    host.borrow()
+        .browser_context_runtime()
+        .install_network_handler(move |input| {
+            if let crate::runtime::RendererNetworkInput::Observation(observation) = input
+                && let crate::runtime::RendererNetworkOutputItem::Resource(item) =
+                    &observation.occurrence.item
+            {
+                output.lock().push(item.clone());
+            }
+        });
+    let document = host
+        .borrow()
+        .current_main_document_resource_loader()
+        .unwrap();
+    let request = moli_fetch::Request::get(request_url.as_str())
+        .unwrap()
+        .with_page_network_policy()
+        .with_script_fetch_metadata(moli_fetch::ScriptFetchRequestMetadata::default());
+    let first = document
+        .fetch_script_for_test(request.clone())
+        .await
+        .unwrap();
+    assert!(!first.from_cache);
+    server.await.unwrap();
+    items.lock().clear();
+    // The fixture no longer listens. This load must use the actual shared cache.
+    let cached = document.fetch_script_for_test(request).await.unwrap();
+    assert!(cached.from_cache);
+    let items = items.lock();
     assert_eq!(
         items.len(),
         3,
-        "module fetch should record staged network output"
+        "a cache hit publishes one native request, head and terminal"
     );
-    let ScriptNetworkOutputItem::SubresourceRequestStarted(request) = &items[0] else {
-        panic!("first item should be requestStarted: {items:?}");
+    let ScriptNetworkOutputItem::SubresourceRequestStarted(request) = items[0].as_ref() else {
+        panic!("request first")
     };
     assert_eq!(request.url(), &request_url);
     assert_eq!(request.resource_type(), SubresourceResourceType::Script);
-
-    let ScriptNetworkOutputItem::SubresourceResponseStarted(response) = &items[1] else {
-        panic!("second item should be responseStarted: {items:?}");
+    let ScriptNetworkOutputItem::SubresourceResponseStarted(response) = items[1].as_ref() else {
+        panic!("response second")
     };
+    assert_eq!(response.handle(), request.handle());
     assert_eq!(response.final_url(), &request_url);
     assert!(
         response.from_cache(),
-        "module responseStarted must preserve fetch cache state"
+        "native head retains the actual cache state"
     );
-
-    let ScriptNetworkOutputItem::SubresourceBodyFinished(body) = &items[2] else {
-        panic!("third item should be bodyFinished: {items:?}");
+    let ScriptNetworkOutputItem::SubresourceBodyFinished(body) = items[2].as_ref() else {
+        panic!("terminal last")
     };
-    assert!(matches!(
-        body.result(),
-        SubresourceBodyFinishedResult::Ready(_)
-    ));
+    assert_eq!(body.handle(), request.handle());
+    let SubresourceBodyFinishedResult::Ready(body) = body.result() else {
+        panic!("cache hit succeeds")
+    };
+    assert_eq!(body.clone_body_bytes(), b"export default 1;");
 }
 
 #[tokio::test(flavor = "current_thread")]

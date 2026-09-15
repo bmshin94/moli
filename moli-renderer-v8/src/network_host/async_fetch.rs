@@ -1,7 +1,5 @@
 use super::*;
-use crate::network::{
-    ResourceResponseFailure, ResourceResponseHead, ResourceResponseStream, ResourceTransfer,
-};
+use crate::network::{ResourceResponseFailure, ResourceResponseStream, ResourceTransfer};
 use crate::page_task_queue::RendererResourceCompletionSender;
 use crate::types::{AsyncSubresourceFetchCompletion, AsyncSubresourceFetchEvent};
 use moli_fetch::{
@@ -156,16 +154,8 @@ pub(crate) async fn fetch_browser_subresource_with_preflight(
     request: Request,
     cancel_handle: Option<FetchCancelHandle>,
 ) -> Result<Response, String> {
-    let preflight_request_headers = request.request_headers.clone();
-    fetch_browser_subresource_with_preflight_headers_and_observer(
-        loader,
-        request,
-        cancel_handle,
-        preflight_request_headers,
-        None,
-    )
-    .await
-    .map(NetworkFetchResult::into_response)
+    let headers = request.request_headers.clone();
+    fetch_browser_subresource_with_preflight_headers(loader, request, cancel_handle, headers).await
 }
 
 #[cfg(test)]
@@ -175,43 +165,18 @@ pub(crate) async fn fetch_browser_subresource_with_preflight_headers(
     cancel_handle: Option<FetchCancelHandle>,
     preflight_request_headers: Vec<(String, String)>,
 ) -> Result<Response, String> {
-    fetch_browser_subresource_with_preflight_headers_and_observer(
-        loader,
+    let response = fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer(
+        &loader,
         request,
         cancel_handle,
         preflight_request_headers,
         None,
     )
     .await
-    .map(NetworkFetchResult::into_response)
-}
-
-pub(crate) async fn fetch_browser_subresource_with_preflight_headers_and_observer(
-    loader: ResourceRequestClient,
-    request: Request,
-    cancel_handle: Option<FetchCancelHandle>,
-    preflight_request_headers: Vec<(String, String)>,
-    preflight_observer: Option<&CorsPreflightNetworkObserver>,
-) -> Result<NetworkFetchResult<Response>, String> {
-    if browser_request_needs_manual_preflight_redirects(&request, &preflight_request_headers) {
-        return fetch_browser_subresource_with_manual_preflight_redirects(
-            loader,
-            request,
-            cancel_handle,
-            preflight_request_headers,
-            preflight_observer,
-        )
-        .await;
-    }
-    run_cors_preflight_if_needed(
-        &loader,
-        &request,
-        cancel_handle.clone(),
-        &preflight_request_headers,
-        preflight_observer,
-    )
-    .await?;
-    fetch_once_with_network_metadata(&loader, request, cancel_handle).await
+    .map_err(|error| error.to_string())?;
+    crate::network::resource_response::collect_observed_response(response, None)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn browser_request_needs_manual_preflight_redirects(
@@ -362,40 +327,6 @@ impl ManualCorsRedirectState {
     }
 }
 
-async fn fetch_browser_subresource_with_manual_preflight_redirects(
-    loader: ResourceRequestClient,
-    request: Request,
-    cancel_handle: Option<FetchCancelHandle>,
-    preflight_request_headers: Vec<(String, String)>,
-    preflight_observer: Option<&CorsPreflightNetworkObserver>,
-) -> Result<NetworkFetchResult<Response>, String> {
-    let mut redirects = ManualCorsRedirectState::new(request, preflight_request_headers);
-
-    loop {
-        redirects
-            .run_current_hop_preflight(&loader, cancel_handle.clone(), preflight_observer)
-            .await?;
-
-        let mut observed = fetch_once_with_network_metadata_unvalidated(
-            &loader,
-            redirects.hop_request(),
-            cancel_handle.clone(),
-        )
-        .await?;
-        let network_extra_info_available = observed.request_observation().is_some();
-        match redirects.advance(observed.response().head(), network_extra_info_available)? {
-            ManualCorsRedirectTransition::FinalResponse => {
-                let redirect_chain = redirects.into_redirect_chain();
-                observed.response_mut().redirected = !redirect_chain.is_empty();
-                observed.response_mut().redirect_chain = redirect_chain;
-                return Ok(observed);
-            }
-            ManualCorsRedirectTransition::ManualResponse => return Ok(observed),
-            ManualCorsRedirectTransition::FollowedRedirect => {}
-        }
-    }
-}
-
 async fn fetch_browser_subresource_raw_stream_with_manual_preflight_redirects(
     loader: &ResourceRequestClient,
     request: Request,
@@ -444,7 +375,9 @@ async fn fetch_browser_subresource_raw_stream_with_manual_preflight_redirects(
                 let redirect_chain = redirects.into_redirect_chain();
                 observed.response_mut().redirected = !redirect_chain.is_empty();
                 observed.response_mut().redirect_chain = redirect_chain;
-                return Err(rejected_resource_response(observed, message));
+                return Err(ResourceResponseFailure::from_rejected_response(
+                    observed, message,
+                ));
             }
         }
 
@@ -546,32 +479,11 @@ pub(crate) async fn fetch_browser_subresource_raw_stream_with_preflight_headers_
     if let Err(message) =
         validate_redirect_mode_response_head(&result.response().head(), redirect_mode)
     {
-        return Err(rejected_resource_response(result, message));
+        return Err(ResourceResponseFailure::from_rejected_response(
+            result, message,
+        ));
     }
     Ok(result)
-}
-
-/// A policy rejection happens at the received head. Preserve those facts and
-/// drop the reader immediately; waiting for a rejected body would delay failure.
-fn rejected_resource_response(
-    observed: NetworkFetchResult<StreamingRawResponse>,
-    message: String,
-) -> ResourceResponseFailure {
-    let (mut response, request) = observed.into_parts();
-    response.cancellation_handle().cancel();
-    let mut body = crate::types::SubresourceResponseBodyWriter::default();
-    while let Some(chunk) = response.try_next_chunk() {
-        body.append(&chunk);
-    }
-    ResourceResponseFailure::PartialBody {
-        message,
-        response: Arc::new(ResourceResponseHead {
-            status_text: None,
-            head: response.head(),
-            network_request_headers: request.map(|request| request.into_headers()),
-        }),
-        body: body.finish(),
-    }
 }
 
 fn format_network_error(error: anyhow::Error) -> String {
@@ -731,37 +643,6 @@ fn can_stream_subresource_response(request: &Request) -> bool {
         && request.request_mode != RequestMode::NoCors
 }
 
-async fn fetch_once_with_network_metadata(
-    loader: &ResourceRequestClient,
-    request: Request,
-    cancel_handle: Option<FetchCancelHandle>,
-) -> Result<NetworkFetchResult<Response>, String> {
-    let redirect_mode = request.redirect_mode;
-    let result =
-        fetch_once_with_network_metadata_unvalidated(loader, request, cancel_handle).await?;
-    let (response, request_observation) = result.into_parts();
-    let response = validate_redirect_mode_response(response, redirect_mode)?;
-    Ok(NetworkFetchResult::new(response, request_observation))
-}
-
-async fn fetch_once_with_network_metadata_unvalidated(
-    loader: &ResourceRequestClient,
-    request: Request,
-    cancel_handle: Option<FetchCancelHandle>,
-) -> Result<NetworkFetchResult<Response>, String> {
-    let result = match cancel_handle {
-        Some(cancel_handle) => loader
-            .fetch_text_stream_with_cancel_and_network_metadata(request, cancel_handle)
-            .await
-            .map_err(format_network_error),
-        None => loader
-            .fetch_text_stream_with_network_metadata(request)
-            .await
-            .map_err(format_network_error),
-    }?;
-    Ok(result)
-}
-
 pub(super) async fn fetch_response_head_once(
     loader: &ResourceRequestClient,
     request: Request,
@@ -775,19 +656,6 @@ pub(super) async fn fetch_response_head_once(
     let head = response.head();
     response.finish().await.map_err(format_network_error)?;
     Ok(head)
-}
-
-fn validate_redirect_mode_response(
-    response: Response,
-    redirect_mode: RequestRedirectMode,
-) -> Result<Response, String> {
-    validate_redirect_mode_parts(
-        &response.final_url,
-        response.status,
-        &response.headers,
-        redirect_mode,
-    )?;
-    Ok(response)
 }
 
 fn validate_redirect_mode_response_head(
@@ -848,7 +716,7 @@ mod tests {
             cancel.clone(),
             completion,
         );
-        let failure = rejected_resource_response(
+        let failure = ResourceResponseFailure::from_rejected_response(
             NetworkFetchResult::new(response, None),
             "redirect rejected".into(),
         );

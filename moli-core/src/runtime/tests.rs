@@ -1659,7 +1659,7 @@ async fn navigation_engine_bypasses_service_worker_for_main_resource() -> Result
     )?;
     engine.set_bypass_service_worker(true);
     let navigation = engine
-        .fetch_navigation_streaming_raw_response_with_storage_async(
+        .fetch_navigation_streaming_raw_response_bytes_with_storage_async(
             NavigationResourceStorageHandles::new(
                 browser.partition.cookie_store(),
                 browser.partition.web_storage_store(),
@@ -1673,6 +1673,7 @@ async fn navigation_engine_bypasses_service_worker_for_main_resource() -> Result
             None,
             Vec::new(),
             None,
+            moli_fetch::FetchCancelHandle::new(),
         )
         .await?;
     assert!(
@@ -1733,7 +1734,7 @@ async fn navigation_engine_service_worker_main_resource_has_no_network_transport
         true,
     )?;
     let navigation = engine
-        .fetch_navigation_streaming_raw_response_with_storage_async(
+        .fetch_navigation_streaming_raw_response_bytes_with_storage_async(
             NavigationResourceStorageHandles::new(
                 browser.partition.cookie_store(),
                 browser.partition.web_storage_store(),
@@ -1747,6 +1748,7 @@ async fn navigation_engine_service_worker_main_resource_has_no_network_transport
             None,
             Vec::new(),
             None,
+            moli_fetch::FetchCancelHandle::new(),
         )
         .await?;
     assert!(

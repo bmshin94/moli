@@ -207,16 +207,15 @@ pub(crate) fn start_image_element_resource_fetch(
 
     if let Some(response) = local_url_response(&request_url) {
         let response: crate::protocol_types::NavigationResponse = response.into();
-        let result = Ok(response);
-        host.record_get_subresource_network_result_with_initiator(
+        host.record_local_subresource_response(
             frame_id,
             document_url,
             request_url,
             SubresourceResourceType::Image,
             request_initiator_type,
-            &result,
+            &response,
         );
-        return result.map(|response| ImageElementResourceFetchStart::Local {
+        return Ok(ImageElementResourceFetchStart::Local {
             response: Box::new(response),
         });
     }
