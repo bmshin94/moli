@@ -1250,7 +1250,9 @@ fn run_child_window_eval_expression<'s>(
     {
         scope.set_continuation_preserved_embedder_data(value);
     }
-    let result = function.call(scope, window.into(), &[window.into(), expression.into()]);
+    let result = crate::script_execution::run(scope, |scope| {
+        function.call(scope, window.into(), &[window.into(), expression.into()])
+    });
     scope.set_continuation_preserved_embedder_data(previous_continuation_data);
     let previous_active_child = v8::Local::new(scope, &previous_active_child);
     native_bridge::restore_active_child_window_scope(scope, previous_active_child);

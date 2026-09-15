@@ -3528,8 +3528,8 @@ impl JsContextHost {
         let previous_message_source = self.enter_window_message_source_scope(
             super::PendingWindowMessageEndpoint::LightweightPopup(popup_id),
         );
-        let run_succeeded = function
-            .call(
+        let run_succeeded = crate::script_execution::run(scope, |scope| {
+            function.call(
                 scope,
                 window.into(),
                 &[
@@ -3541,7 +3541,8 @@ impl JsContextHost {
                     restore_active_popup.into(),
                 ],
             )
-            .is_some();
+        })
+        .is_some();
         self.restore_window_message_source_scope(previous_message_source);
 
         if !self.lightweight_popup_document_owner_is_current(script_document_owner) {
@@ -3702,7 +3703,9 @@ impl JsContextHost {
             super::PendingWindowMessageEndpoint::LightweightPopup(popup_id),
         );
         let eval_permit = crate::context_bootstrap::arm_internal_javascript_url_eval(scope);
-        let completion = function.call(scope, window.into(), &[window.into(), source_value.into()]);
+        let completion = crate::script_execution::run(scope, |scope| {
+            function.call(scope, window.into(), &[window.into(), source_value.into()])
+        });
         crate::context_bootstrap::restore_internal_javascript_url_eval(scope, eval_permit);
         self.restore_window_message_source_scope(previous_message_source);
         restore_active_lightweight_popup_scope(scope, previous_popup);

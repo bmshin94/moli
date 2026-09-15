@@ -3729,7 +3729,9 @@ impl ScriptVm {
                 let mut scope = try_catch.init();
 
                 let root_module = v8::Local::new(&scope, &root_module);
-                let Some(value) = root_module.evaluate(&scope) else {
+                let Some(value) =
+                    crate::script_execution::run(&mut scope, |scope| root_module.evaluate(scope))
+                else {
                     let error = scope
                         .exception()
                         .map(|exception| {

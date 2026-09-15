@@ -1,6 +1,164 @@
 use super::*;
 use crate::custom_elements::CustomElementRegistryKey;
 
+#[tokio::test]
+async fn popup_classic_script_custom_element_microtasks_wait_for_outer_javascript() {
+    assert_popup_custom_element_microtask_order(false).await;
+}
+
+#[tokio::test]
+async fn popup_javascript_url_custom_element_microtasks_wait_for_outer_javascript() {
+    assert_popup_custom_element_microtask_order(true).await;
+}
+
+async fn assert_popup_custom_element_microtask_order(javascript_url: bool) {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_page_task_executor_test_vm_with_loader(
+        "https://popup-custom-element-microtasks.test/",
+        &loader,
+    );
+    vm.eval(
+        r#"
+        globalThis.__popupCeLog = [];
+        globalThis.PopupElement = class extends HTMLElement {
+          constructor() {
+            super();
+            __popupCeLog.push("constructor");
+            Promise.resolve().then(() => {
+              __popupCeLog.push("constructor-microtask");
+              this.setAttribute("data-constructed", "yes");
+            });
+          }
+        };
+        customElements.define("popup-microtask-element", PopupElement);
+        "ready";
+        "#,
+    )
+    .expect("popup custom element definition should register");
+
+    let source = r#"
+        Promise.resolve().then(() => opener.__popupCeLog.push("earlier-microtask"));
+        const element = opener.document.createElement("popup-microtask-element");
+        opener.__popupCeElement = element;
+        opener.__popupCeLog.push("after-create", element instanceof opener.PopupElement,
+                                element.hasAttribute("data-constructed"));
+        void 0;
+    "#;
+    let navigation = if javascript_url {
+        format!("open({:?})", format!("javascript:{source}"))
+    } else {
+        let html = format!("<!doctype html><script>{source}</script>");
+        format!("open(URL.createObjectURL(new Blob([{html:?}], {{type: 'text/html'}})))")
+    };
+    vm.eval(&format!(
+        "globalThis.__popupCeWindow = {navigation}; 'queued'"
+    ))
+    .expect("host-owned popup execution should queue");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__popupCeLog.includes('constructor-microtask'))",
+        "true",
+        "popup custom element constructor microtask",
+    )
+    .await;
+
+    assert_eq!(
+        vm.eval("JSON.stringify({log: __popupCeLog, custom: __popupCeElement instanceof PopupElement, value: __popupCeElement.getAttribute('data-constructed')})")
+            .expect("popup custom element result should be observable"),
+        r#"{"log":["constructor","after-create",true,false,"earlier-microtask","constructor-microtask"],"custom":true,"value":"yes"}"#,
+        "popup source must finish before constructor microtasks (javascript URL: {javascript_url})",
+    );
+}
+
+#[test]
+fn custom_element_document_write_microtasks_wait_for_outer_javascript() {
+    let mut vm = new_storage_test_vm("https://custom-element-microtasks.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            globalThis.constructorMicrotaskLog = [];
+            class WrittenElement extends HTMLElement {
+              constructor() {
+                super();
+                constructorMicrotaskLog.push("constructor");
+                Promise.resolve().then(() => {
+                  constructorMicrotaskLog.push("constructor-microtask");
+                  this.setAttribute("data-constructed", "yes");
+                });
+              }
+            }
+            customElements.define("microtask-written-element", WrittenElement);
+            Promise.resolve().then(() => constructorMicrotaskLog.push("earlier-microtask"));
+            document.write("<microtask-written-element></microtask-written-element>");
+            constructorMicrotaskLog.push("after-write");
+            const written = document.querySelector("microtask-written-element");
+            JSON.stringify({
+              log: constructorMicrotaskLog,
+              custom: written instanceof WrittenElement,
+              hasAttribute: written.hasAttribute("data-constructed")
+            });
+            "#,
+        )
+        .expect("document.write custom element should preserve the outer script boundary");
+
+    assert_eq!(
+        result,
+        r#"{"log":["constructor","after-write"],"custom":true,"hasAttribute":false}"#
+    );
+    assert_eq!(
+        vm.eval(
+            "JSON.stringify({log: constructorMicrotaskLog, value: written.getAttribute('data-constructed')})"
+        )
+        .expect("constructor microtasks should run after the outer script"),
+        r#"{"log":["constructor","after-write","earlier-microtask","constructor-microtask"],"value":"yes"}"#
+    );
+}
+
+#[test]
+fn custom_element_create_element_microtasks_wait_for_outer_javascript() {
+    let mut vm = new_storage_test_vm("https://custom-element-microtasks.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            globalThis.constructorMicrotaskLog = [];
+            class CreatedElement extends HTMLElement {
+              constructor() {
+                super();
+                constructorMicrotaskLog.push("constructor");
+                queueMicrotask(() => {
+                  constructorMicrotaskLog.push("microtask");
+                  this.setAttribute("data-constructed", "yes");
+                });
+              }
+            }
+            customElements.define("microtask-created-element", CreatedElement);
+            const created = document.createElement("microtask-created-element");
+            constructorMicrotaskLog.push("after-create");
+            JSON.stringify({
+              log: constructorMicrotaskLog,
+              custom: created instanceof CreatedElement,
+              hasAttribute: created.hasAttribute("data-constructed")
+            });
+            "#,
+        )
+        .expect("createElement should preserve the outer script boundary");
+
+    assert_eq!(
+        result,
+        r#"{"log":["constructor","after-create"],"custom":true,"hasAttribute":false}"#
+    );
+    assert_eq!(
+        vm.eval(
+            "JSON.stringify({log: constructorMicrotaskLog, value: created.getAttribute('data-constructed')})"
+        )
+        .expect("constructor microtasks should run after createElement's caller"),
+        r#"{"log":["constructor","after-create","microtask"],"value":"yes"}"#
+    );
+}
+
 #[test]
 fn custom_elements_registry_shape_matches_chromium_probe() {
     let mut vm = new_storage_test_vm("https://example.com/");
