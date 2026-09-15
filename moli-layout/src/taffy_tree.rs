@@ -2397,8 +2397,13 @@ where
                 float_max_width = float_max_width.max(left_band + right_band);
             }
         }
-        let width = known_dimensions.width.unwrap_or_else(|| {
-            match available_space.width {
+        // Intrinsic block probes can pass a negative known width when margins
+        // exceed the containing block. Clamp both known and measured widths:
+        // the float slots are nonnegative, and Parley requires each line's
+        // available width to be no greater than the paragraph's width.
+        let width = known_dimensions
+            .width
+            .unwrap_or_else(|| match available_space.width {
                 AvailableSpace::MinContent => content_widths.min.max(float_min_width),
                 AvailableSpace::MaxContent => content_widths.max + float_max_width,
                 // Taffy has already resolved and clamped the content-box
@@ -2411,9 +2416,8 @@ where
                     .min(limit)
                     .max(content_widths.min.max(float_min_width)),
                 AvailableSpace::Definite(limit) => limit,
-            }
-            .max(0.0)
-        });
+            })
+            .max(0.0);
         // Taffy may feed an intrinsic inline size back through a quantized
         // definite flex/grid constraint, while Parley's content-width and
         // line-breaking passes can accumulate the same glyph advances in a
@@ -2536,7 +2540,7 @@ where
         let alignment_block_size = height.max(alignment_float_height);
         InlineMeasurement {
             size: Size {
-                width: known_dimensions.width.unwrap_or(width),
+                width,
                 height: known_dimensions.height.unwrap_or(height),
             },
             alignment_block_size,

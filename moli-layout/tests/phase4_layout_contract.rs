@@ -662,6 +662,75 @@ fn left_float_restricts_inline_slots_and_clear_moves_the_next_block_below_it() {
 }
 
 #[test]
+fn intrinsic_inline_probes_clamp_widths_consumed_by_margins_beside_floats() {
+    // A grid/flex intrinsic probe can give the paragraph a known width of
+    // `container_width - 40px`. Parley's float-aware breaker must still get
+    // a nonnegative paragraph width when the margin consumes all the space.
+    let source = Source(vec![
+        Node::element("root", "div", LayoutElementCategory::Generic, None, vec![1]),
+        Node::element(
+            "container",
+            "div",
+            LayoutElementCategory::Generic,
+            None,
+            vec![2, 3],
+        ),
+        Node::element("float", "div", LayoutElementCategory::Generic, None, vec![]),
+        Node::element(
+            "paragraph",
+            "p",
+            LayoutElementCategory::Generic,
+            None,
+            vec![4],
+        ),
+        Node::text("text", "text"),
+    ]);
+    for display in [LayoutDisplay::Grid, LayoutDisplay::Flex] {
+        for container_width in [0.0, 20.0, 40.0, 100.0] {
+            let mut styles = Styles::default();
+            styles
+                .primary
+                .insert(0, sized(display, 200.0, 100.0, PaintColor::TRANSPARENT));
+            styles.primary.insert(
+                1,
+                style(LayoutDisplay::Block, PaintColor::TRANSPARENT).tap_taffy(|taffy| {
+                    taffy.size.width = Dimension::length(container_width);
+                }),
+            );
+            styles.primary.insert(
+                2,
+                sized(LayoutDisplay::Block, 10.0, 10.0, BLUE).with_float(Float::Left, Clear::None),
+            );
+            styles.primary.insert(
+                3,
+                style(LayoutDisplay::Block, PaintColor::TRANSPARENT).tap_taffy(|taffy| {
+                    taffy.margin.left = taffy::LengthPercentageAuto::length(40.0);
+                }),
+            );
+
+            let snapshot = render(&source, &mut styles, 200, 100);
+            assert_close(rect(&snapshot, BLUE).x, 0.0);
+            let glyphs = snapshot
+                .fragments
+                .iter()
+                .filter_map(|fragment| match fragment {
+                    PaintFragment::GlyphRun(run) => Some(run.glyphs_in_surface()),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+            assert!(!glyphs.is_empty(), "text must survive the intrinsic probe");
+            assert_close(glyphs[0].x, 40.0);
+            assert!(
+                glyphs
+                    .iter()
+                    .all(|glyph| glyph.x.is_finite() && glyph.y.is_finite())
+            );
+        }
+    }
+}
+
+#[test]
 fn float_descendant_of_structural_inline_rounds_with_its_ifc_owner() {
     let source = Source(vec![
         Node::element("root", "div", LayoutElementCategory::Generic, None, vec![1]),
