@@ -651,6 +651,45 @@ fn navigator_runtime_data_getter_callback<'s>(
         rv.set(v8::undefined(scope).into());
         return;
     };
+    if matches!(key, "language" | "languages" | "userAgentData")
+        && let Some(identity) = worker_navigator_identity(scope, backing)
+    {
+        match key {
+            "language" => {
+                if let Some(value) = v8_string(scope, identity.language()) {
+                    rv.set(value.into());
+                }
+                return;
+            }
+            "userAgentData" => {
+                // Like Chromium, each access takes a metadata snapshot. An
+                // already held NavigatorUAData keeps its original values.
+                rv.set(build_navigator_ua_data_object(scope, &identity).into());
+                return;
+            }
+            "languages" => {
+                let previous = get_private_value(scope, backing, NAVIGATOR_ACCEPT_LANGUAGE_SLOT)
+                    .and_then(|value| value.to_string(scope))
+                    .map(|value| value.to_rust_string_lossy(scope));
+                if previous.as_deref() != Some(identity.accept_language()) {
+                    if let Some(value) = v8_string(scope, identity.accept_language()) {
+                        set_private_value(
+                            scope,
+                            backing,
+                            NAVIGATOR_ACCEPT_LANGUAGE_SLOT,
+                            value.into(),
+                        );
+                    }
+                    let _ = backing.set(
+                        scope,
+                        v8str(scope, "languages").into(),
+                        v8::undefined(scope).into(),
+                    );
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
     if let Some(subobject) = NavigatorSubobject::from_key(key) {
         match ensure_navigator_subobject(scope, backing, subobject) {
             Ok(value) => rv.set(value),
@@ -1092,6 +1131,9 @@ fn navigator_identity_from_backing<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     backing: v8::Local<'s, v8::Object>,
 ) -> BrowserIdentityProfile {
+    if let Some(identity) = worker_navigator_identity(scope, backing) {
+        return identity;
+    }
     if let Some(identity) = navigator_identity_profile(scope, backing) {
         return identity;
     }
@@ -1105,6 +1147,38 @@ fn navigator_identity_from_backing<'s>(
         .map(|value| value.to_rust_string_lossy(scope))
         .unwrap_or_else(|| moli_browser_profile::DEFAULT_ACCEPT_LANGUAGE.to_owned());
     BrowserIdentityProfile::new(user_agent, accept_language)
+}
+
+fn worker_navigator_identity<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    backing: v8::Local<'s, v8::Object>,
+) -> Option<BrowserIdentityProfile> {
+    if !get_private_value(scope, backing, WORKER_NAVIGATOR_BACKING_SLOT)
+        .is_some_and(|value| value.boolean_value(scope))
+    {
+        return None;
+    }
+    let base = navigator_identity_profile(scope, backing)?;
+    let value = scope
+        .get_slot::<std::rc::Rc<std::cell::RefCell<moli_page_types::NavigatorEmulationSessions>>>()
+        .and_then(|sessions| sessions.borrow().effective_user_agent_override());
+    Some(match value {
+        Some(value) => BrowserIdentityProfile::from_devtools_override(
+            &base,
+            // WorkerGlobalScope falls back to its creation metadata when the
+            // active UA override has no metadata. Its UA/appVersion/platform
+            // getters themselves continue to use the creation-time backing.
+            if value.user_agent_metadata.is_some() {
+                value.user_agent
+            } else {
+                String::new()
+            },
+            value.accept_language,
+            None,
+            value.user_agent_metadata,
+        ),
+        None => base,
+    })
 }
 
 pub(in crate::context_bootstrap) fn set_navigator_identity_profile<'s>(

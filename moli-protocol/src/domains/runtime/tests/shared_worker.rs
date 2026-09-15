@@ -3725,7 +3725,7 @@ async fn worker_navigator_query_overrides_are_independent_of_the_page() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn shared_worker_emulation_activation_ignores_rejected_user_agent_commands() {
+async fn shared_worker_emulation_activation_tracks_user_agent_commands() {
     async fn snapshot(ctx: &mut TestContext, session_id: Option<&str>) -> serde_json::Value {
         ctx.process_and_wait_for_response_async(json!({
             "id": 99190, "sessionId": session_id, "method": "Runtime.evaluate",
@@ -3764,22 +3764,18 @@ async fn shared_worker_emulation_activation_ignores_rejected_user_agent_commands
         .unwrap()
         .to_owned();
 
-    // Unsupported UA commands must neither alter the Page nor reserve a place
-    // in the Worker's Emulation agent order. Both CDP spellings share the policy.
+    // Invalid UA commands must not reserve a place in the Worker agent order.
+    // Both CDP spellings validate before publishing any state.
     for method in [
         "Emulation.setUserAgentOverride",
         "Network.setUserAgentOverride",
     ] {
         ctx.process_and_wait_for_response_async(json!({
             "id": 99103, "sessionId": first, "method": method,
-            "params": {"userAgent": "worker-emulation-order"}
+            "params": {"userAgent": "invalid\nagent"}
         }))
         .await;
-        ctx.expect_error(
-            99103,
-            -32000,
-            "User agent overrides are not supported for workers",
-        );
+        ctx.expect_error(99103, -32602, "Invalid characters found in userAgent");
         assert_eq!(snapshot(&mut ctx, Some(&first)).await, baseline);
         assert_eq!(snapshot(&mut ctx, None).await, page_baseline);
     }
@@ -3794,14 +3790,32 @@ async fn shared_worker_emulation_activation_ignores_rejected_user_agent_commands
         "HardwareConcurrency must be a positive int32",
     );
 
-    // Activate the second session first through Data Saver. Its later updates
-    // cannot overtake the first session, even when an individual value clears.
+    // UA alone activates the second agent before the first sets concurrency.
+    // Clearing UA must preserve that position for subsequent query overrides.
+    ctx.process_and_wait_for_response_async(json!({
+        "id": 99109, "sessionId": second, "method": "Emulation.setUserAgentOverride",
+        "params": {"userAgent": "worker-emulation-order"}
+    }))
+    .await;
+    ctx.expect_result(99109, json!({}), Some(&second));
+    ctx.process_and_wait_for_response_async(json!({
+        "id": 99110, "sessionId": first, "method": "Emulation.setHardwareConcurrencyOverride",
+        "params": {"hardwareConcurrency": 2}
+    }))
+    .await;
+    ctx.expect_result(99110, json!({}), Some(&first));
+    ctx.process_and_wait_for_response_async(json!({
+        "id": 99111, "sessionId": second, "method": "Network.setUserAgentOverride",
+        "params": {"userAgent": ""}
+    }))
+    .await;
+    ctx.expect_result(99111, json!({}), Some(&second));
     for (session, method, params, expected) in [
         (
             &second,
             "Emulation.setDataSaverOverride",
             json!({"dataSaverEnabled": true}),
-            json!([baseline[0], true]),
+            json!([2, true]),
         ),
         (
             &first,

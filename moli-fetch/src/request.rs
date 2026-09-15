@@ -50,6 +50,7 @@ pub struct Request {
     pub cookie_context: NetworkCookieRequestContext,
     timeout_policy: RequestTimeoutPolicy,
     network_observation_recorder: Option<NetworkObservationRecorder>,
+    browser_identity: Option<std::sync::Arc<moli_browser_profile::BrowserIdentityProfile>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +406,7 @@ impl Request {
             cookie_context: NetworkCookieRequestContext::top_level_navigation("GET"),
             timeout_policy: RequestTimeoutPolicy::default(),
             network_observation_recorder: None,
+            browser_identity: None,
         })
     }
 
@@ -435,6 +437,7 @@ impl Request {
             cookie_context: NetworkCookieRequestContext::top_level_navigation("GET"),
             timeout_policy: RequestTimeoutPolicy::default(),
             network_observation_recorder: None,
+            browser_identity: None,
         }
     }
 
@@ -496,7 +499,32 @@ impl Request {
             cookie_context: NetworkCookieRequestContext::subresource(method),
             timeout_policy: RequestTimeoutPolicy::default(),
             network_observation_recorder: None,
+            browser_identity: None,
         }
+    }
+
+    /// Captures the execution context's identity for this request and redirects.
+    /// Updating a Worker must not rebuild the shared transport or mutate an
+    /// already admitted request's identity.
+    pub fn with_browser_identity(
+        mut self,
+        identity: std::sync::Arc<moli_browser_profile::BrowserIdentityProfile>,
+    ) -> Self {
+        self.browser_identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn browser_identity<'a>(
+        &'a self,
+        config: &'a FetchConfig,
+    ) -> &'a moli_browser_profile::BrowserIdentityProfile {
+        self.browser_identity
+            .as_deref()
+            .unwrap_or_else(|| config.browser_identity())
+    }
+
+    pub(crate) fn has_browser_identity_override(&self) -> bool {
+        self.browser_identity.is_some()
     }
 
     pub fn with_min_request_timeout(mut self, minimum_request_timeout: Duration) -> Self {

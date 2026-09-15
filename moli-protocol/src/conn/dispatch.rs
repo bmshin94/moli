@@ -653,6 +653,12 @@ impl CdpConnection {
                     },
                 )
             }
+            "Emulation" | "Network" if let Some(step) = crate::domains::runtime::try_start_worker_emulation_command_dispatch(self, &cmd) => {
+                Some(match step {
+                    crate::domains::runtime::RuntimeCommandTaskStep::Pending(pending) => self.pending_step(PendingCdpCommandDispatchKind::Runtime(pending)),
+                    crate::domains::runtime::RuntimeCommandTaskStep::Complete(plan) => self.complete_with_output_plan(command_context, plan, cmd.id, cmd.session_id),
+                })
+            }
             "Network" => Some(
                 match crate::domains::network::start_network_domain_command_dispatch(self, &cmd) {
                     crate::domains::network::NetworkDomainCommandTaskStep::Network(
@@ -840,12 +846,6 @@ impl CdpConnection {
                     }
                 },
             ),
-            "Emulation" if let Some(step) = crate::domains::runtime::try_start_worker_emulation_command_dispatch(self, &cmd) => {
-                Some(match step {
-                    crate::domains::runtime::RuntimeCommandTaskStep::Pending(pending) => self.pending_step(PendingCdpCommandDispatchKind::Runtime(pending)),
-                    crate::domains::runtime::RuntimeCommandTaskStep::Complete(plan) => self.complete_with_output_plan(command_context, plan, cmd.id, cmd.session_id),
-                })
-            }
             "Emulation" => crate::domains::emulation::try_start_emulation_command_dispatch(
                 self, &cmd,
             )

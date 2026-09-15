@@ -1291,7 +1291,11 @@ pub(crate) fn register_worker_websocket<'s>(
         .and_then(|header| header.clone());
     let context = WebSocketConnectOptions {
         origin: moli_url::origin_ascii_serialization(&document_url),
-        user_agent: loader.request_client().user_agent().to_owned(),
+        user_agent: loader
+            .request_client()
+            .effective_browser_identity()
+            .user_agent()
+            .to_owned(),
         extra_headers: extra_http_headers,
         http_proxy: loader.request_client().http_proxy().map(ToOwned::to_owned),
         http_no_proxy: loader

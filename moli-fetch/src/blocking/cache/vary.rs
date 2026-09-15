@@ -84,7 +84,8 @@ fn vary_request_header_value(
             .map(|(_, value)| value)
     };
     if normalized_name == "user-agent" {
-        return explicit_value().or_else(|| Some(config.user_agent().to_owned()));
+        return explicit_value()
+            .or_else(|| Some(request.browser_identity(config).user_agent().to_owned()));
     }
     if normalized_name == "accept-encoding" {
         // libcurl synthesizes this header from `easy.accept_encoding("")`.

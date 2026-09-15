@@ -271,7 +271,8 @@ promise_test(async function () {
     assert_equals(message.data.uaDataCtorOwn, true, "worker should expose NavigatorUAData");
     assert_equals(message.data.uaDataCtorType, "function", "NavigatorUAData type");
     assert_equals(message.data.uaDataType, "object", "navigator.userAgentData type");
-    assert_equals(message.data.uaDataSameObject, true, "userAgentData should be SameObject");
+    // Each access returns a metadata snapshot; held snapshots retain their values.
+    assert_equals(message.data.uaDataSameObject, false, "userAgentData should return a new snapshot");
     assert_equals(
       message.data.uaDataInstance,
       true,

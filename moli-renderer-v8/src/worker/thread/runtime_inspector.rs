@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell, UnsafeCell},
+    cell::{Cell, OnceCell, RefCell, UnsafeCell},
     collections::{HashMap, HashSet, VecDeque},
     rc::{Rc, Weak},
 };
@@ -365,6 +365,7 @@ pub(super) struct WorkerRuntimeInspector {
     sessions: RefCell<HashMap<String, Rc<v8::inspector::V8InspectorSession>>>,
     detached_sessions: RefCell<HashSet<String>>,
     navigator_emulation: Rc<RefCell<moli_page_types::NavigatorEmulationSessions>>,
+    identity: OnceCell<WorkerIdentity>,
     inspector: v8::inspector::V8Inspector,
     outbound: WorkerInspectorOutbound,
     default_context: Rc<RefCell<Option<v8::Global<v8::Context>>>>,
@@ -372,6 +373,11 @@ pub(super) struct WorkerRuntimeInspector {
     task_runner: WorkerInspectorTaskRunner,
     parent_tx: mpsc::UnboundedSender<WorkerToParentMessage>,
     shared_worker: bool,
+}
+
+struct WorkerIdentity {
+    client: crate::network::ResourceRequestClient,
+    inherited: Option<std::sync::Arc<moli_browser_profile::BrowserIdentityProfile>>,
 }
 
 struct WorkerInspectorExecutor {
@@ -452,6 +458,7 @@ impl WorkerRuntimeInspector {
                 sessions: RefCell::new(HashMap::new()),
                 detached_sessions: RefCell::new(HashSet::new()),
                 navigator_emulation,
+                identity: OnceCell::new(),
                 outbound: WorkerInspectorOutbound::default(),
                 default_context,
                 default_execution_context_id: Cell::new(None),
@@ -495,6 +502,45 @@ impl WorkerRuntimeInspector {
         self.inspector.context_destroyed(context);
     }
 
+    pub(super) fn bind_request_client(&self, client: crate::network::ResourceRequestClient) {
+        let inherited = client.page_network_policy().browser_identity_override();
+        assert!(
+            self.identity
+                .set(WorkerIdentity { client, inherited })
+                .is_ok(),
+            "Worker identity must be bound once"
+        );
+    }
+
+    fn update_user_agent_override(&self) {
+        let Some(worker) = self.identity.get() else {
+            return;
+        };
+        let client = &worker.client;
+        let base = worker
+            .inherited
+            .as_deref()
+            .unwrap_or_else(|| client.browser_identity());
+        let identity = self
+            .navigator_emulation
+            .borrow()
+            .effective_user_agent_override()
+            .map(|value| {
+                std::sync::Arc::new(
+                    moli_browser_profile::BrowserIdentityProfile::from_devtools_override(
+                        base,
+                        value.user_agent,
+                        value.accept_language,
+                        None,
+                        value.user_agent_metadata,
+                    ),
+                )
+            });
+        client
+            .page_network_policy()
+            .set_browser_identity_override(identity.or_else(|| worker.inherited.clone()));
+    }
+
     pub(super) fn detach_session(&self, inspector_session_id: Option<&str>) {
         let session_key = worker_inspector_session_key(inspector_session_id);
         self.sessions.borrow_mut().remove(&session_key);
@@ -504,6 +550,7 @@ impl WorkerRuntimeInspector {
                 .unwrap_or(moli_page_types::DevToolsSessionKey::Primary),
         );
         self.detached_sessions.borrow_mut().insert(session_key);
+        self.update_user_agent_override();
     }
 
     pub(super) fn attach_session(&self, inspector_session_id: Option<&str>) {
@@ -589,6 +636,20 @@ impl WorkerRuntimeInspector {
         let invalid =
             |message| Some(json!({"id":command["id"],"error":{"code":-32602,"message":message}}));
         match command["method"].as_str()? {
+            "Emulation.setUserAgentOverride" | "Network.setUserAgentOverride" => {
+                let Ok(value) = serde_json::from_value::<moli_browser_profile::UserAgentOverride>(
+                    command["params"].clone(),
+                ) else {
+                    return invalid("InvalidParams");
+                };
+                if let Err(message) = value.validate() {
+                    return invalid(message);
+                }
+                self.navigator_emulation
+                    .borrow_mut()
+                    .set_user_agent_override(&key, value);
+                self.update_user_agent_override();
+            }
             "Emulation.setHardwareConcurrencyOverride" => {
                 let value = command["params"]["hardwareConcurrency"]
                     .as_u64()

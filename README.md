@@ -356,20 +356,6 @@ Its current intentional boundaries include:
   paint architecture.
 - It does not pursue pixel-for-pixel parity with Chrome or provide
   high-fidelity Canvas/WebGL/media playback.
-- Emulation supports offline mode, but CPU throttling, network latency/throughput,
-  packet shaping, and connection type overrides return a protocol error. CPU rates
-  at or below 1 disable throttling; non-positive latency and throughput values
-  disable network throttling. Unsupported combinations are rejected before
-  changing offline state.
-- Device metrics support desktop geometry and capture transforms. `mobile:true`
-  returns an unsupported error; mobile viewport-meta processing, text autosizing
-  and overlay scrollbars are not implemented. Display features, device posture,
-  forced overlay scrollbars, orientation-lock emulation and explicit viewport-meta
-  processing are also rejected before changing existing metrics. Default scrollbar
-  and viewport-meta settings, and disabling orientation-lock emulation, are accepted.
-- `Emulation.setUserAgentOverride` and `Network.setUserAgentOverride` support Page
-  targets. Worker targets return an unsupported error; these rejected commands do
-  not activate a Worker Emulation agent or affect its override precedence.
 - `--layout` supports software screenshots and raster-backed CDP PDF
   generation, but not every Chrome screenshot or print mode is implemented.
 

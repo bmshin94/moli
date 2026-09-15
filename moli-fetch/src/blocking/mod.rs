@@ -188,6 +188,14 @@ pub(crate) fn outgoing_request_headers_for_url(
         outgoing.push((name.clone(), value.clone()));
     }
 
+    if request.has_browser_identity_override() {
+        append_header_if_missing(
+            &mut outgoing,
+            "User-Agent",
+            request.browser_identity(config).user_agent().to_owned(),
+        );
+    }
+
     append_browser_navigation_headers(&mut outgoing, config, request, request_url);
     append_browser_subresource_headers(&mut outgoing, config, request, request_url);
     append_browser_storage_access_header(&mut outgoing, request, request_url);
@@ -288,7 +296,10 @@ fn append_browser_navigation_headers(
     append_header_if_missing(
         outgoing,
         "Accept-Language",
-        config.browser_identity().accept_language().to_owned(),
+        request
+            .browser_identity(config)
+            .accept_language()
+            .to_owned(),
     );
     append_header_if_missing(outgoing, "Upgrade-Insecure-Requests", "1".to_owned());
     append_header_if_missing(outgoing, "Sec-Fetch-Mode", "navigate".to_owned());
@@ -316,7 +327,7 @@ fn append_browser_navigation_headers(
         append_header_if_missing(outgoing, "Cache-Control", "max-age=0".to_owned());
     }
 
-    append_browser_client_hints(outgoing, config);
+    append_browser_client_hints(outgoing, request.browser_identity(config));
 }
 
 fn append_browser_subresource_headers(
@@ -362,7 +373,10 @@ fn append_browser_subresource_headers(
             append_header_if_missing(
                 outgoing,
                 "Accept-Language",
-                config.browser_identity().accept_language().to_owned(),
+                request
+                    .browser_identity(config)
+                    .accept_language()
+                    .to_owned(),
             );
             append_header_if_missing(
                 outgoing,
@@ -392,7 +406,7 @@ fn append_browser_subresource_headers(
                 | BrowserRequestMetadata::Xhr => "empty",
             };
             append_header_if_missing(outgoing, "Sec-Fetch-Dest", destination.to_owned());
-            append_browser_client_hints(outgoing, config);
+            append_browser_client_hints(outgoing, request.browser_identity(config));
         }
     }
 }
@@ -413,8 +427,10 @@ fn request_origin_header_value(request: &Request, request_url: &Url) -> Option<S
     Some(request.serialized_origin())
 }
 
-fn append_browser_client_hints(outgoing: &mut Vec<(String, String)>, config: &FetchConfig) {
-    let identity = config.browser_identity();
+fn append_browser_client_hints(
+    outgoing: &mut Vec<(String, String)>,
+    identity: &moli_browser_profile::BrowserIdentityProfile,
+) {
     let Some(sec_ch_ua) = identity.sec_ch_ua_value() else {
         return;
     };
@@ -591,7 +607,7 @@ pub(crate) fn configure_easy<H: Handler>(
     config
         .tls_config()
         .configure(easy, request.allows_credentials_for_url(request_url))?;
-    easy.useragent(config.user_agent())
+    easy.useragent(request.browser_identity(config).user_agent())
         .context("failed to set curl user-agent")?;
     easy.url(request_url.as_str())
         .with_context(|| anyhow!("failed to set curl request url to {}", request_url))?;

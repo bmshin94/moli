@@ -1585,6 +1585,9 @@ async fn worker_main(
         parent_tx.clone(),
         matches!(global_kind, WorkerGlobalKind::Shared { .. }),
     );
+    worker_isolate
+        .worker_runtime_inspector()
+        .bind_request_client(loader.request_client().clone());
     install_worker_promise_rejection_dispatch(
         worker_isolate.worker_isolate_mut(),
         parent_tx.clone(),

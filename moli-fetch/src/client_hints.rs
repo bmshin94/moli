@@ -197,7 +197,7 @@ pub(crate) fn prepare_client_hint_request(
     request: &Request,
     request_url: &Url,
 ) -> PreparedClientHintRequest {
-    let identity = config.browser_identity();
+    let identity = request.browser_identity(config);
     let browser_request =
         request.is_navigation_request() || request.browser_request_metadata().is_some();
     let mut effective_request = request.clone();

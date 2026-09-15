@@ -919,10 +919,13 @@ pub(crate) fn try_start_worker_emulation_command_dispatch(
     conn: &mut CdpConnection,
     cmd: &Cmd<'_>,
 ) -> Option<RuntimeCommandTaskStep> {
-    let action = match cmd.action {
-        "setHardwareConcurrencyOverride" => "Emulation.setHardwareConcurrencyOverride",
-        "setDataSaverOverride" => "Emulation.setDataSaverOverride",
-        "setAutomationOverride" => "Emulation.setAutomationOverride",
+    let action = match cmd.method {
+        "Emulation.setHardwareConcurrencyOverride" => "Emulation.setHardwareConcurrencyOverride",
+        "Emulation.setDataSaverOverride" => "Emulation.setDataSaverOverride",
+        "Emulation.setAutomationOverride" => "Emulation.setAutomationOverride",
+        "Emulation.setUserAgentOverride" | "Network.setUserAgentOverride" => {
+            "Emulation.setUserAgentOverride"
+        }
         _ => return None,
     };
     let pending = match conn.session_route(cmd.session_id) {

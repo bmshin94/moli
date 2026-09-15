@@ -951,6 +951,14 @@ impl ResourceRequestClient {
         self.resource_runtime.client().browser_identity()
     }
 
+    pub(crate) fn effective_browser_identity(
+        &self,
+    ) -> std::sync::Arc<moli_browser_profile::BrowserIdentityProfile> {
+        self.page_network_policy
+            .browser_identity_override()
+            .unwrap_or_else(|| std::sync::Arc::new(self.browser_identity().clone()))
+    }
+
     pub fn http_proxy(&self) -> Option<&str> {
         self.resource_runtime.client().http_proxy()
     }

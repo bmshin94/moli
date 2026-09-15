@@ -1,12 +1,9 @@
 use crate::conn::{CdpConnection, Cmd, DevToolsBrowserIdentityOverride};
 use crate::domains::command_output::CommandOutputPlan;
 #[allow(deprecated)]
-use chromiumoxide_cdp::cdp::browser_protocol::{
-    emulation::SetUserAgentOverrideParams,
-    network::{
-        EmulateNetworkConditionsParams, SetBypassServiceWorkerParams, SetCacheDisabledParams,
-        SetExtraHttpHeadersParams,
-    },
+use chromiumoxide_cdp::cdp::browser_protocol::network::{
+    EmulateNetworkConditionsParams, SetBypassServiceWorkerParams, SetCacheDisabledParams,
+    SetExtraHttpHeadersParams,
 };
 use serde::Deserialize;
 
@@ -119,128 +116,20 @@ pub(crate) fn user_agent_override_for_command(
     cmd: &Cmd<'_>,
     base: &moli_browser_profile::BrowserIdentityProfile,
 ) -> Result<Option<DevToolsBrowserIdentityOverride>, CommandOutputPlan> {
-    let params: SetUserAgentOverrideParams = match cmd.get_params() {
+    let params: moli_browser_profile::UserAgentOverride = match cmd.get_params() {
         Ok(Some(params)) => params,
         _ => return Err(CommandOutputPlan::error(-32602, "InvalidParams")),
     };
-    if !params.user_agent.is_empty() && !is_valid_chromium_header_value(&params.user_agent) {
-        return Err(CommandOutputPlan::error(
-            -32602,
-            "Invalid characters found in userAgent",
-        ));
-    }
-    if params
-        .accept_language
-        .as_deref()
-        .is_some_and(|value| !value.is_empty() && !is_valid_chromium_header_value(value))
-    {
-        return Err(CommandOutputPlan::error(
-            -32602,
-            "Invalid characters found in acceptLanguage",
-        ));
-    }
-    if params.user_agent.is_empty() && params.user_agent_metadata.is_some() {
-        return Err(CommandOutputPlan::error(
-            -32602,
-            "Empty userAgent invalid with userAgentMetadata provided",
-        ));
-    }
-    let full_version = match cmd
-        .params
-        .and_then(|params| params.get("userAgentMetadata"))
-        .and_then(|metadata| metadata.get("fullVersion"))
-    {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(value)) => Some(value.clone()),
-        Some(_) => return Err(CommandOutputPlan::error(-32602, "InvalidParams")),
-    };
-    if let Some(metadata) = params.user_agent_metadata.as_ref() {
-        validate_client_hint_brand_list(metadata.brands.as_deref())?;
-        validate_client_hint_brand_list(metadata.full_version_list.as_deref())?;
-        validate_client_hint_field(full_version.as_deref(), "Invalid full version string")?;
-        validate_client_hint_field(Some(&metadata.platform), "Invalid platform string")?;
-        validate_client_hint_field(
-            Some(&metadata.platform_version),
-            "Invalid platform version string",
-        )?;
-        validate_client_hint_field(Some(&metadata.architecture), "Invalid architecture string")?;
-        validate_client_hint_field(Some(&metadata.model), "Invalid model string")?;
-        validate_client_hint_field(metadata.bitness.as_deref(), "Invalid bitness string")?;
-        if let Some(form_factors) = metadata.form_factors.as_deref() {
-            for form_factor in form_factors {
-                validate_client_hint_field(Some(form_factor), "Invalid form factor string")?;
-            }
-        }
-    }
-    let metadata = params.user_agent_metadata.map(|metadata| {
-        moli_browser_profile::BrowserUserAgentMetadataOverride {
-            brands: metadata.brands.map(|brands| {
-                brands
-                    .into_iter()
-                    .map(|entry| moli_browser_profile::BrowserBrandVersion {
-                        brand: entry.brand,
-                        version: entry.version,
-                    })
-                    .collect()
-            }),
-            full_version_list: metadata.full_version_list.map(|brands| {
-                brands
-                    .into_iter()
-                    .map(|entry| moli_browser_profile::BrowserBrandVersion {
-                        brand: entry.brand,
-                        version: entry.version,
-                    })
-                    .collect()
-            }),
-            full_version,
-            platform: metadata.platform,
-            platform_version: metadata.platform_version,
-            architecture: metadata.architecture,
-            model: metadata.model,
-            mobile: metadata.mobile,
-            bitness: metadata.bitness,
-            wow64: metadata.wow64,
-            form_factors: metadata.form_factors,
-        }
-    });
+    params
+        .validate()
+        .map_err(|message| CommandOutputPlan::error(-32602, message))?;
     Ok(DevToolsBrowserIdentityOverride::from_command(
         base,
         params.user_agent,
         params.accept_language,
         params.platform,
-        metadata,
+        params.user_agent_metadata,
     ))
-}
-
-fn is_valid_chromium_header_value(value: &str) -> bool {
-    !value.bytes().any(|byte| matches!(byte, 0 | b'\r' | b'\n'))
-}
-
-fn is_ascii_printable(value: &str) -> bool {
-    value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
-}
-
-fn validate_client_hint_field(
-    value: Option<&str>,
-    error_message: &'static str,
-) -> Result<(), CommandOutputPlan> {
-    if value.is_some_and(|value| !is_ascii_printable(value)) {
-        return Err(CommandOutputPlan::error(-32602, error_message));
-    }
-    Ok(())
-}
-
-fn validate_client_hint_brand_list(
-    brands: Option<&[chromiumoxide_cdp::cdp::browser_protocol::emulation::UserAgentBrandVersion]>,
-) -> Result<(), CommandOutputPlan> {
-    let Some(brands) = brands else {
-        return Ok(());
-    };
-    for brand in brands {
-        validate_client_hint_field(Some(&brand.brand), "Invalid brand string")?;
-        validate_client_hint_field(Some(&brand.version), "Invalid brand version string")?;
-    }
-    Ok(())
 }
 
 fn extra_http_headers_from_params(

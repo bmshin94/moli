@@ -29,6 +29,7 @@ struct PageNetworkPolicyState {
     revision: u64,
     memory_cache_partition_id: u64,
     extra_http_headers: SharedHeaderList,
+    browser_identity: Option<Arc<moli_browser_profile::BrowserIdentityProfile>>,
     blocked_url_patterns: SharedPatternList,
     optional_resource_fetch_mask: OptionalResourceFetchMask,
     subframe_loading_enabled: bool,
@@ -52,6 +53,7 @@ impl Default for PageNetworkPolicyState {
             revision: 0,
             memory_cache_partition_id: next_memory_cache_partition_id(),
             extra_http_headers: Arc::from([]),
+            browser_identity: None,
             blocked_url_patterns: Arc::from([]),
             optional_resource_fetch_mask: OptionalResourceFetchMask::NONE,
             subframe_loading_enabled: true,
@@ -156,6 +158,7 @@ impl PageNetworkPolicy {
                 revision: snapshot.configuration_revision,
                 memory_cache_partition_id,
                 extra_http_headers: snapshot.extra_http_headers,
+                browser_identity: snapshot.browser_identity,
                 blocked_url_patterns: snapshot.blocked_url_patterns,
                 optional_resource_fetch_mask: snapshot.optional_resource_fetch_mask,
                 subframe_loading_enabled: snapshot.subframe_loading_enabled,
@@ -182,8 +185,9 @@ impl PageNetworkPolicy {
         Self {
             state: Arc::new(Mutex::new(PageNetworkPolicyState {
                 revision: snapshot.configuration_revision,
-                memory_cache_partition_id: self.memory_cache_partition_id(),
+                memory_cache_partition_id: snapshot.memory_cache_partition_id,
                 extra_http_headers: snapshot.extra_http_headers,
+                browser_identity: snapshot.browser_identity,
                 blocked_url_patterns: snapshot.blocked_url_patterns,
                 optional_resource_fetch_mask: snapshot.optional_resource_fetch_mask,
                 subframe_loading_enabled: snapshot.subframe_loading_enabled,
@@ -214,9 +218,11 @@ impl PageNetworkPolicy {
         let state = self.state.lock();
         let network_conditions = self.network_conditions.lock();
         PageNetworkPolicySnapshot {
+            memory_cache_partition_id: state.memory_cache_partition_id,
             configuration_revision: state.revision,
             network_conditions_revision: network_conditions.revision,
             extra_http_headers: state.extra_http_headers.clone(),
+            browser_identity: state.browser_identity.clone(),
             network_offline: network_conditions.offline,
             blocked_url_patterns: state.blocked_url_patterns.clone(),
             optional_resource_fetch_mask: state.optional_resource_fetch_mask,
@@ -248,6 +254,27 @@ impl PageNetworkPolicy {
         }
         state.extra_http_headers = headers;
         state.advance_revision();
+    }
+
+    pub(crate) fn set_browser_identity_override(
+        &self,
+        identity: Option<Arc<moli_browser_profile::BrowserIdentityProfile>>,
+    ) {
+        let mut state = self.state.lock();
+        if state.browser_identity == identity {
+            return;
+        }
+        state.browser_identity = identity;
+        // Worker imports must not reuse renderer-cache responses prepared for
+        // a different identity. The shared transport/cache budget is unchanged.
+        state.memory_cache_partition_id = next_memory_cache_partition_id();
+        state.advance_revision();
+    }
+
+    pub(crate) fn browser_identity_override(
+        &self,
+    ) -> Option<Arc<moli_browser_profile::BrowserIdentityProfile>> {
+        self.state.lock().browser_identity.clone()
     }
 
     pub fn set_network_offline(&self, offline: bool) {
@@ -359,9 +386,11 @@ impl PageNetworkPolicy {
 /// mutation cannot alter a request already being prepared.
 #[derive(Debug, Clone)]
 pub struct PageNetworkPolicySnapshot {
+    memory_cache_partition_id: u64,
     configuration_revision: u64,
     network_conditions_revision: u64,
     extra_http_headers: SharedHeaderList,
+    browser_identity: Option<Arc<moli_browser_profile::BrowserIdentityProfile>>,
     network_offline: bool,
     blocked_url_patterns: SharedPatternList,
     optional_resource_fetch_mask: OptionalResourceFetchMask,
@@ -408,6 +437,12 @@ impl PageNetworkPolicySnapshot {
     }
 
     pub(crate) fn apply_to_request(&self, mut request: Request) -> Result<Request> {
+        // Worker fetch/XHR enforce their loading policy at the API boundary,
+        // but still inherit the identity captured by their resource lease.
+        if let Some(identity) = &self.browser_identity {
+            request = request.with_browser_identity(identity.clone());
+        }
+
         if !request.uses_page_network_policy() {
             return Ok(request);
         }
@@ -612,5 +647,47 @@ mod tests {
             !request_view.snapshot().network_offline(),
             "resuming online must update the same network-condition handle"
         );
+    }
+
+    #[test]
+    fn request_identity_is_frozen_before_later_worker_overrides() {
+        let policy = PageNetworkPolicy::default();
+        let config = moli_fetch::FetchConfig::default();
+        let identity = |ua: &str, language: &str| {
+            Arc::new(moli_browser_profile::BrowserIdentityProfile::new(
+                ua, language,
+            ))
+        };
+        policy.set_browser_identity_override(Some(identity("Worker/A", "fr-FR")));
+        let request_view = policy.frozen_request_view();
+        let partition = request_view.memory_cache_partition_id();
+        policy.set_browser_identity_override(Some(identity("Worker/B", "de-DE")));
+        assert_ne!(partition, policy.memory_cache_partition_id());
+        let request = || {
+            Request::get("https://example.test/worker-fetch")
+                .unwrap()
+                .with_browser_request_metadata(moli_fetch::BrowserRequestMetadata::Fetch)
+        };
+        let frozen = request_view.snapshot().apply_to_request(request()).unwrap();
+        let current = policy.snapshot().apply_to_request(request()).unwrap();
+        policy.set_browser_identity_override(None);
+        for (request, ua, language) in [
+            (frozen, "Worker/A", "fr-FR"),
+            (current, "Worker/B", "de-DE"),
+        ] {
+            let headers = moli_fetch::outgoing_request_headers(&config, &request, None);
+            assert!(
+                headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("user-agent") && value == ua)
+            );
+            assert!(
+                headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("accept-language")
+                        && value == language)
+            );
+        }
+        assert!(policy.browser_identity_override().is_none());
     }
 }

@@ -2103,7 +2103,7 @@ async fn shared_worker_navigator_exposes_canonical_user_agent_data() {
             "JSON.stringify(__wire)",
         )
         .await,
-        r#"{"constructorType":"function","dataType":"object","instance":true,"sameObject":true,"userAgent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.1.2.3 Safari/537.36","languages":["de-DE","de"],"brands":[{"brand":"Chromium","version":"146"},{"brand":"Not-A.Brand","version":"24"},{"brand":"Google Chrome","version":"146"}],"emptyKeys":["brands","mobile","platform"],"selectedKeys":["architecture","brands","mobile","platform"],"architecture":"x86"}"#
+        r#"{"constructorType":"function","dataType":"object","instance":true,"sameObject":false,"userAgent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.1.2.3 Safari/537.36","languages":["de-DE","de"],"brands":[{"brand":"Chromium","version":"146"},{"brand":"Not-A.Brand","version":"24"},{"brand":"Google Chrome","version":"146"}],"emptyKeys":["brands","mobile","platform"],"selectedKeys":["architecture","brands","mobile","platform"],"architecture":"x86"}"#
     );
 }
 

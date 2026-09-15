@@ -13,6 +13,7 @@ pub struct BrowserBrandVersion {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BrowserUserAgentMetadataOverride {
     pub brands: Option<Vec<BrowserBrandVersion>>,
     pub full_version_list: Option<Vec<BrowserBrandVersion>>,
