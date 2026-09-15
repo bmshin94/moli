@@ -56,7 +56,7 @@ history.back();
         let completion = outcome.action.into_page_task_completion();
         assert!(matches!(completion, PageTaskCompletion::CallbackCompletion));
         page_vm
-            .finish_selected_page_task_completion(completion, &loader)
+            .finish_selected_page_task_completion(completion)
             .await?;
         assert_eq!(
             page_vm
@@ -88,7 +88,7 @@ location.hash
         )?;
         page_vm
             .vm_mut()
-            .advance_timers_until_deadline_for_test(&loader)
+            .advance_timers_until_deadline_for_test()
             .await?;
         assert!(
             !page_vm.vm().has_ready_timeout(),
@@ -119,7 +119,7 @@ location.hash
 
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::HistoryTraversal, &loader)
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::HistoryTraversal)
                 .await?,
             "the coalesced traversal should consume one production selected task"
         );
@@ -131,7 +131,7 @@ location.hash
         );
         assert!(
             !page_vm
-                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::HistoryTraversal, &loader)
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::HistoryTraversal)
                 .await?,
             "two pending history.back() calls for one LocalWindow must coalesce into one source position"
         );
@@ -177,8 +177,7 @@ document.close();
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::HistoryTraversal,
-                    &loader
+                    PageSelectedTaskTestSelector::HistoryTraversal
                 )
                 .await?,
             "the retained LocalWindow traversal should remain schedulable"
@@ -229,8 +228,7 @@ history.back();
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::HistoryTraversal,
-                    &loader
+                    PageSelectedTaskTestSelector::HistoryTraversal
                 )
                 .await?,
             "listener replacement must return through the production selected dispatcher"
@@ -301,7 +299,7 @@ document.getElementById("history-stale-child").remove();
             page_vm.document_lifecycle.identity().document
         );
         page_vm
-            .run_claimed_selected_page_task_for_test(stale, &loader)
+            .run_claimed_selected_page_task_for_test(stale)
             .await?;
         assert_eq!(
             page_vm
@@ -361,7 +359,7 @@ fn history_traversal_rejects_a_real_page_vm_replacement_id_collision() {
                     )?;
                     page_vm
                         .vm_mut()
-                        .advance_timers_until_deadline_for_test(&loader)
+                        .advance_timers_until_deadline_for_test()
                         .await?;
                     page_vm.vm_mut().eval("history.back(); 'queued'")?;
                     let retired_root = page_vm.document_lifecycle.identity().document;
@@ -393,7 +391,7 @@ fn history_traversal_rejects_a_real_page_vm_replacement_id_collision() {
                     )?;
                     page_vm
                         .vm_mut()
-                        .advance_timers_until_deadline_for_test(&loader)
+                        .advance_timers_until_deadline_for_test()
                         .await?;
                     page_vm.vm_mut().eval("history.back(); 'queued'")?;
 
@@ -411,7 +409,7 @@ fn history_traversal_rejects_a_real_page_vm_replacement_id_collision() {
                         "the first selected traversal must remain bound to the retired PageVm"
                     );
                     page_vm
-                        .run_claimed_selected_page_task_for_test(stale, &loader)
+                        .run_claimed_selected_page_task_for_test(stale)
                         .await?;
                     assert_eq!(
                         page_vm
@@ -447,7 +445,7 @@ fn history_traversal_rejects_a_real_page_vm_replacement_id_collision() {
                         "fresh PageVm-local ledgers should reuse the traversal task id"
                     );
                     page_vm
-                        .run_claimed_selected_page_task_for_test(current, &loader)
+                        .run_claimed_selected_page_task_for_test(current)
                         .await?;
                     assert_eq!(page_vm.vm_mut().eval("location.hash")?, "");
                     Ok::<_, anyhow::Error>(())

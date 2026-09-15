@@ -81,9 +81,13 @@ impl<'a> NetworkBacklogRequestIdPlan<'a> {
         {
             return request_id.to_owned();
         }
-        let request_id = self
-            .preferred_request_id
-            .take_for_new_subresource(output.request_handle())
+        let request_id = output
+            .navigation_request_id()
+            .map(str::to_owned)
+            .or_else(|| {
+                self.preferred_request_id
+                    .take_for_new_subresource(output.request_handle())
+            })
             .unwrap_or_else(|| self.request_id_allocator.allocate_request_id());
         if let Some(handle) = output.request_handle() {
             self.subresource_artifacts

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::types::{SubresourceRequestInitiatorType, SubresourceResourceType};
 use std::pin::pin;
 
 use anyhow::Result;
@@ -67,10 +69,7 @@ use crate::page_task_queue::{
     PageModuleReactionApplication, PageModuleReactionFollowup, RendererPageModuleReactionEvent,
 };
 use crate::planning::PreparedScript;
-use crate::types::{
-    ChildDynamicImportFetchCompletion, ScriptErrorConstructorKind, SubresourceRequestInitiatorType,
-    SubresourceResourceType,
-};
+use crate::types::{ChildDynamicImportFetchCompletion, ScriptErrorConstructorKind};
 #[cfg(test)]
 use crate::types::{
     ModuleGraphFetchCompletion, ModuleGraphFetchOrdering, ModuleGraphFetchRequester,
@@ -878,17 +877,7 @@ impl ScriptVm {
             ParserDeferredScriptStartAction::NoFetch => {}
             ParserDeferredScriptStartAction::ClassicSource(source_load_request) => {
                 if let Some(document_loader) = document_loader.as_ref() {
-                    let (document_url, request_url) =
-                        source_load_request.network_attribution_urls();
-                    let network_attribution = crate::page_resource_completion::
-                        MainParserDeferredClassicSourceNetworkAttribution::new(
-                            document_url,
-                            request_url,
-                        );
-                    let source_load = source_load_request.start(
-                        document_loader.request_client(),
-                        document_loader.task_runner(),
-                    );
+                    let source_load = source_load_request.start(document_loader);
                     let completion_tx = self._context_host.borrow().resource_completion_sender();
                     let (pending_script_id, source_load) = source_load.into_parts();
                     let completed_source_load = source_load.clone();
@@ -901,7 +890,6 @@ impl ScriptVm {
                                 pending_script_id,
                                 outcome,
                             ),
-                            network_attribution,
                         );
                     });
                 } else {
@@ -2107,14 +2095,8 @@ impl ScriptVm {
                 import_owner,
                 load_id,
             );
-            let document_url = self.document_runtime.document_url().clone();
             self.resource_scheduler()
-                .schedule_main_dynamic_import_graph_fetch(
-                    document_loader.clone(),
-                    target,
-                    request,
-                    document_url,
-                );
+                .schedule_main_dynamic_import_graph_fetch(document_loader.clone(), target, request);
         }
     }
 
@@ -2400,44 +2382,7 @@ impl ScriptVm {
             );
     }
 
-    pub(crate) fn record_main_modulepreload_network_result(
-        &mut self,
-        document_url: Url,
-        request_url: Url,
-        network_result: &std::result::Result<crate::types::NavigationResponse, String>,
-    ) {
-        self._context_host
-            .borrow_mut()
-            .record_get_subresource_network_result_with_initiator(
-                None,
-                document_url,
-                request_url.clone(),
-                SubresourceResourceType::Script,
-                SubresourceRequestInitiatorType::Parser,
-                network_result,
-            );
-        self.record_modulepreload_resource_performance_entry(&request_url, network_result);
-    }
-
-    pub(crate) fn record_historical_main_modulepreload_network_result(
-        &mut self,
-        document_url: Url,
-        request_url: Url,
-        network_result: &std::result::Result<crate::types::NavigationResponse, String>,
-    ) {
-        self._context_host
-            .borrow_mut()
-            .record_historical_get_subresource_network_result_with_initiator(
-                None,
-                document_url,
-                request_url,
-                SubresourceResourceType::Script,
-                SubresourceRequestInitiatorType::Parser,
-                network_result,
-            );
-    }
-
-    fn record_modulepreload_resource_performance_entry(
+    pub(crate) fn record_modulepreload_resource_performance_entry(
         &mut self,
         request_url: &Url,
         network_result: &std::result::Result<crate::types::NavigationResponse, String>,
@@ -2814,7 +2759,6 @@ impl ScriptVm {
                                 load_id,
                             ),
                             request,
-                            self.document_runtime.document_url().clone(),
                         );
                 }
                 FetchScheduleOwner::Runtime {
@@ -2830,7 +2774,6 @@ impl ScriptVm {
                                 load_id,
                             ),
                             request,
-                            self.document_runtime.document_url().clone(),
                         );
                 }
             }

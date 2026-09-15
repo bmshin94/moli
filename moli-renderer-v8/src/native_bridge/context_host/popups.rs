@@ -2191,7 +2191,7 @@ impl JsContextHost {
                 content_type: snapshot.content_type,
                 character_set: snapshot.character_set,
                 markup: snapshot.markup,
-                document_network: None,
+                resource_timing: None,
             };
             let completion = PopupDocumentLoadCompletion::new(
                 target,
@@ -2260,7 +2260,7 @@ impl JsContextHost {
                         content_type,
                         character_set: character_set.to_owned(),
                         markup,
-                        document_network: None,
+                        resource_timing: None,
                     },
                 )))
             }

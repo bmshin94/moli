@@ -11,8 +11,8 @@ use super::events::{
     emit_body_finished, emit_data_received, emit_event_source_message_received,
     emit_loading_failed, emit_loading_finished, emit_redirect_response_received_extra_info,
     emit_request_will_be_sent, emit_request_will_be_sent_extra_info, emit_response_received,
-    emit_websocket_closed, emit_websocket_created, emit_websocket_frame,
-    emit_websocket_frame_error, emit_websocket_handshake_response_received,
+    emit_response_received_extra_info, emit_websocket_closed, emit_websocket_created,
+    emit_websocket_frame, emit_websocket_frame_error, emit_websocket_handshake_response_received,
     emit_websocket_will_send_handshake_request,
 };
 use super::output_queue::{
@@ -659,6 +659,14 @@ fn emit_staged_subresource_body_finished(
             }
         }
         SubresourceBodyFinishedResult::Failed(error_text) => {
+            emit_failed_subresource_request_progress(
+                out,
+                output,
+                request_id,
+                event_session_ids,
+                record_frame_id,
+                timestamp,
+            );
             record_subresource_failed_response_body(
                 conn,
                 owner,
@@ -705,6 +713,134 @@ fn emit_staged_subresource_body_finished(
         }
     }
     out.len() > initial_output_len
+}
+
+fn emit_failed_subresource_request_progress(
+    out: &mut Vec<BackgroundProtocolEvent>,
+    output: &super::output_queue::TargetSubresourceBodyFinishedOutput,
+    request_id: &str,
+    event_session_ids: &[Option<String>],
+    frame_id: &str,
+    timestamp: f64,
+) {
+    let Some(failure) = output.failure_context() else {
+        return;
+    };
+    let request = output.request();
+    let context = failure.request_context();
+    let redirects = context.map_or(&[][..], |context| context.redirect_chain());
+    let journal = failure.observation_journal();
+    let final_body = context
+        .and_then(|context| context.request_body())
+        .map(String::from_utf8_lossy);
+    let mut method = request.method();
+    let mut body = request.request_body();
+    for hop in 0..=redirects.len() {
+        let exchange = journal
+            .redirect_exchange_group(redirects.len(), hop)
+            .and_then(|group| group.first());
+        if hop > 0 {
+            let redirect = &redirects[hop - 1];
+            let response_observation = journal
+                .redirect_exchange_group(redirects.len(), hop - 1)
+                .and_then(|group| group.last())
+                .and_then(moli_fetch::NetworkExchangeObservation::response);
+            if (matches!(redirect.status, 301 | 302) && method == "POST")
+                || (redirect.status == 303 && !matches!(method, "GET" | "HEAD"))
+            {
+                method = "GET";
+                body = None;
+            }
+            if hop == redirects.len()
+                && let Some(context) = context
+            {
+                method = context.request_method();
+                body = final_body.as_deref();
+            }
+            let headers = exchange
+                .map(|exchange| exchange.request().headers())
+                .or_else(|| {
+                    context
+                        .filter(|_| hop == redirects.len())
+                        .map(|context| context.request_headers())
+                })
+                .unwrap_or_else(|| request.request_headers());
+            for session in event_session_ids {
+                emit_request_will_be_sent(
+                    out,
+                    session.as_deref(),
+                    request_id,
+                    frame_id,
+                    request.loader_id(),
+                    timestamp,
+                    request.document_url(),
+                    &redirect.to_url,
+                    method,
+                    body,
+                    headers,
+                    request.resource_type().into(),
+                    request.request_initiator_type(),
+                    Some((
+                        &redirect.from_url,
+                        redirect.status,
+                        &redirect.headers,
+                        redirect.from_cache,
+                        redirect.negotiated_http_version,
+                    )),
+                    redirect.redirect_has_extra_info
+                        || response_observation
+                            .is_some_and(|response| response.status() == redirect.status),
+                    redirect.request_cookie_report.as_ref(),
+                    &[],
+                );
+                if let Some(response) = &redirect.response_extra_info {
+                    emit_response_received_extra_info(
+                        out,
+                        session.as_deref(),
+                        request_id,
+                        &response.headers,
+                        response.status,
+                        &response.cookie_set_reports,
+                    );
+                } else if let Some(response) = response_observation {
+                    emit_response_received_extra_info(
+                        out,
+                        session.as_deref(),
+                        request_id,
+                        response.headers(),
+                        response.status(),
+                        &redirect.cookie_set_reports,
+                    );
+                } else if redirect.network_extra_info_available {
+                    emit_response_received_extra_info(
+                        out,
+                        session.as_deref(),
+                        request_id,
+                        &redirect.headers,
+                        redirect.status,
+                        &redirect.cookie_set_reports,
+                    );
+                }
+            }
+        }
+        // Initial cookie metadata may already have emitted this event at admission.
+        if (hop > 0 || request.request_cookie_report().is_none())
+            && let Some(exchange) = exchange
+        {
+            let observed = exchange.request();
+            let empty = moli_cookie_jar::StoredCookieQueryReport::default();
+            for session in event_session_ids {
+                emit_request_will_be_sent_extra_info(
+                    out,
+                    session.as_deref(),
+                    request_id,
+                    observed.headers(),
+                    observed.cookie_report().unwrap_or(&empty),
+                    timestamp,
+                );
+            }
+        }
+    }
 }
 
 pub(crate) fn emit_pending_network_backlog_activity_background_events(

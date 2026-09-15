@@ -1098,6 +1098,7 @@ impl SubresourceNetworkRequestHandle {
 pub struct SubresourceRequestStarted {
     handle: SubresourceNetworkRequestHandle,
     frame_id: Option<String>,
+    navigation_loader_id: Option<String>,
     document_url: Url,
     url: Url,
     method: String,
@@ -1146,6 +1147,7 @@ pub struct SubresourceBodyFinished {
     handle: SubresourceNetworkRequestHandle,
     result: SubresourceBodyFinishedResult,
     data_was_streamed: bool,
+    failure_context: Option<Arc<moli_fetch::NetworkFetchFailureContext>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1201,6 +1203,7 @@ impl SubresourceRequestStarted {
         Self {
             handle,
             frame_id,
+            navigation_loader_id: None,
             document_url,
             url,
             method,
@@ -1228,6 +1231,15 @@ impl SubresourceRequestStarted {
 
     pub fn is_worker_main_script(&self) -> bool {
         self.worker_main_script
+    }
+
+    pub fn with_navigation_loader_id(mut self, loader_id: String) -> Self {
+        self.navigation_loader_id = Some(loader_id);
+        self
+    }
+
+    pub fn navigation_loader_id(&self) -> Option<&str> {
+        self.navigation_loader_id.as_deref()
     }
 
     pub fn with_request_body_bytes(mut self, request_body_bytes: Option<Vec<u8>>) -> Self {
@@ -1449,6 +1461,7 @@ impl SubresourceBodyFinished {
             handle,
             result: SubresourceBodyFinishedResult::Ready(body),
             data_was_streamed: false,
+            failure_context: None,
         }
     }
 
@@ -1460,6 +1473,7 @@ impl SubresourceBodyFinished {
             handle,
             result: SubresourceBodyFinishedResult::Ready(body),
             data_was_streamed: true,
+            failure_context: None,
         }
     }
 
@@ -1468,6 +1482,7 @@ impl SubresourceBodyFinished {
             handle,
             result: SubresourceBodyFinishedResult::Failed(error_text),
             data_was_streamed: false,
+            failure_context: None,
         }
     }
 
@@ -1483,7 +1498,23 @@ impl SubresourceBodyFinished {
                 partial_body,
             },
             data_was_streamed: false,
+            failure_context: None,
         }
+    }
+
+    pub fn failed_with_network_context(
+        handle: SubresourceNetworkRequestHandle,
+        error_text: String,
+        context: Arc<moli_fetch::NetworkFetchFailureContext>,
+    ) -> Self {
+        Self {
+            failure_context: Some(context),
+            ..Self::failed(handle, error_text)
+        }
+    }
+
+    pub fn failure_context(&self) -> Option<&moli_fetch::NetworkFetchFailureContext> {
+        self.failure_context.as_deref()
     }
 
     pub fn handle(&self) -> SubresourceNetworkRequestHandle {
@@ -2641,6 +2672,7 @@ pub enum PendingSubresourceContinueEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubresourceResourceType {
+    Document,
     Script,
     Stylesheet,
     Image,
@@ -2693,7 +2725,8 @@ impl OptionalResourceFetchMask {
             SubresourceResourceType::Video => Some(Self::VIDEO),
             SubresourceResourceType::Media => Some(Self::MEDIA),
             SubresourceResourceType::TextTrack => Some(Self::TEXT_TRACK),
-            SubresourceResourceType::Script
+            SubresourceResourceType::Document
+            | SubresourceResourceType::Script
             | SubresourceResourceType::Stylesheet
             | SubresourceResourceType::Fetch
             | SubresourceResourceType::EventSource
@@ -2743,6 +2776,7 @@ impl SubresourceRequestInitiatorType {
 impl SubresourceResourceType {
     pub fn as_cdp_type(self) -> &'static str {
         match self {
+            Self::Document => "Document",
             Self::Script => "Script",
             Self::Stylesheet => "Stylesheet",
             Self::Image => "Image",
@@ -3253,49 +3287,6 @@ pub struct ChildFrameNavigationSnapshot {
     pub security_origin_inherited: bool,
     #[serde(default)]
     pub security_origin_opaque: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ChildFrameDocumentNetworkSnapshot {
-    pub request_url: String,
-    pub request_method: String,
-    #[serde(default)]
-    pub request_headers: Vec<(String, String)>,
-    /// The completed fetch result. Failure does not fabricate an HTTP response.
-    pub response: Result<ChildFrameDocumentNetworkResponse, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ChildFrameDocumentNetworkResponse {
-    pub final_url: String,
-    pub status: u16,
-    #[serde(default)]
-    pub response_headers: Vec<(String, String)>,
-    #[serde(default)]
-    pub encoded_data_length: usize,
-    /// Exact in-process response body source for protocol consumers.
-    ///
-    /// Renderer/protocol transport shares this carrier without copying the
-    /// complete payload. Serialized snapshots deserialize without a body source.
-    #[serde(skip)]
-    pub response_body: Option<SubresourceResponseBody>,
-    #[serde(default)]
-    pub from_cache: bool,
-}
-
-/// A completed child main-resource request whose Network facts remain
-/// observable even though its navigation no longer owns the current child
-/// Document.
-///
-/// Keeping this separate from `ChildFrameNavigationSnapshot` prevents a stale
-/// result from synthesizing a navigation commit or lifecycle terminal.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ChildFrameDocumentNetworkActivitySnapshot {
-    pub frame_id: String,
-    #[serde(default)]
-    pub parent_frame_id: Option<String>,
-    pub loader_id: String,
-    pub snapshot: ChildFrameDocumentNetworkSnapshot,
 }
 
 #[derive(Debug, Clone)]

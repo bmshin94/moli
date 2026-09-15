@@ -2,14 +2,10 @@ use super::*;
 
 async fn drain_canvas_image_load_event_tasks(
     page: &mut crate::runtime::PageVmTaskExecutorTestHarness,
-    loader: &ResourceRequestClient,
 ) -> usize {
     let mut count = 0;
     while page
-        .run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::ImageLoadEvent,
-            loader,
-        )
+        .run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::ImageLoadEvent)
         .await
         .expect("canvas/image DOM-manipulation task should run")
     {
@@ -20,10 +16,9 @@ async fn drain_canvas_image_load_event_tasks(
 
 async fn run_one_canvas_image_load_event_task(
     page: &mut crate::runtime::PageVmTaskExecutorTestHarness,
-    loader: &ResourceRequestClient,
 ) {
     assert_eq!(
-        drain_canvas_image_load_event_tasks(page, loader).await,
+        drain_canvas_image_load_event_tasks(page).await,
         1,
         "the fixture should enqueue exactly one DOM-manipulation task"
     );
@@ -2235,7 +2230,6 @@ fn html_canvas_draw_image_supports_nine_argument_source_cropping() {
 
 #[tokio::test]
 async fn html_canvas_draw_image_reads_data_url_image_pixels() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://canvas-draw-image-data-url.test/");
 
     vm.eval(
@@ -2267,7 +2261,7 @@ async fn html_canvas_draw_image_reads_data_url_image_pixels() {
     .expect("data URL image draw setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "data URL image load should dispatch"
     );
 
@@ -2496,7 +2490,6 @@ fn html_legacy_factory_constructors_use_element_interface_prototypes() {
 
 #[tokio::test]
 async fn html_image_load_runs_on_its_dom_task_not_window_load_dispatch() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-load-order.test/");
 
     let before_load = vm
@@ -2535,7 +2528,7 @@ async fn html_image_load_runs_on_its_dom_task_not_window_load_dispatch() {
             .expect("pre-image-task state should be readable"),
         "pending"
     );
-    run_one_canvas_image_load_event_task(&mut vm, &loader).await;
+    run_one_canvas_image_load_event_task(&mut vm).await;
 
     let after_load = vm
         .eval("globalThis.__lmImageLoadOrder")
@@ -2546,7 +2539,6 @@ async fn html_image_load_runs_on_its_dom_task_not_window_load_dispatch() {
 
 #[tokio::test]
 async fn html_image_load_records_resource_performance_entry() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://image-resource-timing.test/base/page.html");
 
@@ -2576,7 +2568,7 @@ async fn html_image_load_records_resource_performance_entry() {
     )
     .expect("image resource timing setup should evaluate");
 
-    run_one_canvas_image_load_event_task(&mut vm, &loader).await;
+    run_one_canvas_image_load_event_task(&mut vm).await;
     vm.run_next_timeout_for_test()
         .expect("performance observer delivery should run");
 
@@ -2592,7 +2584,6 @@ async fn html_image_load_records_resource_performance_entry() {
 
 #[tokio::test]
 async fn html_image_load_does_not_reach_window_capture_listener() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-load-window-path.test/");
 
     vm.eval(
@@ -2622,7 +2613,7 @@ async fn html_image_load_does_not_reach_window_capture_listener() {
     )
     .expect("image load path setup should evaluate");
 
-    run_one_canvas_image_load_event_task(&mut vm, &loader).await;
+    run_one_canvas_image_load_event_task(&mut vm).await;
     vm.dispatch_window_load_event()
         .expect("window load should remain a separate lifecycle action");
 
@@ -2635,7 +2626,6 @@ async fn html_image_load_does_not_reach_window_capture_listener() {
 
 #[tokio::test]
 async fn html_image_complete_tracks_pending_src_and_srcset_loads() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-complete.test/");
 
     let before_load = vm
@@ -2676,7 +2666,7 @@ async fn html_image_complete_tracks_pending_src_and_srcset_loads() {
     assert_eq!(before_load, "false|false|true|false|true");
 
     assert_eq!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await,
+        drain_canvas_image_load_event_tasks(&mut vm).await,
         4,
         "src, srcset, empty-src, and retired-source work must each settle one queued task"
     );
@@ -2720,7 +2710,6 @@ fn html_image_complete_uses_shared_data_url_image_mime_classification() {
 
 #[tokio::test]
 async fn html_image_source_mutations_queue_coalesced_async_events() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-complete.test/page.html");
 
     let before = vm
@@ -2760,7 +2749,7 @@ async fn html_image_source_mutations_queue_coalesced_async_events() {
     assert_eq!(before, "false||false|false|0|0|0");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "queued image events should drain"
     );
 
@@ -2790,7 +2779,6 @@ async fn html_image_source_mutations_queue_coalesced_async_events() {
 
 #[tokio::test]
 async fn html_image_load_honors_img_src_with_unknown_csp_directives() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-csp.test/page.html");
     vm.set_response_content_security_policies(&["img-src 'none'; aaa;".to_owned()]);
     vm.set_response_content_security_report_only_policies(&["img-src 'none'".to_owned()]);
@@ -2813,7 +2801,7 @@ async fn html_image_load_honors_img_src_with_unknown_csp_directives() {
     .expect("image CSP setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "image CSP event should drain"
     );
     assert_eq!(
@@ -2829,7 +2817,6 @@ async fn html_image_load_honors_img_src_with_unknown_csp_directives() {
 
 #[tokio::test]
 async fn html_image_report_only_csp_reports_without_blocking_load() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://image-csp-report-only.test/page.html");
     vm.set_response_content_security_report_only_policies(&["img-src 'none'".to_owned()]);
@@ -2852,7 +2839,7 @@ async fn html_image_report_only_csp_reports_without_blocking_load() {
     .expect("image report-only CSP setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "image report-only CSP event should drain"
     );
     assert_eq!(
@@ -2868,7 +2855,6 @@ async fn html_image_report_only_csp_reports_without_blocking_load() {
 
 #[tokio::test]
 async fn html_image_invalid_base_url_fails_before_csp_check() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://image-csp-fallback.test/path/page.html");
     vm.set_response_content_security_policies(&["img-src 'none'".to_owned()]);
@@ -2896,7 +2882,7 @@ async fn html_image_invalid_base_url_fails_before_csp_check() {
     .expect("image fallback CSP setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "image fallback event should drain"
     );
     assert_eq!(
@@ -2913,7 +2899,6 @@ async fn html_image_invalid_base_url_fails_before_csp_check() {
 
 #[tokio::test]
 async fn html_image_invalid_request_url_fails_before_load() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-invalid-url.test/page.html");
 
     vm.eval(
@@ -2931,7 +2916,7 @@ async fn html_image_invalid_request_url_fails_before_load() {
     .expect("invalid image URL setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "invalid image URL event should drain"
     );
     assert_eq!(
@@ -2974,7 +2959,7 @@ async fn parser_image_load_honors_meta_img_src_csp() {
         .expect("parser EOF should prepare interactive");
     vm.apply_main_document_interactive_lifecycle_action(interactive)
         .expect("interactive transition should register the parser image");
-    run_one_canvas_image_load_event_task(&mut vm, &loader).await;
+    run_one_canvas_image_load_event_task(&mut vm).await;
     assert_eq!(
         drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
         1
@@ -2988,7 +2973,6 @@ async fn parser_image_load_honors_meta_img_src_csp() {
 
 #[tokio::test]
 async fn html_image_adoption_reselects_detached_subtree_sources() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-adoption.test/page.html");
 
     let before = vm
@@ -3030,7 +3014,7 @@ async fn html_image_adoption_reselects_detached_subtree_sources() {
     assert_eq!(before, "true|true|true|true|true|0");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "adopted image events should drain"
     );
 
@@ -3046,7 +3030,6 @@ async fn html_image_adoption_reselects_detached_subtree_sources() {
 
 #[tokio::test]
 async fn html_picture_relevant_tree_mutations_reload_images() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://picture-relevant-mutations.test/page.html");
 
@@ -3085,7 +3068,7 @@ async fn html_picture_relevant_tree_mutations_reload_images() {
     .expect("picture relevant mutation setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "initial image events should drain"
     );
 
@@ -3108,7 +3091,7 @@ async fn html_picture_relevant_tree_mutations_reload_images() {
     .expect("picture relevant mutations should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "relevant mutation image events should drain"
     );
 
@@ -3120,7 +3103,6 @@ async fn html_picture_relevant_tree_mutations_reload_images() {
 
 #[tokio::test]
 async fn html_image_available_resource_makes_complete_synchronous_after_load() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-cache.test/page.html");
 
     vm.eval(
@@ -3143,7 +3125,7 @@ async fn html_image_available_resource_makes_complete_synchronous_after_load() {
     .expect("image cache setup should evaluate");
 
     assert_eq!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await,
+        drain_canvas_image_load_event_tasks(&mut vm).await,
         2,
         "the preload handler should append one cached-image task to the same FIFO"
     );
@@ -3163,7 +3145,7 @@ async fn html_image_available_resource_makes_complete_synchronous_after_load() {
     assert_eq!(after_preload, "true|true|cached-load");
 
     assert_eq!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await,
+        drain_canvas_image_load_event_tasks(&mut vm).await,
         0,
         "the initial family drain should already consume the cached-image tail task"
     );
@@ -3177,7 +3159,6 @@ async fn html_image_available_resource_makes_complete_synchronous_after_load() {
 
 #[tokio::test]
 async fn html_image_decode_uses_owned_resource_state_and_tracks_source_changes() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-decode.test/page.html");
 
     vm.eval(
@@ -3303,7 +3284,7 @@ async fn html_image_decode_uses_owned_resource_state_and_tracks_source_changes()
     .expect("image decode setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "image decode DOM-manipulation tasks should run"
     );
 
@@ -3320,7 +3301,6 @@ async fn html_image_decode_uses_owned_resource_state_and_tracks_source_changes()
 
 #[tokio::test]
 async fn html_image_decode_rejects_old_document_request_on_document_open() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://image-decode-document-open.test/page.html");
 
@@ -3374,7 +3354,7 @@ async fn html_image_decode_rejects_old_document_request_on_document_open() {
         "rejected:EncodingError:true"
     );
 
-    let _ = drain_canvas_image_load_event_tasks(&mut vm, &loader).await;
+    let _ = drain_canvas_image_load_event_tasks(&mut vm).await;
     assert_eq!(
         vm.eval("globalThis.__lmImageDecodeReplacement")
             .expect("retired decode result should remain stable"),
@@ -3509,7 +3489,6 @@ document.getElementById("decode-owner-frame").srcdoc = "<body><p>replacement</p>
 
 #[tokio::test]
 async fn html_image_lazy_detached_sources_wait_until_inserted() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://image-lazy-detached.test/page.html");
 
@@ -3540,7 +3519,7 @@ async fn html_image_lazy_detached_sources_wait_until_inserted() {
 
     assert_eq!(before_insert, "");
 
-    let _ = drain_canvas_image_load_event_tasks(&mut vm, &loader).await;
+    let _ = drain_canvas_image_load_event_tasks(&mut vm).await;
 
     let after_detached_drain = vm
         .eval("globalThis.__lmLazyImageEvents.events.join(',')")
@@ -3567,7 +3546,7 @@ async fn html_image_lazy_detached_sources_wait_until_inserted() {
             .expect("inserted lazy-image layout refresh should succeed")
     );
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "inserted lazy image events should dispatch"
     );
 
@@ -3580,7 +3559,6 @@ async fn html_image_lazy_detached_sources_wait_until_inserted() {
 
 #[tokio::test]
 async fn html_image_disconnected_lazy_defers_while_auto_and_eager_load() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://image-disconnected-lazy.test/page.html");
 
@@ -3611,7 +3589,7 @@ async fn html_image_disconnected_lazy_defers_while_auto_and_eager_load() {
     .expect("disconnected image setup should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "disconnected image events should drain"
     );
 
@@ -3624,7 +3602,6 @@ async fn html_image_disconnected_lazy_defers_while_auto_and_eager_load() {
 
 #[tokio::test]
 async fn html_image_below_viewport_lazy_waits_until_scroll_reveal() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-lazy-scroll.test/page.html");
 
     vm.eval(
@@ -3651,7 +3628,7 @@ async fn html_image_below_viewport_lazy_waits_until_scroll_reveal() {
     .expect("lazy scroll setup should evaluate");
 
     assert_eq!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await,
+        drain_canvas_image_load_event_tasks(&mut vm).await,
         0,
         "lazy requests wait for a real layout sample"
     );
@@ -3660,7 +3637,7 @@ async fn html_image_below_viewport_lazy_waits_until_scroll_reveal() {
             .expect("initial lazy-image layout refresh should succeed")
     );
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "the near-viewport lazy image should be admitted"
     );
 
@@ -3674,7 +3651,7 @@ async fn html_image_below_viewport_lazy_waits_until_scroll_reveal() {
         .expect("scrollIntoView should reveal lazy image");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "live scroll offsets should reveal the far lazy image from the latest snapshot"
     );
 
@@ -3687,7 +3664,6 @@ async fn html_image_below_viewport_lazy_waits_until_scroll_reveal() {
 
 #[tokio::test]
 async fn html_image_loading_change_to_eager_reveals_deferred_lazy_image() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-lazy-eager.test/page.html");
 
     vm.eval(
@@ -3711,7 +3687,7 @@ async fn html_image_loading_change_to_eager_reveals_deferred_lazy_image() {
     .expect("lazy eager setup should evaluate");
 
     assert_eq!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await,
+        drain_canvas_image_load_event_tasks(&mut vm).await,
         0,
         "the lazy image should not start before a layout sample"
     );
@@ -3720,7 +3696,7 @@ async fn html_image_loading_change_to_eager_reveals_deferred_lazy_image() {
             .expect("far lazy-image layout refresh should succeed")
     );
     assert_eq!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await,
+        drain_canvas_image_load_event_tasks(&mut vm).await,
         0,
         "a real far-below fragment must remain deferred"
     );
@@ -3735,7 +3711,7 @@ async fn html_image_loading_change_to_eager_reveals_deferred_lazy_image() {
         .expect("loading eager mutation should evaluate");
 
     assert!(
-        drain_canvas_image_load_event_tasks(&mut vm, &loader).await > 0,
+        drain_canvas_image_load_event_tasks(&mut vm).await > 0,
         "changing loading to eager should start the exact request"
     );
 
@@ -3748,7 +3724,6 @@ async fn html_image_loading_change_to_eager_reveals_deferred_lazy_image() {
 
 #[tokio::test]
 async fn html_image_lifecycle_dispatch_uses_error_event_for_non_image_data_source() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://image-load-order.test/");
 
     let before_load = vm
@@ -3769,7 +3744,7 @@ async fn html_image_lifecycle_dispatch_uses_error_event_for_non_image_data_sourc
 
     assert_eq!(before_load, "false");
 
-    run_one_canvas_image_load_event_task(&mut vm, &loader).await;
+    run_one_canvas_image_load_event_task(&mut vm).await;
 
     let after_load = vm
         .eval("globalThis.__lmBrokenImageEvents.join('|')")
@@ -3780,7 +3755,6 @@ async fn html_image_lifecycle_dispatch_uses_error_event_for_non_image_data_sourc
 
 #[tokio::test]
 async fn html_image_invalid_data_source_dispatches_plain_error_event() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm(
         "https://image-load-order.test/html/semantics/embedded-content/the-img-element/",
     );
@@ -3811,7 +3785,7 @@ async fn html_image_invalid_data_source_dispatches_plain_error_event() {
 
     assert_eq!(before_load, "false");
 
-    run_one_canvas_image_load_event_task(&mut vm, &loader).await;
+    run_one_canvas_image_load_event_task(&mut vm).await;
 
     let after_load = vm
         .eval("globalThis.__lmMissingImageEvents.join('|')")

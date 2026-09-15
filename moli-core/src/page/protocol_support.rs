@@ -1,10 +1,8 @@
 pub use crate::protocol_types::{
     BidiPreloadChannelHandoff, ChildFrameAttachmentSnapshot, ChildFrameDetachmentSnapshot,
-    ChildFrameDocumentNetworkActivitySnapshot, ChildFrameDocumentNetworkResponse,
-    ChildFrameDocumentNetworkSnapshot, ChildFrameDocumentOpenedSnapshot,
-    ChildFrameNavigationSnapshot, ChildFrameTreeEventSnapshot, ChildFrameTreeSnapshot,
-    ContentSecurityPolicyIssueSnapshot, ContentSecurityPolicyViolationType, DocumentStartScript,
-    EmulatedIdleOverride, EmulatedMediaOverrides, InspectorIssueSnapshot,
+    ChildFrameDocumentOpenedSnapshot, ChildFrameNavigationSnapshot, ChildFrameTreeEventSnapshot,
+    ChildFrameTreeSnapshot, ContentSecurityPolicyIssueSnapshot, ContentSecurityPolicyViolationType,
+    DocumentStartScript, EmulatedIdleOverride, EmulatedMediaOverrides, InspectorIssueSnapshot,
     InspectorSourceCodeLocationSnapshot, PendingRuntimeBindingCall, PendingSubresourceAuthInfo,
     PendingSubresourceContinueEvent, PendingSubresourceContinueOutcome,
     PendingSubresourceFetchInfo, PendingSubresourceResponseInfo, PermissionOverrideRegistration,

@@ -134,8 +134,7 @@ impl DocumentRuntime {
             .current_document_resource_loader()
             .expect("stylesheet fetch requires its committed Document authority");
         crate::stylesheet_blocking::RendererStylesheetFetcher::new(
-            authority.request_client().clone(),
-            authority.task_runner(),
+            authority,
             self.stylesheet_service_worker_fetch_context(),
         )
     }
@@ -149,8 +148,7 @@ impl DocumentRuntime {
             .current_document_resource_loader()
             .expect("stylesheet preload requires its committed Document authority");
         crate::stylesheet_blocking::RendererStylesheetFetcher::for_speculative_preload(
-            authority.request_client().clone(),
-            authority.task_runner(),
+            authority,
             self.stylesheet_service_worker_fetch_context(),
             request_resource_type,
             link_preload,
@@ -260,7 +258,6 @@ impl DocumentRuntime {
         self.quirks_mode_issue_reported = false;
         self.document_write_script_preload_scanner = None;
         self.main_document_script_preloads = Default::default();
-        self.document_write_script_preloads.clear();
         self.pending_document_write_external_script_load = None;
         self.pending_document_write_stylesheet_blocked_script = None;
         self.pending_document_write_stylesheet_parser_pause = None;

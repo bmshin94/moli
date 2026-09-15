@@ -1500,8 +1500,7 @@ impl CdpConnection {
         let Some((owner_local_host_id, document)) = occurrence.source.document() else {
             return false;
         };
-        let Some((context_id, target_id)) = self.resolved_page_owner_identity_for_owner(owner)
-        else {
+        let Some((context_id, _)) = self.resolved_page_owner_identity_for_owner(owner) else {
             return false;
         };
         let Some(context) = self.browser_context_by_id(&context_id) else {
@@ -1514,10 +1513,6 @@ impl CdpConnection {
                 // exact admission; current Page membership cannot revoke it.
                 moli_core::page::RendererNetworkOutputItem::Resource(_) => true,
                 moli_core::page::RendererNetworkOutputItem::WorkerFetch { .. } => false,
-                moli_core::page::RendererNetworkOutputItem::ChildDocument(_) => {
-                    context.target_renderer_page_residence_identity(&target_id)
-                        == source_renderer_page
-                }
             }
             && source_renderer_page
                 == Some(RendererPageResidenceIdentity::from_parts(

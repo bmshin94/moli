@@ -8,9 +8,7 @@ use moli_module_script_tree as module_tree;
 use url::Url;
 
 use crate::module_script_continuation::ModuleScriptCompletionOwner;
-use crate::network::ResourceRequestClient;
 use crate::planning::ScriptFetchMetadata;
-use crate::protocol_types::NavigationResponse;
 use crate::script_vm::ScriptVm;
 use crate::types::SharedNavigationResponseResult;
 use crate::types::{ScriptErrorConstructorKind, ScriptKind};
@@ -233,13 +231,9 @@ impl NativeModuleGraphFetchRequest {
         &self.source_url
     }
 
-    pub(crate) fn initiator_url(&self) -> &Url {
-        &self.initiator_url
-    }
-
     #[cfg(test)]
     pub(crate) fn initiator_url_for_test(&self) -> &Url {
-        self.initiator_url()
+        &self.initiator_url
     }
 
     pub(crate) fn nonce(&self) -> Option<&str> {
@@ -368,25 +362,10 @@ impl NativeModuleGraphFetchRequest {
         })
     }
 
-    pub(crate) fn fetch_source_callback_with_load<F>(
-        &self,
-        loader: &ResourceRequestClient,
-        load: crate::network::loads::ResourceLoadLease,
-        callback: F,
-    ) -> anyhow::Result<()>
-    where
-        F: FnOnce(
-                std::result::Result<ModuleGraphFetchedSource, String>,
-                Option<SharedNavigationResponseResult>,
-            ) + Send
-            + 'static,
-    {
-        self.fetch_source_callback_inner(loader, load, callback)
-    }
-
     pub(crate) fn fetch_source_for_document<F>(
         &self,
         loader: &crate::network::context::DocumentResourceLoader,
+        initiator: crate::types::SubresourceRequestInitiatorType,
         callback: F,
     ) -> anyhow::Result<()>
     where
@@ -396,35 +375,29 @@ impl NativeModuleGraphFetchRequest {
             ) + Send
             + 'static,
     {
-        let load = loader
-            .register_load(
-                crate::network::loads::ResourceLoadKind::Script,
-                crate::network::loads::ResourceLoadDisposition::Ordinary,
-                None,
+        let request = self.request()?;
+        let (load, network, started) = loader
+            .prepare_resource_request(
+                &request,
+                crate::types::SubresourceResourceType::Script,
+                initiator,
             )
             .ok_or_else(|| anyhow::anyhow!("Document detached before module fetch registration"))?;
-        let request_client = load.request_client();
-        self.fetch_source_callback_with_load(&request_client, load, callback)
-    }
-
-    fn fetch_source_callback_inner<F>(
-        &self,
-        loader: &ResourceRequestClient,
-        load: crate::network::loads::ResourceLoadLease,
-        callback: F,
-    ) -> anyhow::Result<()>
-    where
-        F: FnOnce(
-                std::result::Result<ModuleGraphFetchedSource, String>,
-                Option<SharedNavigationResponseResult>,
-            ) + Send
-            + 'static,
-    {
+        network.observe(started);
         let source_url = self.source_url.clone();
         let kind = self.kind;
         let integrity = self.fetch_metadata.request_metadata.integrity.clone();
-        let request = self.request()?;
-        let completion = move |response: crate::network::ResourceResponseResult| {
+        let task_loader = loader.clone();
+        loader.spawn_resource_task(async move {
+            let response = task_loader
+                .fetch_started_resource(
+                    request,
+                    crate::types::SubresourceResourceType::Script,
+                    load,
+                    network,
+                )
+                .await
+                .map(|(response, _)| response);
             let mut network_result: Option<SharedNavigationResponseResult> = None;
             let result = response
                 .map_err(|error| {
@@ -436,7 +409,6 @@ impl NativeModuleGraphFetchRequest {
                     .to_owned()
                 })
                 .and_then(|response| {
-                    let response = NavigationResponse::from(response);
                     network_result = Some(std::sync::Arc::new(Ok(response.clone())));
                     if !(200..=299).contains(&response.status) {
                         return Err(ModuleLoadError::new(
@@ -492,8 +464,8 @@ impl NativeModuleGraphFetchRequest {
                 network_result = Some(std::sync::Arc::new(Err(error.clone())));
             }
             callback(result, network_result);
-        };
-        loader.fetch_cacheable_script_text_callback_with_load(request, load, None, completion)
+        });
+        Ok(())
     }
 }
 
@@ -2582,10 +2554,7 @@ mod tests {
     use crate::{
         dom::native::{DomHost, NativeDom},
         module_runtime::NativeModuleSingleFetchRequest,
-        network::{
-            RendererResourceTaskRunner, ResourceRequestClient,
-            loads::{ResourceLoadDisposition, ResourceLoadKind, ResourceLoadRegistry},
-        },
+        network::{RendererResourceTaskRunner, ResourceRequestClient},
         script_vm::{ScriptVmDefaultWorldBootstrap, StandaloneScriptVmHarness},
         types::{ModuleGraphFetchCompletion, ModuleGraphFetchOrdering, ModuleGraphFetchRequester},
     };
@@ -3830,21 +3799,19 @@ import "./c.mjs";
             dependency: None,
         };
         let (tx, rx) = oneshot::channel();
-        let registry = ResourceLoadRegistry::new(
+        let document = crate::network::context::DocumentResourceLoader::for_test(
+            loader.clone(),
             RendererResourceTaskRunner::from_current_tokio()
                 .expect("module fetch test must own a Tokio runtime"),
+            request.initiator_url.clone(),
         );
-        let load = registry
-            .register(
-                ResourceLoadKind::Script,
-                ResourceLoadDisposition::Ordinary,
-                loader.frozen_request_client(),
-                None,
-            )
-            .expect("module fetch test load should register");
-        request.fetch_source_callback_with_load(loader, load, move |result, network_result| {
-            let _ = tx.send((result, network_result));
-        })?;
+        request.fetch_source_for_document(
+            &document,
+            crate::types::SubresourceRequestInitiatorType::Parser,
+            move |result, network_result| {
+                let _ = tx.send((result, network_result));
+            },
+        )?;
         let (result, network_result) = rx.await?;
         let source_result = result.map_err(anyhow::Error::msg);
         let network_result = network_result.expect("module fetch should record network result");

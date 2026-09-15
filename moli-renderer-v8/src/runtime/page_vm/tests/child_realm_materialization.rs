@@ -199,10 +199,7 @@ async fn prebootstrapped_child_script_becomes_runnable_only_after_typed_realm_ma
         );
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::ChildDocumentScriptReady,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildDocumentScriptReady)
                 .await?,
             "the realm-bound script must retain one typed selected Page task"
         );
@@ -798,7 +795,6 @@ fn page_vm_replacement_rejects_naturally_colliding_child_realm_target() {
                         current_owner.target(),
                         "fresh PageVm-local counters and identical DOM construction must naturally reproduce the entire local child target"
                     );
-
 
                     let current = page_vm
                         .run_child_realm_materialization_body_for_test()?

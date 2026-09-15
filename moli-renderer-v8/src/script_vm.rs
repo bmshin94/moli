@@ -592,7 +592,9 @@ use super::{
         RendererPageContextCancelSender, RendererPageDiagnosticsSnapshot,
         RendererRuntimeObservableSourceQueue, renderer_page_context_cancel_channel,
     },
-    types::{JsValueSnapshot, ScriptKind, ScriptMode, ScriptSourceKind, SubresourceResourceType},
+    types::{
+        JsValueSnapshot, ScriptKind, ScriptMode, ScriptSourceKind, SubresourceRequestInitiatorType,
+    },
     util::v8_string,
 };
 
@@ -1806,6 +1808,60 @@ impl ScriptVm {
     }
 }
 
+/// The parser and its eventual Window share this one main Document admission.
+/// Resource loading may start before the V8 realm is constructed.
+pub(crate) struct MainDocumentBootstrap {
+    frame_owner_store: FrameOwnerStore,
+    pub(crate) resource_loader: DocumentResourceLoader,
+}
+
+impl MainDocumentBootstrap {
+    pub(crate) fn new(
+        dom_host: &DomHost,
+        request_client: ResourceRequestClient,
+        task_runner: crate::network::RendererResourceTaskRunner,
+        browser_context: &RendererBrowserContextRuntime,
+    ) -> Self {
+        let document_handle = dom_host.document_handle();
+        let document_url = dom_host
+            .dom()
+            .final_url()
+            .expect("parsed native DOM must retain a Document URL")
+            .clone();
+        let base_url = dom_host
+            .document_base_url_for_handle(document_handle)
+            .unwrap_or_else(|| document_url.clone());
+        let origin = moli_url::origin_ascii_serialization(&document_url);
+        let mut frame_owner_store = FrameOwnerStore::default();
+        frame_owner_store.ensure_main_frame(
+            document_handle,
+            document_url.clone(),
+            base_url.clone(),
+            origin.clone(),
+            crate::document_runtime::DocumentPolicyContainer::default(),
+            crate::types::SubresourcePolicyContext::default(),
+            None,
+        );
+        let owner = frame_owner_store
+            .current_main_document_task_owner()
+            .expect("main frame admission must produce a Document owner");
+        let resource_loader = DocumentResourceLoader::new(
+            request_client,
+            browser_context.bind_resource_task_runner(task_runner),
+            crate::network::context::DocumentFetchContext::new(
+                crate::native_bridge::WindowDocumentOwner::Frame(owner),
+                document_url,
+                base_url,
+                origin,
+            ),
+        );
+        Self {
+            frame_owner_store,
+            resource_loader,
+        }
+    }
+}
+
 impl ScriptVmPageRealmBootstrap {
     fn new_from_dom_host(
         dom_host: DomHost,
@@ -1813,7 +1869,7 @@ impl ScriptVmPageRealmBootstrap {
         page_task_tx: RuntimePageTaskSender,
         page_task_parser_boundary_injection_tx: tokio::sync::mpsc::UnboundedSender<PageTask>,
         resource_completion_tx: RendererResourceCompletionSender,
-        initial_document_loader_bootstrap: crate::network::context::DocumentResourceLoaderBootstrap,
+        initial_document: MainDocumentBootstrap,
         browser_context_runtime: RendererBrowserContextRuntime,
         javascript_dialog_runtime: crate::runtime::RendererJavaScriptDialogRuntime,
         renderer_document_isolate_bootstrap: RendererDocumentIsolateBootstrap,
@@ -1827,25 +1883,10 @@ impl ScriptVmPageRealmBootstrap {
             crate::service_worker_runtime::ServiceWorkerClientId,
         >,
     ) -> std::result::Result<Self, ScriptVmBootstrapError> {
-        let document_handle = dom_host.document_handle();
-        let document_url = dom_host
-            .dom()
-            .final_url()
-            .expect("parsed native dom must retain a document url")
-            .clone();
-        let document_base_url = dom_host
-            .document_base_url_for_handle(document_handle)
-            .unwrap_or_else(|| document_url.clone());
-        let mut frame_owner_store = FrameOwnerStore::default();
-        frame_owner_store.ensure_main_frame(
-            document_handle,
-            document_url.clone(),
-            document_base_url,
-            moli_url::origin_ascii_serialization(&document_url),
-            crate::document_runtime::DocumentPolicyContainer::default(),
-            crate::types::SubresourcePolicyContext::default(),
-            None,
-        );
+        let MainDocumentBootstrap {
+            frame_owner_store,
+            resource_loader: initial_document_loader,
+        } = initial_document;
         let main_document_owner = frame_owner_store
             .current_main_document_task_owner()
             .expect("main frame admission must produce a Document owner");
@@ -1856,7 +1897,9 @@ impl ScriptVmPageRealmBootstrap {
         let stylesheet_task_sender = page_task_tx.stylesheet_task_sender();
         let main_parser_continuation_sender = page_task_tx.main_parser_continuation_sender();
         let resource_owner_id = crate::resource_owner::ResourceOwnerId::new();
-        let author_styles_disabled = initial_document_loader_bootstrap.author_styles_disabled();
+        let author_styles_disabled = initial_document_loader
+            .request_client()
+            .author_styles_disabled();
         let mut document_runtime = Box::new(DocumentRuntime::from_main_frame_dom_host(
             dom_host,
             main_document_owner,
@@ -1914,25 +1957,6 @@ impl ScriptVmPageRealmBootstrap {
             top_level_storage_key,
             reserved_service_worker_client_id,
         )));
-        let main_document_owner = context_host
-            .borrow()
-            .current_main_document_task_owner()
-            .expect("main Document owner must exist after native host construction");
-        let initial_document_context = {
-            let context_host = context_host.borrow();
-            let document_url = context_host.document_url().clone();
-            let document_handle = context_host.document_handle();
-            crate::network::context::DocumentFetchContext::new(
-                crate::native_bridge::WindowDocumentOwner::Frame(main_document_owner),
-                document_url.clone(),
-                context_host.document_base_url_for_handle(document_handle),
-                moli_url::origin_ascii_serialization(&document_url),
-            )
-        };
-        let initial_document_loader = initial_document_loader_bootstrap.commit(
-            initial_document_context,
-            &context_host.borrow().browser_context_runtime(),
-        );
         context_host
             .borrow_mut()
             .register_main_document_resource_loader(&initial_document_loader);
@@ -2125,7 +2149,7 @@ impl ScriptVmDefaultWorldBootstrap {
         page_task_tx: RuntimePageTaskSender,
         page_task_parser_boundary_injection_tx: tokio::sync::mpsc::UnboundedSender<PageTask>,
         resource_completion_tx: RendererResourceCompletionSender,
-        initial_document_loader_bootstrap: crate::network::context::DocumentResourceLoaderBootstrap,
+        initial_document_loader_bootstrap: MainDocumentBootstrap,
         browser_context_runtime: RendererBrowserContextRuntime,
     ) -> std::result::Result<Self, ScriptVmBootstrapError> {
         let renderer_document_isolate_bootstrap =
@@ -2160,7 +2184,7 @@ impl ScriptVmDefaultWorldBootstrap {
         page_task_tx: RuntimePageTaskSender,
         page_task_parser_boundary_injection_tx: tokio::sync::mpsc::UnboundedSender<PageTask>,
         resource_completion_tx: RendererResourceCompletionSender,
-        initial_document_loader_bootstrap: crate::network::context::DocumentResourceLoaderBootstrap,
+        initial_document_loader_bootstrap: MainDocumentBootstrap,
         browser_context_runtime: RendererBrowserContextRuntime,
         javascript_dialog_runtime: crate::runtime::RendererJavaScriptDialogRuntime,
         renderer_document_isolate_bootstrap: RendererDocumentIsolateBootstrap,
@@ -5859,21 +5883,17 @@ impl ScriptVm {
     }
 
     #[cfg(test)]
-    pub(super) async fn advance_timers_until_deadline_for_test(
-        &mut self,
-        loader: &ResourceRequestClient,
-    ) -> Result<()> {
+    pub(super) async fn advance_timers_until_deadline_for_test(&mut self) -> Result<()> {
         let deadline = Instant::now()
             .checked_add(std::time::Duration::from_millis(3_200))
             .unwrap_or_else(Instant::now);
-        self.advance_timers_until_deadline_for_test_with_deadline(loader, deadline)
+        self.advance_timers_until_deadline_for_test_with_deadline(deadline)
             .await
     }
 
     #[cfg(test)]
     pub(super) async fn advance_timers_until_deadline_for_test_with_deadline(
         &mut self,
-        loader: &ResourceRequestClient,
         deadline: Instant,
     ) -> Result<()> {
         const MAX_TEST_ADVANCE_ROUNDS: usize = 10_000;
@@ -5883,8 +5903,7 @@ impl ScriptVm {
             // This is an explicit low-level executor test helper. Production
             // callers must enter through the scheduler-selected PageTimer
             // turn, never through a generic ready-task drain.
-            if self.has_ready_timeout() && self.run_next_due_timer_callback_for_test(loader).await?
-            {
+            if self.has_ready_timeout() && self.run_next_due_timer_callback_for_test().await? {
                 rounds += 1;
                 continue;
             }
@@ -5936,10 +5955,7 @@ impl ScriptVm {
     /// dispatcher. Standalone domain fixtures have no Page owner slot, so this
     /// helper explicitly supplies the same bounded callback completion.
     #[cfg(test)]
-    pub(crate) async fn run_next_due_timer_callback_for_test(
-        &mut self,
-        loader: &ResourceRequestClient,
-    ) -> Result<bool> {
+    pub(crate) async fn run_next_due_timer_callback_for_test(&mut self) -> Result<bool> {
         let result = self.run_next_due_timer_callback_body(
             crate::page_task_queue::RendererPageTimerSelection::AnyReady,
         )?;
@@ -5948,7 +5964,7 @@ impl ScriptVm {
         }
         // Timer turns are ordinary runtime activity. Runtime follow-up may
         // publish concrete Page work, but must not wait for network completion.
-        self.finish_selected_page_callback_task(loader).await?;
+        self.finish_selected_page_callback_task().await?;
         Ok(true)
     }
 
@@ -5971,10 +5987,9 @@ impl ScriptVm {
 
     pub(super) async fn finish_host_task_turn(
         &mut self,
-        loader: &ResourceRequestClient,
         wait_for_dynamic_loads: bool,
     ) -> Result<()> {
-        self.flush_pending_work(loader, wait_for_dynamic_loads)
+        self.flush_pending_work(wait_for_dynamic_loads)
             .await
             .map_err(anyhow::Error::msg)?;
         Ok(())
@@ -5982,7 +5997,6 @@ impl ScriptVm {
 
     pub(super) async fn run_prepared_script(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
         dynamic_script_owner_id: Option<crate::dynamic_script_owner::DynamicScriptOwnerId>,
     ) -> std::result::Result<PreparedScriptExecutionOutcome, PreparedScriptExecutionError> {
@@ -5992,7 +6006,7 @@ impl ScriptVm {
             kind = ?script.kind,
             "run_prepared_script begin"
         );
-        let Some(run_input) = self.prepare_prepared_script_run(loader, script).await? else {
+        let Some(run_input) = self.prepare_prepared_script_run(script).await? else {
             return Ok(PreparedScriptExecutionOutcome::Dropped(
                 PreparedScriptBodyActivity::NotEntered,
             ));
@@ -6070,7 +6084,6 @@ impl ScriptVm {
             PreparedScriptFinishBehavior::FlushPendingWork
         };
         self.finish_run_prepared_script(
-            loader,
             script,
             false,
             skip_current_script_load_enqueue,
@@ -6140,7 +6153,6 @@ impl ScriptVm {
 
     pub(super) async fn settle_prepared_module_success(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
         document_owner_before_run: crate::frame_owner_model::FrameDocumentTaskOwner,
         dynamic_script_owner_id: Option<crate::dynamic_script_owner::DynamicScriptOwnerId>,
@@ -6181,7 +6193,6 @@ impl ScriptVm {
             PreparedScriptFinishBehavior::FlushPendingWork
         };
         self.finish_run_prepared_script(
-            loader,
             script,
             false,
             skip_current_script_load_enqueue,
@@ -6197,7 +6208,6 @@ impl ScriptVm {
 
     async fn finish_run_prepared_script(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
         defer_script_event_dispatches: bool,
         skip_current_script_load_enqueue: bool,
@@ -6268,7 +6278,7 @@ impl ScriptVm {
         }
         let result = match finish_behavior {
             PreparedScriptFinishBehavior::FlushPendingWork => {
-                self.flush_pending_work(loader, !defer_script_event_dispatches)
+                self.flush_pending_work(!defer_script_event_dispatches)
                     .await
             }
             PreparedScriptFinishBehavior::QueueRuntimeContinuation => {
@@ -7100,15 +7110,6 @@ impl ScriptVm {
     }
 
     #[cfg(test)]
-    pub(super) fn take_completed_child_document_networks(
-        &mut self,
-    ) -> Vec<crate::protocol_types::ChildFrameDocumentNetworkActivitySnapshot> {
-        self._context_host
-            .borrow_mut()
-            .take_completed_child_document_networks()
-    }
-
-    #[cfg(test)]
     pub(super) fn take_pending_child_frame_tree_events(
         &mut self,
     ) -> Vec<crate::protocol_types::ChildFrameTreeEventSnapshot> {
@@ -7856,25 +7857,22 @@ impl ScriptVm {
 
     pub(crate) async fn prepare_prepared_script_run(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
     ) -> std::result::Result<Option<PreparedScriptRunInput>, PreparedScriptExecutionError> {
-        self.prepare_prepared_script_run_with_options(loader, script, true, None)
+        self.prepare_prepared_script_run_with_options(script, true, None)
             .await
     }
 
     pub(crate) async fn prepare_prepared_script_run_without_blocker_wait(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
     ) -> std::result::Result<Option<PreparedScriptRunInput>, PreparedScriptExecutionError> {
-        self.prepare_prepared_script_run_with_options(loader, script, false, None)
+        self.prepare_prepared_script_run_with_options(script, false, None)
             .await
     }
 
     async fn prepare_prepared_script_run_with_options(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
         wait_for_blocking_stylesheets: bool,
         blocking_signatures_before: Option<
@@ -7978,29 +7976,24 @@ impl ScriptVm {
             _ => {
                 let document_character_set =
                     self.document_runtime.document_character_set().to_owned();
-                let outcome =
-                    super::planning::load_prepared_script_source_outcome_with_document_character_set(
-                        script,
-                        loader,
-                        Some(&document_character_set),
-                        None,
-                        self.current_main_document_resource_loader()
-                            .ok_or_else(|| PreparedScriptExecutionError::from_message("script Document resource authority is unavailable".to_owned()))?
-                            .task_runner(),
-                    )
-                    .await;
-                if let Some(network_result) = outcome.network_result.as_deref() {
-                    self._context_host
-                        .borrow_mut()
-                        .record_get_subresource_network_result_with_initiator(
-                            None,
-                            script.initiator_url.clone(),
-                            script.url.clone(),
-                            SubresourceResourceType::Script,
-                            crate::types::SubresourceRequestInitiatorType::Parser,
-                            network_result,
-                        );
-                }
+                let outcome = super::planning::load_script_source(
+                    script,
+                    &self
+                        .current_main_document_resource_loader()
+                        .ok_or_else(|| {
+                            PreparedScriptExecutionError::from_message(
+                                "script Document resource authority is unavailable",
+                            )
+                        })?,
+                    Some(&document_character_set),
+                    None,
+                    if csp_script_request.parser_inserted {
+                        SubresourceRequestInitiatorType::Parser
+                    } else {
+                        SubresourceRequestInitiatorType::Script
+                    },
+                )
+                .await;
                 self.enforce_external_script_redirect_csp(
                     script,
                     outcome.network_result.as_deref(),
@@ -8097,12 +8090,11 @@ impl ScriptVm {
 
     pub(crate) async fn run_parser_owned_classic_script_without_blocker_wait(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
         execution_context: &ParserOwnedClassicScriptExecutionContext,
     ) -> ParserOwnedClassicScriptExecutionReport {
         let run_input = match self
-            .prepare_prepared_script_run_without_blocker_wait(loader, script)
+            .prepare_prepared_script_run_without_blocker_wait(script)
             .await
         {
             Ok(Some(run_input)) => run_input,
@@ -8238,16 +8230,14 @@ impl ScriptVm {
 
     async fn execute_prepared_script_once(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
     ) -> std::result::Result<bool, PreparedScriptExecutionError> {
-        self.execute_prepared_script_once_with_blocking_signatures(loader, script, None)
+        self.execute_prepared_script_once_with_blocking_signatures(script, None)
             .await
     }
 
     async fn execute_prepared_script_once_with_blocking_signatures(
         &mut self,
-        loader: &ResourceRequestClient,
         script: &PreparedScript,
         blocking_signatures_before: Option<
             &std::collections::HashSet<
@@ -8256,12 +8246,7 @@ impl ScriptVm {
         >,
     ) -> std::result::Result<bool, PreparedScriptExecutionError> {
         let Some(run_input) = self
-            .prepare_prepared_script_run_with_options(
-                loader,
-                script,
-                true,
-                blocking_signatures_before,
-            )
+            .prepare_prepared_script_run_with_options(script, true, blocking_signatures_before)
             .await?
         else {
             return Ok(false);

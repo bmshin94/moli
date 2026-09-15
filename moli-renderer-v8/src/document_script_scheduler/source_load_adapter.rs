@@ -1,6 +1,6 @@
 use crate::{
     frame_owner_model::DocumentLoadDelayTokenId,
-    network::{RendererResourceTaskRunner, ResourceRequestClient},
+    network::context::DocumentResourceLoader,
     page_task_queue::RendererOwnerWakeSender,
     planning::{PreparedScript, SharedScriptSourceLoad},
     stylesheet_blocking::DocumentBlockingStylesheetSignature,
@@ -13,17 +13,17 @@ use super::{
 };
 
 pub(super) fn document_script_source_load_port(
-    loader: &ResourceRequestClient,
-    task_runner: RendererResourceTaskRunner,
+    loader: &DocumentResourceLoader,
     owner_wake: Option<RendererOwnerWakeSender>,
 ) -> DocumentScriptSourceLoadPort {
     let loader = loader.clone();
     DocumentScriptSourceLoadPort::new(move |script, document_character_set| {
-        SharedScriptSourceLoad::spawn_with_request_resource_type_and_owner_wake(
+        SharedScriptSourceLoad::spawn(
             script,
             loader.clone(),
-            task_runner.clone(),
             document_character_set,
+            None,
+            crate::types::SubresourceRequestInitiatorType::Parser,
             None,
             owner_wake.clone(),
         )
@@ -142,8 +142,7 @@ impl<
     pub(crate) fn accept_parser_discovered_async_candidate(
         &mut self,
         script: PreparedScript,
-        loader: &ResourceRequestClient,
-        task_runner: RendererResourceTaskRunner,
+        loader: &DocumentResourceLoader,
         shared_load: Option<SharedScriptSourceLoad>,
         document_character_set: Option<&str>,
         bind_load_delay: impl FnOnce(
@@ -152,7 +151,7 @@ impl<
             -> crate::frame_owner_model::MainDocumentScriptLoadDelayLease,
     ) -> bool {
         let source_load_port =
-            document_script_source_load_port(loader, task_runner, self.runner.owner_wake.clone());
+            document_script_source_load_port(loader, self.runner.owner_wake.clone());
         self.runner
             .on_parser_discovered_async_candidate_with_source_load_port(
                 script,
@@ -181,8 +180,7 @@ impl<
     pub(crate) fn recover_parse_time_async_handoff_with_load_delay_binding(
         &mut self,
         script: PreparedScript,
-        loader: &ResourceRequestClient,
-        task_runner: RendererResourceTaskRunner,
+        loader: &DocumentResourceLoader,
         shared_load: Option<SharedScriptSourceLoad>,
         document_character_set: Option<&str>,
         bind_load_delay: impl FnOnce(
@@ -191,7 +189,7 @@ impl<
             -> crate::frame_owner_model::MainDocumentScriptLoadDelayLease,
     ) -> bool {
         let source_load_port =
-            document_script_source_load_port(loader, task_runner, self.runner.owner_wake.clone());
+            document_script_source_load_port(loader, self.runner.owner_wake.clone());
         self.runner
             .recover_parse_time_async_handoff_with_source_load_port(
                 script,

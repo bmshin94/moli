@@ -121,9 +121,6 @@ fn observe_dedicated_worker_network(
                     let source = input.occurrence.source.clone();
                     input.commit(1, source);
                 }
-                crate::runtime::RendererNetworkOutputItem::ChildDocument(_) => {
-                    panic!("a Worker must not publish a child Document response");
-                }
             }
         }
     });
@@ -5609,7 +5606,6 @@ fn moving_open_popover_between_documents_clears_internal_open_state() {
 
 #[tokio::test]
 async fn showing_popover_focuses_autofocus_descendant_before_toggle_event() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://popover-autofocus.test/");
 
     let before = vm
@@ -5646,8 +5642,7 @@ async fn showing_popover_focuses_autofocus_descendant_before_toggle_event() {
     assert!(!vm.has_ready_timeout());
     assert!(
         vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::ElementToggle,
-            &loader,
+            PageDomManipulationTestFamily::ElementToggle
         )
         .await
         .expect("queued popover toggle task should run")
@@ -6035,7 +6030,6 @@ fn base_href_reflection_and_document_base_url_follow_first_supported_href() {
 }
 #[tokio::test]
 async fn removing_open_popover_dispatches_forced_close_events() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://popover-removal-events.test/");
 
     let before = vm
@@ -6070,8 +6064,7 @@ async fn removing_open_popover_dispatches_forced_close_events() {
     assert!(!vm.has_ready_timeout());
     assert!(
         vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::ElementToggle,
-            &loader,
+            PageDomManipulationTestFamily::ElementToggle
         )
         .await
         .expect("initial popover show toggle task should run")
@@ -6098,8 +6091,7 @@ async fn removing_open_popover_dispatches_forced_close_events() {
     assert!(!vm.has_ready_timeout());
     assert!(
         vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::ElementToggle,
-            &loader,
+            PageDomManipulationTestFamily::ElementToggle
         )
         .await
         .expect("queued popover removal toggle task should run")
@@ -6120,7 +6112,6 @@ async fn removing_open_popover_dispatches_forced_close_events() {
 }
 #[tokio::test]
 async fn popover_toggle_events_coalesce_within_one_task() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://popover-toggle-coalesce.test/");
 
     let before = vm
@@ -6152,16 +6143,14 @@ async fn popover_toggle_events_coalesce_within_one_task() {
     assert!(!vm.has_ready_timeout());
     assert!(
         vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::ElementToggle,
-            &loader,
+            PageDomManipulationTestFamily::ElementToggle
         )
         .await
         .expect("coalesced popover toggle task should run")
     );
     assert!(
         !vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::ElementToggle,
-            &loader,
+            PageDomManipulationTestFamily::ElementToggle
         )
         .await
         .expect("coalesced popover source should drain after one live task")
@@ -6972,7 +6961,7 @@ async fn webassembly_compile_accepts_spec_valid_bounds_above_v8_instantiation_li
         }
 
         if vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("production selected Page-task dispatcher should run")
         {
@@ -8524,7 +8513,7 @@ async fn data_url_frame_hides_secure_storage_and_opfs_interfaces() {
     assert_eq!(setup, "queued");
 
     for _ in 0..8 {
-        vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+        vm.drain_ready_page_task_executor_turns_for_setup(128)
             .await
             .expect("child setup should use the selected-task dispatcher");
         let result = vm
@@ -8534,7 +8523,7 @@ async fn data_url_frame_hides_secure_storage_and_opfs_interfaces() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("data URL storage exposure child load should advance");
     }
@@ -8764,7 +8753,7 @@ async fn navigator_storage_methods_reject_in_opaque_origin_frame() {
     assert_eq!(setup, "queued");
 
     for _ in 0..8 {
-        vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+        vm.drain_ready_page_task_executor_turns_for_setup(128)
             .await
             .expect("child setup should use the selected-task dispatcher");
         let message_count = vm
@@ -8774,7 +8763,7 @@ async fn navigator_storage_methods_reject_in_opaque_origin_frame() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("opaque StorageManager child load should advance");
     }
@@ -10340,13 +10329,10 @@ async fn network_dedicated_worker_storage_access_opfs_handle_clone_reuses_partit
     )
     .expect("network Worker OPFS clone probe should schedule");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__opfsWorkerCloneProbe)",
-        r#"{"brand":true,"name":"worker-clone.txt","permission":"granted","before":"page bytes","after":"worker bytes","pageText":"worker bytes"}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__opfsWorkerCloneProbe)",
+r#"{"brand":true,"name":"worker-clone.txt","permission":"granted","before":"page bytes","after":"worker bytes","pageText":"worker bytes"}"#)
     .await;
 
     server
@@ -10446,13 +10432,10 @@ async fn network_dedicated_worker_file_snapshot_clone_retains_opfs_incarnation()
     )
     .expect("network Worker OPFS snapshot clone probe should schedule");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__opfsWorkerSnapshotCloneProbe)",
-        r#"{"type":"result","brand":true,"text":"worker snapshot","writeResult":"NotFoundError","targetSize":0}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__opfsWorkerSnapshotCloneProbe)",
+r#"{"type":"result","brand":true,"text":"worker snapshot","writeResult":"NotFoundError","targetSize":0}"#)
     .await;
 
     server
@@ -11203,7 +11186,6 @@ async fn third_party_iframe_storage_bucket_manager_uses_partitioned_storage_key(
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__storageBucketPartitionMessage !== null)",
         "true",
         "storage bucket partition child result",
@@ -11409,7 +11391,7 @@ async fn storage_bucket_manager_methods_reject_in_opaque_origin_frame() {
     assert_eq!(setup, "queued");
 
     for _ in 0..8 {
-        vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+        vm.drain_ready_page_task_executor_turns_for_setup(128)
             .await
             .expect("child setup should use the selected-task dispatcher");
         let message_count = vm
@@ -11419,7 +11401,7 @@ async fn storage_bucket_manager_methods_reject_in_opaque_origin_frame() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("opaque StorageBucket child load should advance");
     }
@@ -11587,13 +11569,10 @@ async fn navigator_service_worker_shim_controls_window_fetch() {
     )
     .expect("service worker shim probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerProbe, 'afterUnregisterText') && globalThis.__serviceWorkerProbe.controllerChangeLog.length === 2)",
-        "true",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerProbe, 'afterUnregisterText') && globalThis.__serviceWorkerProbe.controllerChangeLog.length === 2)",
+"true")
     .await;
     let result = vm
         .eval("JSON.stringify(globalThis.__serviceWorkerProbe)")
@@ -11688,13 +11667,10 @@ async fn service_worker_bypass_skips_fetch_dispatch_without_dropping_controller(
         "#,
     )
     .expect("service worker bypass setup should evaluate");
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerBypassProbe, 'before'))",
-        "true",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerBypassProbe, 'before'))",
+"true")
     .await;
 
     vm.set_bypass_service_worker(true);
@@ -11708,13 +11684,10 @@ async fn service_worker_bypass_skips_fetch_dispatch_without_dropping_controller(
         "#,
     )
     .expect("bypassed service worker fetch should evaluate");
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerBypassProbe, 'after'))",
-        "true",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerBypassProbe, 'after'))",
+"true")
     .await;
 
     assert_eq!(
@@ -11788,13 +11761,10 @@ async fn navigator_service_worker_fetch_event_preload_response_resolves_undefine
     )
     .expect("service worker preloadResponse probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerPreloadResponseProbe)",
-        r#"203|application/json|{"hasPromise":true,"samePromise":true,"valueType":"undefined","isUndefined":true}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerPreloadResponseProbe)",
+r#"203|application/json|{"hasPromise":true,"samePromise":true,"valueType":"undefined","isUndefined":true}"#)
     .await;
 
     server
@@ -11856,7 +11826,6 @@ async fn navigator_service_worker_fetch_event_request_has_empty_destination_for_
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerFetchRequestDestinationProbe)",
         "200|destination=|mode=cors|credentials=same-origin|redirect=follow|client=true|resulting=",
     )
@@ -11925,7 +11894,6 @@ async fn navigator_service_worker_intercepts_csp_report_destination() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerCspReportProbe)",
         "blocked",
     )
@@ -11946,7 +11914,7 @@ async fn navigator_service_worker_intercepts_csp_report_destination() {
             std::time::Instant::now() < deadline,
             "service worker CSP report destination did not settle: {items:?}"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     server
@@ -12012,7 +11980,6 @@ async fn csp_report_fetch_pause_continue_preserves_service_worker_dispatch() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPausedCspReportProbe)",
         "ready",
     )
@@ -12038,7 +12005,6 @@ async fn csp_report_fetch_pause_continue_preserves_service_worker_dispatch() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPausedCspReportProbe)",
         "blocked",
     )
@@ -12057,7 +12023,7 @@ async fn csp_report_fetch_pause_continue_preserves_service_worker_dispatch() {
             std::time::Instant::now() < deadline,
             "timed out waiting for paused CSP report"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     };
     assert_eq!(paused_report.method, "POST");
     assert_eq!(
@@ -12099,7 +12065,7 @@ async fn csp_report_fetch_pause_continue_preserves_service_worker_dispatch() {
             std::time::Instant::now() < deadline,
             "continued paused CSP report did not settle through Service Worker: {items:?}"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     server
@@ -12200,7 +12166,6 @@ async fn navigator_service_worker_intercepts_worker_csp_report_destination() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerWorkerCspReportProbe)",
         "blocked:true",
     )
@@ -12222,7 +12187,7 @@ async fn navigator_service_worker_intercepts_worker_csp_report_destination() {
             std::time::Instant::now() < deadline,
             "worker CSP report destination did not settle: {items:?}"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     server
@@ -12315,7 +12280,6 @@ async fn worker_csp_report_fetch_pause_continue_preserves_service_worker_dispatc
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__pausedWorkerCspReportProbe)",
         "ready",
     )
@@ -12344,7 +12308,6 @@ async fn worker_csp_report_fetch_pause_continue_preserves_service_worker_dispatc
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__pausedWorkerCspReportProbe)",
         "blocked:true",
     )
@@ -12372,7 +12335,7 @@ async fn worker_csp_report_fetch_pause_continue_preserves_service_worker_dispatc
             std::time::Instant::now() < deadline,
             "timed out waiting for paused worker CSP report"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     };
     let crate::runtime::RendererWorkerFetchStage::Request(info) = paused_report.stage() else {
         panic!("CSP report must pause at request stage");
@@ -12418,7 +12381,7 @@ async fn worker_csp_report_fetch_pause_continue_preserves_service_worker_dispatc
             std::time::Instant::now() < deadline,
             "continued paused worker CSP report did not settle through Service Worker: {items:?}"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     server
@@ -12517,7 +12480,6 @@ async fn navigator_service_worker_intercepts_popup_csp_report_destination() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPopupCspReportProbe)",
         "blocked:true",
     )
@@ -12539,7 +12501,7 @@ async fn navigator_service_worker_intercepts_popup_csp_report_destination() {
             std::time::Instant::now() < deadline,
             "popup CSP report destination did not settle: {items:?}"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     server
@@ -12604,15 +12566,12 @@ async fn navigator_service_worker_fetch_event_request_preserves_window_fetch_pol
     )
     .expect("service worker request policy metadata probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerFetchRequestPolicyMetadataProbe)",
-        &format!(
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerFetchRequestPolicyMetadataProbe)",
+&format!(
             "200|cache=reload|referrer={base_url}/app/referrer.html|referrerPolicy=origin|integrity=sha256-test|keepalive=true"
-        ),
-    )
+        ))
     .await;
 
     server
@@ -12734,7 +12693,6 @@ async fn navigator_service_worker_fetch_follows_and_filters_synthetic_redirect_r
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerSyntheticRedirectProbe)",
         &format!(
             "200|true|{base_url}/app/api/redirect-final.txt|synthetic-redirect-final;\
@@ -12841,15 +12799,12 @@ async fn navigator_service_worker_fetch_event_request_preserves_worker_fetch_pol
     )
     .expect("service worker worker request policy metadata probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerWorkerFetchRequestPolicyMetadataProbe)",
-        &format!(
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerWorkerFetchRequestPolicyMetadataProbe)",
+&format!(
             "200|cache=reload|referrer={base_url}/app/worker-referrer.html|referrerPolicy=origin|integrity=sha256-test|keepalive=true"
-        ),
-    )
+        ))
     .await;
 
     server
@@ -12929,13 +12884,10 @@ async fn navigator_service_worker_intercepts_window_xhr() {
     )
     .expect("service worker XHR probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerXhrProbe)",
-        r#"201|XHR handled|application/json|{"url":"/app/api/xhr.txt","method":"POST","destination":"","mode":"cors","credentials":"same-origin","client":true,"resulting":"","header":"yes","body":"xhr-body"}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerXhrProbe)",
+r#"201|XHR handled|application/json|{"url":"/app/api/xhr.txt","method":"POST","destination":"","mode":"cors","credentials":"same-origin","client":true,"resulting":"","header":"yes","body":"xhr-body"}"#)
     .await;
 
     server
@@ -13011,7 +12963,6 @@ async fn navigator_service_worker_invalid_response_header_fails_window_xhr() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerInvalidHeaderXhrProbe)",
         "error|4|0||",
     )
@@ -13123,7 +13074,6 @@ async fn navigator_service_worker_intercepts_preload_link_destinations() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPreloadDestinationProbe)",
         "audio:load|font:load|image:load|style:load|video:load",
     )
@@ -13245,7 +13195,6 @@ async fn navigator_service_worker_opaque_fetch_preload_does_not_satisfy_window_x
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerOpaquePreloadXhrProbe)",
         "preload:load|xhr:error:4:0:",
     )
@@ -13337,7 +13286,6 @@ async fn navigator_service_worker_intercepts_element_resource_destinations_once(
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerElementResourceProbe)",
         "ready",
     )
@@ -13434,7 +13382,7 @@ async fn navigator_service_worker_intercepts_element_resource_destinations_once(
             std::time::Instant::now() < deadline,
             "element-owned service worker network events did not settle: {items:?}"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
     assert!(
         !vm.has_pending_image_network_requests(),
@@ -13578,7 +13526,6 @@ async fn navigator_service_worker_intercepts_stylesheet_font_face_destination() 
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerStylesheetFontProbe)",
         "link:load",
     )
@@ -13619,7 +13566,7 @@ async fn navigator_service_worker_intercepts_stylesheet_font_face_destination() 
             std::time::Instant::now() < deadline,
             "stylesheet font service worker network events did not settle: {items:?}"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     assert!(
@@ -13735,7 +13682,6 @@ async fn navigator_service_worker_intercepts_connected_stylesheet_link() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerStylesheetLinkProbe)",
         "load|rgb(0, 0, 255)|#sw-style-target { color: rgb(0, 0, 255); }",
     )
@@ -13804,13 +13750,10 @@ async fn navigator_service_worker_update_check_failure_rejects_register_with_typ
     )
     .expect("service worker update failure probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerUpdateFailureProbe)",
-        r#"{"name":"TypeError","isTypeError":true,"isDomException":false,"messageIncludesNosniff":true}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerUpdateFailureProbe)",
+r#"{"name":"TypeError","isTypeError":true,"isDomException":false,"messageIncludesNosniff":true}"#)
     .await;
 
     server
@@ -13890,7 +13833,6 @@ async fn navigator_service_worker_register_applies_script_path_restriction() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPathRestrictionProbe)",
         &expected,
     )
@@ -13966,7 +13908,6 @@ async fn navigator_service_worker_register_identical_main_script_keeps_existing_
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerIdenticalUpdateProbe)",
         &expected,
     )
@@ -14068,7 +14009,6 @@ async fn navigator_service_worker_register_changed_main_script_fires_updatefound
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerChangedUpdateProbe)",
         &expected,
     )
@@ -14158,7 +14098,6 @@ async fn navigator_service_worker_fetch_handler_fetches_event_request_from_netwo
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerFetchEventRequestProbe)",
         "203|Worker Network Fallback|text/plain;charset=UTF-8|proxied:1:network-body",
     )
@@ -14289,7 +14228,6 @@ async fn navigator_service_worker_no_respond_with_fallback_and_rejected_response
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerFallbackFailureProbe)",
         concat!(
             "200|OK|fallback-fetch-empty|",
@@ -14533,7 +14471,6 @@ async fn navigator_service_worker_fetch_event_handled_reports_fetch_settlement()
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerFetchEventHandledProbe)",
         concat!(
             "?handled-frame-fallback:RESOLVED|frame:handled frame fallback;",
@@ -14643,13 +14580,10 @@ async fn navigator_service_worker_fetch_abort_reason_reaches_fetch_event_request
     )
     .expect("service worker abort reason probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerAbortReasonProbe)",
-        r#"fetch-arrived|true:Error:page-abort|{"aborted":true,"name":"Error","message":"page-abort"}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerAbortReasonProbe)",
+r#"fetch-arrived|true:Error:page-abort|{"aborted":true,"name":"Error","message":"page-abort"}"#)
     .await;
 
     server
@@ -14763,13 +14697,10 @@ async fn navigator_service_worker_fetch_abort_reason_serializes_on_abort() {
     )
     .expect("service worker abort reason serialization probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerAbortReasonSerializationProbe)",
-        r#"fetch-arrived|error1|{"name":"error1","message":"serialization"}|true:error2:serialization|"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerAbortReasonSerializationProbe)",
+r#"fetch-arrived|error1|{"name":"error1","message":"serialization"}|true:error2:serialization|"#)
     .await;
 
     server
@@ -14863,7 +14794,6 @@ async fn navigator_service_worker_pre_aborted_fetch_does_not_dispatch_fetch_even
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPreAbortedFetchProbe)",
         "AbortError:true:The operation was aborted.|?no-abort|200|sw:?no-abort",
     )
@@ -14952,7 +14882,6 @@ async fn navigator_service_worker_fetch_response_body_abort_uses_abort_reason() 
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerBodyAbortReasonProbe)",
         "210|false|A|true:Error:body-abort",
     )
@@ -15050,7 +14979,6 @@ async fn navigator_service_worker_response_body_reader_closed_rejects_after_abor
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerReaderClosedAbortProbe)",
         concat!(
             "212|false|A|",
@@ -15146,7 +15074,6 @@ async fn navigator_service_worker_response_body_methods_reject_after_abort() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerBodyMethodsAbortProbe)",
         concat!(
             "arrayBuffer:AbortError:true:The operation was aborted.>next-microtask|",
@@ -15211,7 +15138,7 @@ async fn navigator_service_worker_respond_with_fetch_resolves_before_body_chunk(
         if std::time::Instant::now() >= deadline {
             panic!("service worker respondWith(fetch()) did not resolve headers-first: {value}");
         }
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     release_body
@@ -15220,7 +15147,6 @@ async fn navigator_service_worker_respond_with_fetch_resolves_before_body_chunk(
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRespondWithFetchHeadersFirstProbe)",
         "resolved|200|text/plain; charset=utf-8|false|delayed-body",
     )
@@ -15290,7 +15216,6 @@ async fn navigator_service_worker_respond_with_fetch_body_read_abort_headers_fir
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRespondWithFetchHeadersFirstAbortProbe)",
         concat!(
             "200|",
@@ -15366,7 +15291,6 @@ async fn navigator_service_worker_respond_with_fetch_body_methods_abort_headers_
         drain_service_worker_test_until_eval_equals(
             &mut vm,
             &browser_context_runtime,
-            &loader,
             "String(globalThis.__serviceWorkerRespondWithFetchHeadersFirstBodyMethodProbe)",
             &expected,
         )
@@ -15462,7 +15386,6 @@ async fn navigator_service_worker_synthetic_stream_response_resolves_before_body
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerSyntheticStreamHeadersFirstProbe)",
         "213|yes|true|released|delayed",
     )
@@ -15530,7 +15453,6 @@ async fn navigator_service_worker_respond_with_fetch_event_request_stream_body()
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRespondWithFetchStreamProbe)",
         "200|text/plain; charset=utf-8|network-stream-body",
     )
@@ -15608,7 +15530,6 @@ async fn navigator_service_worker_invalid_response_body_chunk_errors_reader_not_
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerInvalidChunkProbe)",
         "fetch-resolved|209|false|A|TypeError|true",
     )
@@ -15682,7 +15603,6 @@ async fn navigator_service_worker_response_stream_error_rejects_text_not_fetch()
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerStreamErrorProbe)",
         "fetch-resolved|208|TypeError|true",
     )
@@ -15791,7 +15711,6 @@ async fn navigator_service_worker_respond_with_argument_type_controls_fetch_and_
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRespondWithArgumentProbe)",
         concat!(
             "211|direct-body|212|promise-body|TypeError:true|",
@@ -15938,7 +15857,6 @@ async fn navigator_service_worker_fetch_event_network_error_xhr_matrix() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNetworkErrorProbe)",
         concat!(
             "prevent-default-and-respond-with:load:4:200::responding!|",
@@ -16092,13 +16010,10 @@ async fn navigator_service_worker_respond_with_propagation_and_throw_browser_mat
     )
     .expect("service worker respondWith propagation probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerRespondWithPropagationProbe)",
-        "214:first|215:intercepted|216:InvalidStateError|217:microtask|200:task-fallback:task:InvalidStateError",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerRespondWithPropagationProbe)",
+"214:first|215:intercepted|216:InvalidStateError|217:microtask|200:task-fallback:task:InvalidStateError")
     .await;
 
     server
@@ -16211,7 +16126,6 @@ async fn navigator_service_worker_child_frame_controller_uses_child_client() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerChildControllerProbe)",
         &expected,
     )
@@ -16338,13 +16252,10 @@ async fn navigator_service_worker_respond_with_wait_until_lifetime_browser_matri
     )
     .expect("service worker respondWith waitUntil probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerRespondWithWaitUntilProbe)",
-        "218:pending:pending:OK|200:same-turn:same-turn:OK|200:extra-microtask:extra-microtask:InvalidStateError:true",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerRespondWithWaitUntilProbe)",
+"218:pending:pending:OK|200:same-turn:same-turn:OK|200:extra-microtask:extra-microtask:InvalidStateError:true")
     .await;
 
     server
@@ -16516,7 +16427,6 @@ async fn navigator_service_worker_responds_with_body_accessed_default_and_basic_
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerBodyAccessedResponseProbe)",
         concat!(
             "default:none:direct:213:application/javascript:OK,",
@@ -16615,7 +16525,6 @@ async fn navigator_service_worker_respond_with_no_cors_fetch_projects_opaque_res
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerOpaqueRespondWithFetchProbe)",
         "opaque|0|false|||false|true|0|false|true||opaque|0|true|",
     )
@@ -16698,7 +16607,6 @@ async fn navigator_service_worker_fetch_restarts_stopped_active_worker() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRestartProbe.phase)",
         "beforeStop",
     )
@@ -16731,7 +16639,6 @@ async fn navigator_service_worker_fetch_restarts_stopped_active_worker() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRestartProbe.phase)",
         "afterStop",
     )
@@ -16817,7 +16724,6 @@ async fn navigator_service_worker_registration_lifecycle_attributes_reflect_acti
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerLifecycleProbe.includes('after-unregister'))",
         "true",
     )
@@ -16885,7 +16791,6 @@ async fn navigator_service_worker_update_via_cache_option_reflects_registration(
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerUpdateViaCacheProbe)",
         "all|all|Error",
     )
@@ -16962,7 +16867,6 @@ async fn navigator_service_worker_update_via_cache_all_uses_fresh_main_script_ca
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerUpdateViaCacheAllProbe)",
         &expected,
     )
@@ -17068,7 +16972,6 @@ async fn navigator_service_worker_default_update_via_cache_revalidates_fresh_mai
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerUpdateViaCacheImportsProbe)",
         &expected,
     )
@@ -17138,7 +17041,6 @@ async fn navigator_service_worker_event_listeners_do_not_drive_lifecycle_state()
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerListenerProbe !== 'pending')",
         "true",
     )
@@ -17209,7 +17111,6 @@ async fn navigator_service_worker_register_resolves_when_activate_wait_until_rej
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerActivateRejectProbe)",
         "resolved:true:false::false|true:activated",
     )
@@ -17304,7 +17205,6 @@ async fn navigator_service_worker_update_waits_without_skip_waiting() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerUpdateProbe)",
         &expected,
     )
@@ -17418,7 +17318,6 @@ async fn navigator_service_worker_post_message_routes_to_waiting_and_active_vers
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerWaitingPostMessageProbe)",
         &expected,
     )
@@ -17520,7 +17419,6 @@ async fn navigator_service_worker_post_message_routes_to_installing_version() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerInstallingPostMessageProbe)",
         &expected,
     )
@@ -17640,7 +17538,6 @@ async fn navigator_service_worker_installing_post_message_uses_transferred_messa
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerInstallingMessagePortProbe)",
         "installing|port-ready|true|1|window|installing;Acking value: 1;Acking value: 2;quit",
     )
@@ -17786,13 +17683,10 @@ async fn navigator_service_worker_installing_post_message_transfers_array_buffer
     )
     .expect("service worker installing ArrayBuffer transfer probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerInstallingArrayBufferProbe)",
-        "installing;list|10|true|Hello list:10,Hello list:10,:0;dictionary|16|true|Hello dictionary:16,Hello dictionary:16,:0",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerInstallingArrayBufferProbe)",
+"installing;list|10|true|Hello list:10,Hello list:10,:0;dictionary|16|true|Hello dictionary:16,Hello dictionary:16,:0")
     .await;
     server
         .await
@@ -17931,13 +17825,10 @@ async fn navigator_service_worker_installing_message_port_transfers_array_buffer
     )
     .expect("service worker MessagePort ArrayBuffer probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerMessagePortArrayBufferProbe)",
-        "installing|port-ready|true|1|window|installing;page-before:10;page-detached:true:0;queued-before-ready:received;Hello port:10;Hello port:10;:0",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerMessagePortArrayBufferProbe)",
+"installing|port-ready|true|1|window|installing;page-before:10;page-detached:true:0;queued-before-ready:received;Hello port:10;Hello port:10;:0")
     .await;
     server
         .await
@@ -18057,13 +17948,10 @@ async fn navigator_service_worker_installing_post_message_transfers_dataview() {
     )
     .expect("service worker DataView transfer probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerDataViewTransferProbe)",
-        "page-after|0;worker-before|DataView|2|4|4660|22136|installing;page-return|DataView|2|4|4660|22136|8;worker-after|0",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerDataViewTransferProbe)",
+"page-after|0;worker-before|DataView|2|4|4660|22136|installing;page-return|DataView|2|4|4660|22136|8;worker-after|0")
     .await;
     server
         .await
@@ -18321,7 +18209,6 @@ async fn navigator_service_worker_global_post_message_routes_between_worker_vers
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerGlobalPostMessageProbe)",
         &expected,
     )
@@ -18430,7 +18317,6 @@ async fn navigator_service_worker_post_message_to_redundant_worker_is_dropped() 
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRedundantPostMessageProbe)",
         "redundant|activated|v2:new",
     )
@@ -18548,7 +18434,6 @@ async fn navigator_service_worker_updatefound_and_statechange_are_runtime_driven
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerRuntimeEventsProbe)",
         &expected,
     )
@@ -18651,7 +18536,6 @@ async fn navigator_service_worker_client_message_round_trips_from_event_source()
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerClientMessageProbe)",
         &expected,
     )
@@ -18779,7 +18663,6 @@ async fn navigator_service_worker_client_message_transfers_readable_stream_to_pa
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerReadableTransferProbe)",
         "done:true:child-realm:true",
     )
@@ -18866,13 +18749,10 @@ async fn navigator_service_worker_popup_post_message_uses_popup_source_url() {
     )
     .expect("service worker popup source probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        r#"String(globalThis.__serviceWorkerPopupSourceWindow && globalThis.__serviceWorkerPopupSourceWindow.document && globalThis.__serviceWorkerPopupSourceWindow.document.title)"#,
-        "popup",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+r#"String(globalThis.__serviceWorkerPopupSourceWindow && globalThis.__serviceWorkerPopupSourceWindow.document && globalThis.__serviceWorkerPopupSourceWindow.document.title)"#,
+"popup")
     .await;
 
     vm.eval(
@@ -18913,7 +18793,6 @@ async fn navigator_service_worker_popup_post_message_uses_popup_source_url() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPopupSourceProbe)",
         &expected,
     )
@@ -19042,7 +18921,6 @@ async fn navigator_service_worker_message_ports_transfer_both_directions() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerMessagePortProbe)",
         &expected,
     )
@@ -19138,7 +19016,6 @@ async fn navigator_service_worker_wasm_module_cross_agent_messages_fire_messagee
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerWasmModuleMessageProbe)",
         &expected,
     )
@@ -19287,7 +19164,6 @@ async fn navigator_service_worker_message_port_wasm_module_to_sandbox_fires_mess
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerSandboxPortMessageErrorProbe)",
         &expected,
     )
@@ -19409,7 +19285,6 @@ async fn navigator_service_worker_clients_query_live_window_clients() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerClientsQueryProbe)",
         &expected,
     )
@@ -19525,7 +19400,6 @@ async fn navigator_service_worker_clients_query_nested_frame_type() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNestedFrameTypeProbe)",
         "frame-appended",
     )
@@ -19559,7 +19433,6 @@ async fn navigator_service_worker_clients_query_nested_frame_type() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         r#"String(document.querySelector("iframe").contentDocument.title)"#,
         "frame",
     )
@@ -19578,7 +19451,6 @@ async fn navigator_service_worker_clients_query_nested_frame_type() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNestedFrameTypeProbe)",
         &expected,
     )
@@ -19596,7 +19468,6 @@ async fn navigator_service_worker_clients_query_nested_frame_type() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNestedFrameTypeProbe)",
         &expected,
     )
@@ -19604,7 +19475,6 @@ async fn navigator_service_worker_clients_query_nested_frame_type() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         r#"String(document.querySelector("iframe").contentDocument.title)"#,
         "next frame",
     )
@@ -19722,7 +19592,6 @@ async fn navigator_service_worker_push_manager_tracks_subscription() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPushManagerProbe)",
         expected,
     )
@@ -19820,13 +19689,10 @@ async fn navigator_service_worker_navigation_preload_state_shared_with_worker() 
     )
     .expect("service worker navigation preload probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerNavigationPreloadProbe)",
-        r#"{"hasManager":true,"instance":true,"enable":"function","disable":"function","setHeaderValue":"function","getState":"function","defaultState":{"enabled":false,"headerValue":"true"},"invalidHeaderError":{"name":"TypeError","isTypeError":true},"enabledState":{"enabled":true,"headerValue":"true"},"workerResult":{"hasManager":true,"instance":true,"enable":"function","disable":"function","setHeaderValue":"function","getState":"function","before":{"enabled":true,"headerValue":"true"},"after":{"enabled":true,"headerValue":"worker-preload"}},"finalState":{"enabled":true,"headerValue":"worker-preload"}}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerNavigationPreloadProbe)",
+r#"{"hasManager":true,"instance":true,"enable":"function","disable":"function","setHeaderValue":"function","getState":"function","defaultState":{"enabled":false,"headerValue":"true"},"invalidHeaderError":{"name":"TypeError","isTypeError":true},"enabledState":{"enabled":true,"headerValue":"true"},"workerResult":{"hasManager":true,"instance":true,"enable":"function","disable":"function","setHeaderValue":"function","getState":"function","before":{"enabled":true,"headerValue":"true"},"after":{"enabled":true,"headerValue":"worker-preload"}},"finalState":{"enabled":true,"headerValue":"worker-preload"}}"#)
     .await;
 
     server
@@ -19913,21 +19779,15 @@ async fn navigator_service_worker_sync_register_dispatches_sync_event() {
     )
     .expect("service worker sync setup should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerSyncRegisterProbe)",
-        r#"{"syncType":"object","registerType":"function","getTagsType":"function","tagsBeforeLength":0,"registerValue":"undefined"}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerSyncRegisterProbe)",
+r#"{"syncType":"object","registerType":"function","getTagsType":"function","tagsBeforeLength":0,"registerValue":"undefined"}"#)
     .await;
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerSyncProbe)",
-        r#"["{\"type\":\"sync\",\"tag\":\"sync-tag\",\"lastChance\":false,\"tags\":\"sync-tag\"}","{\"type\":\"sync\",\"tag\":\"worker-sync\",\"lastChance\":false,\"tags\":\"worker-sync\"}"]"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerSyncProbe)",
+r#"["{\"type\":\"sync\",\"tag\":\"sync-tag\",\"lastChance\":false,\"tags\":\"sync-tag\"}","{\"type\":\"sync\",\"tag\":\"worker-sync\",\"lastChance\":false,\"tags\":\"worker-sync\"}"]"#)
     .await;
 
     server
@@ -20001,7 +19861,6 @@ async fn navigator_service_worker_sync_failure_retries_with_last_chance() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerSyncRetryProbe)",
         r#"{"tag":"retry-sync","lastChance":true,"attempts":2,"tags":"retry-sync"}"#,
     )
@@ -20077,13 +19936,10 @@ async fn navigator_service_worker_sync_register_respects_background_sync_permiss
     )
     .expect("service worker sync permission probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerSyncPermissionProbe)",
-        r#"{"permission":"denied","registerError":{"name":"NotAllowedError","message":"Background Sync permission has not been granted.","isDomException":true},"tagsLength":0}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerSyncPermissionProbe)",
+r#"{"permission":"denied","registerError":{"name":"NotAllowedError","message":"Background Sync permission has not been granted.","isDomException":true},"tagsLength":0}"#)
     .await;
 
     server
@@ -20176,13 +20032,10 @@ async fn navigator_service_worker_periodic_sync_uses_owner_store() {
     )
     .expect("service worker periodic sync probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerPeriodicSyncProbe)",
-        r#"{"permission":"granted","pageTags":["page-periodic"],"workerResult":{"before":["page-periodic"],"mid":["page-periodic","worker-periodic"],"after":["worker-periodic"]},"finalTags":["worker-periodic"]}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerPeriodicSyncProbe)",
+r#"{"permission":"granted","pageTags":["page-periodic"],"workerResult":{"before":["page-periodic"],"mid":["page-periodic","worker-periodic"],"after":["worker-periodic"]},"finalTags":["worker-periodic"]}"#)
     .await;
 
     server
@@ -20257,7 +20110,6 @@ async fn navigator_service_worker_periodic_sync_dispatches_owner_functional_even
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPeriodicSyncDispatchReady)",
         r#"{"tags":["periodic-event"]}"#,
     )
@@ -20276,13 +20128,10 @@ async fn navigator_service_worker_periodic_sync_dispatches_owner_functional_even
             .dispatch_service_worker_periodic_sync(&scope_url, "periodic-event",)
     );
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerPeriodicSyncDispatchProbe)",
-        r#"{"type":"periodicsync","tag":"periodic-event","hasLastChance":false,"tags":"periodic-event"}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerPeriodicSyncDispatchProbe)",
+r#"{"type":"periodicsync","tag":"periodic-event","hasLastChance":false,"tags":"periodic-event"}"#)
     .await;
 
     server
@@ -20357,13 +20206,10 @@ async fn navigator_service_worker_periodic_sync_register_respects_permission() {
     )
     .expect("service worker periodic sync permission probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerPeriodicSyncPermissionProbe)",
-        r#"{"permission":"denied","registerError":{"name":"NotAllowedError","message":"Periodic Background Sync permission has not been granted.","isDomException":true},"tagsLength":0}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerPeriodicSyncPermissionProbe)",
+r#"{"permission":"denied","registerError":{"name":"NotAllowedError","message":"Periodic Background Sync permission has not been granted.","isDomException":true},"tagsLength":0}"#)
     .await;
 
     server
@@ -20432,7 +20278,6 @@ async fn navigator_service_worker_window_client_navigate_rejects_during_pending_
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNavigateGuardProbe)",
         r#"{"navigateError":{"name":"TypeError","message":"The client is already navigating."}}"#,
     )
@@ -20511,7 +20356,6 @@ async fn navigator_service_worker_window_client_navigate_rejects_when_overwritte
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNavigateCancelProbe)",
         "ready",
     )
@@ -20531,7 +20375,7 @@ async fn navigator_service_worker_window_client_navigate_rejects_when_overwritte
             std::time::Instant::now() < deadline,
             "service worker client.navigate did not record pending navigation"
         );
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
 
     vm.eval("location.href = './browser-next.html'")
@@ -20540,7 +20384,6 @@ async fn navigator_service_worker_window_client_navigate_rejects_when_overwritte
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNavigateCancelProbe)",
         r#"{"navigateError":{"name":"TypeError","message":"The navigation was canceled."}}"#,
     )
@@ -20603,7 +20446,6 @@ async fn service_worker_client_focus_request_marks_current_page_focused() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerFocusProbe)",
         "activated",
     )
@@ -20616,7 +20458,6 @@ async fn service_worker_client_focus_request_marks_current_page_focused() {
         .expect("current top-level ServiceWorker client target");
     run_service_worker_client_focus_request_task_for_test(
         &mut vm,
-        &loader,
         "current Page focus request",
         crate::types::ServiceWorkerClientFocusRequestCompletion {
             target: current_target,
@@ -20703,7 +20544,6 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerOpenWindowProbe)",
         "activated",
     )
@@ -20716,7 +20556,6 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
         .expect("current top-level ServiceWorker client target");
     run_service_worker_clients_open_window_request_task_for_test(
         &mut vm,
-        &loader,
         "current Page openWindow request",
         crate::types::ServiceWorkerClientsOpenWindowRequestCompletion {
             host: current_target,
@@ -20747,7 +20586,6 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
     drain_service_worker_test_until_popup_loads_settle(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "service worker openWindow",
     )
     .await;
@@ -20781,7 +20619,6 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
 
     run_service_worker_client_focus_request_task_for_test(
         &mut vm,
-        &loader,
         "current popup focus request",
         crate::types::ServiceWorkerClientFocusRequestCompletion {
             target: service_worker_window_client_target_for_test(
@@ -20868,7 +20705,6 @@ async fn service_worker_popup_client_survives_javascript_reopen() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerPopupReopenProbe)",
         "activated",
     )
@@ -20897,7 +20733,6 @@ async fn service_worker_popup_client_survives_javascript_reopen() {
     drain_service_worker_test_until_popup_loads_settle(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "service worker popup",
     )
     .await;
@@ -20959,7 +20794,7 @@ async fn service_worker_popup_client_survives_javascript_reopen() {
         {
             break;
         }
-        drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+        drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
     }
     assert_eq!(
         vm.eval("String(globalThis.__serviceWorkerPopupJavascriptRan)")
@@ -21019,7 +20854,6 @@ async fn service_worker_popup_client_survives_javascript_reopen() {
     drain_service_worker_test_until_popup_loads_settle(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "service worker popup replacement",
     )
     .await;
@@ -21038,7 +20872,6 @@ async fn service_worker_popup_client_survives_javascript_reopen() {
     assert_ne!(replacement_local_window_id, initial_local_window_id);
     run_service_worker_client_focus_request_task_for_test(
         &mut vm,
-        &loader,
         "stale popup focus request",
         crate::types::ServiceWorkerClientFocusRequestCompletion {
             target: service_worker_window_client_target_for_test(
@@ -21069,7 +20902,6 @@ async fn service_worker_popup_client_survives_javascript_reopen() {
 
     run_service_worker_client_focus_request_task_for_test(
         &mut vm,
-        &loader,
         "current replacement popup focus request",
         crate::types::ServiceWorkerClientFocusRequestCompletion {
             target: service_worker_window_client_target_for_test(
@@ -21146,7 +20978,6 @@ async fn service_worker_clients_open_window_about_blank_request_creates_no_popup
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerOpenWindowAboutBlankProbe)",
         "activated",
     )
@@ -21159,7 +20990,6 @@ async fn service_worker_clients_open_window_about_blank_request_creates_no_popup
         .expect("current top-level ServiceWorker client target");
     run_service_worker_clients_open_window_request_task_for_test(
         &mut vm,
-        &loader,
         "about:blank openWindow request",
         crate::types::ServiceWorkerClientsOpenWindowRequestCompletion {
             host: current_target,
@@ -21231,7 +21061,6 @@ async fn service_worker_clients_open_window_cross_origin_result_stays_null() {
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerOpenWindowCrossOriginProbe)",
         "activated",
     )
@@ -21244,7 +21073,6 @@ async fn service_worker_clients_open_window_cross_origin_result_stays_null() {
         .expect("current top-level ServiceWorker client target");
     run_service_worker_clients_open_window_request_task_for_test(
         &mut vm,
-        &loader,
         "cross-origin openWindow request",
         crate::types::ServiceWorkerClientsOpenWindowRequestCompletion {
             host: current_target,
@@ -21266,7 +21094,6 @@ async fn service_worker_clients_open_window_cross_origin_result_stays_null() {
     drain_service_worker_test_until_popup_loads_settle(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "cross-origin service worker openWindow",
     )
     .await;
@@ -21380,7 +21207,6 @@ async fn navigator_service_worker_show_notification_records_clickable_notificati
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerShowNotificationProbe)",
         "denied:TypeError",
     )
@@ -21537,13 +21363,10 @@ async fn navigator_service_worker_show_notification_records_clickable_notificati
     )
     .expect("service worker showNotification granted probe should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerShowNotificationProbe)",
-        r#"{"taggedLength":1,"taggedTitle":"second","taggedTag":"same","taggedActions":"reply:Reply:/reply.png,archive:Archive:/archive.png","taggedNavigate":true,"taggedOptions":"Second body|/icon.png|/image.png|/badge.png|rtl|fr|10/20|123456|true|true|true","taggedAnswer":2,"taggedOwnDataDescriptor":null,"taggedActionOwnTitleDescriptor":{"value":"Reply","writable":true,"enumerable":true,"configurable":true},"taggedClose":"function","allBeforeCloseLength":2,"looseTitle":"loose","taggedAfterCloseLength":0,"allAfterCloseLength":1,"notificationInitSetterHits":[]}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerShowNotificationProbe)",
+r#"{"taggedLength":1,"taggedTitle":"second","taggedTag":"same","taggedActions":"reply:Reply:/reply.png,archive:Archive:/archive.png","taggedNavigate":true,"taggedOptions":"Second body|/icon.png|/image.png|/badge.png|rtl|fr|10/20|123456|true|true|true","taggedAnswer":2,"taggedOwnDataDescriptor":null,"taggedActionOwnTitleDescriptor":{"value":"Reply","writable":true,"enumerable":true,"configurable":true},"taggedClose":"function","allBeforeCloseLength":2,"looseTitle":"loose","taggedAfterCloseLength":0,"allAfterCloseLength":1,"notificationInitSetterHits":[]}"#)
     .await;
 
     assert!(
@@ -21553,13 +21376,10 @@ async fn navigator_service_worker_show_notification_records_clickable_notificati
             "open"
         )
     );
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerShowNotificationProbe)",
-        r#"{"title":"hello","tag":"","actions":"open:Open:/open.png","answer":42,"action":"open","body":"Hello body","icon":"/hello.png","image":"/hello-image.png","badge":"/hello-badge.png","dir":"ltr","lang":"en","vibrate":"30","timestamp":987654,"renotify":false,"silent":false,"requireInteraction":true}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerShowNotificationProbe)",
+r#"{"title":"hello","tag":"","actions":"open:Open:/open.png","answer":42,"action":"open","body":"Hello body","icon":"/hello.png","image":"/hello-image.png","badge":"/hello-badge.png","dir":"ltr","lang":"en","vibrate":"30","timestamp":987654,"renotify":false,"silent":false,"requireInteraction":true}"#)
     .await;
 
     server
@@ -21655,7 +21475,6 @@ async fn navigator_service_worker_notificationclose_removes_record_without_focus
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNotificationCloseProbe)",
         "shown",
     )
@@ -21668,13 +21487,10 @@ async fn navigator_service_worker_notificationclose_removes_record_without_focus
         )
     );
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(globalThis.__serviceWorkerNotificationCloseProbe)",
-        r#"{"type":"notificationclose","title":"closing","tag":"closed","body":"Close body","answer":9,"action":"","remainingLength":0,"focusError":{"name":"InvalidAccessError","message":"Not allowed to focus a window.","isDomException":true}}"#,
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(globalThis.__serviceWorkerNotificationCloseProbe)",
+r#"{"type":"notificationclose","title":"closing","tag":"closed","body":"Close body","answer":9,"action":"","remainingLength":0,"focusError":{"name":"InvalidAccessError","message":"Not allowed to focus a window.","isDomException":true}}"#)
     .await;
 
     server
@@ -21748,7 +21564,6 @@ async fn navigator_service_worker_notification_action_navigate_records_popup_act
     drain_service_worker_test_until_eval_equals(
         &mut vm,
         &browser_context_runtime,
-        &loader,
         "String(globalThis.__serviceWorkerNotificationActionNavigateProbe)",
         "shown",
     )
@@ -21762,7 +21577,7 @@ async fn navigator_service_worker_notification_action_navigate_records_popup_act
         )
     );
 
-    drain_service_worker_test_turn(&mut vm, &browser_context_runtime, &loader).await;
+    drain_service_worker_test_turn(&mut vm, &browser_context_runtime).await;
 
     let popups = vm.take_pending_popup_activations();
     assert_eq!(popups.len(), 1);
@@ -21830,13 +21645,10 @@ async fn navigator_service_worker_registry_queries_are_scope_based() {
     )
     .expect("service worker registry query setup should evaluate");
 
-    drain_service_worker_test_until_eval_equals(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerRegistryProbe, 'allAfter'))",
-        "true",
-    )
+    drain_service_worker_test_until_eval_equals(&mut vm,
+&browser_context_runtime,
+"String(Object.prototype.hasOwnProperty.call(globalThis.__serviceWorkerRegistryProbe, 'allAfter'))",
+"true")
     .await;
     let result = vm
         .eval("JSON.stringify(globalThis.__serviceWorkerRegistryProbe)")
@@ -23987,12 +23799,9 @@ async fn lightweight_popup_fragment_navigation_dispatches_popstate_and_hashchang
         "popup hashchange must not acquire a PageTimer descriptor"
     );
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::HashChange,
-            &loader,
-        )
-        .await
-        .expect("popup fragment hashchange task should run")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::HashChange)
+            .await
+            .expect("popup fragment hashchange task should run")
     );
     assert_eq!(
         vm.eval("__popupFragmentEvents.join('|')")
@@ -24101,7 +23910,6 @@ async fn storage_manager_estimate_uses_lightweight_popup_session_storage_owner()
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupStorageEstimateMessages.length)",
         "1",
         "popup StorageManager estimate",
@@ -24178,7 +23986,6 @@ async fn window_open_named_lightweight_popup_reuse_pushes_history_and_back_trave
     assert_eq!(setup, "true|1|0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__namedPopupHistoryEvents.length)",
         "1",
         "first named popup document should load",
@@ -24206,7 +24013,6 @@ async fn window_open_named_lightweight_popup_reuse_pushes_history_and_back_trave
     );
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__namedPopupHistoryEvents.length)",
         "2",
         "second named popup document should load",
@@ -24217,7 +24023,6 @@ async fn window_open_named_lightweight_popup_reuse_pushes_history_and_back_trave
         .expect("named popup history.back should queue");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__namedPopupHistoryEvents.length)",
         "3",
         "named popup back traversal should load previous document",
@@ -24275,7 +24080,6 @@ async fn lightweight_popup_cross_document_navigation_clears_old_onload_handler()
     assert_eq!(setup, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__popupOnloadEvents.length)",
         "3",
         "first popup document script and load listeners should run",
@@ -24299,7 +24103,6 @@ async fn lightweight_popup_cross_document_navigation_clears_old_onload_handler()
     assert_eq!(reopened, "true|2|first-script|first-load|first-listener");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__popupSecondLoadDone)",
         "true",
         "second popup document load listener should run",
@@ -24390,7 +24193,6 @@ async fn window_open_noopener_lightweight_popup_uses_fresh_session_storage() {
     );
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__noopenerPopupMessages.length)",
         "1",
         "noopener popup should publish its session-storage result",
@@ -24448,7 +24250,6 @@ async fn lightweight_popup_session_storage_events_do_not_fire_on_opener() {
         let _ = vm
             .run_one_dom_manipulation_task_executor_turn(
                 PageDomManipulationTestFamily::StorageEvent,
-                &loader,
             )
             .await
             .expect("selected dispatcher should drain popup sessionStorage tasks");
@@ -24503,7 +24304,6 @@ async fn lightweight_popup_local_storage_events_fire_on_opener() {
         let _ = vm
             .run_one_dom_manipulation_task_executor_turn(
                 PageDomManipulationTestFamily::StorageEvent,
-                &loader,
             )
             .await
             .expect("selected dispatcher should drain popup localStorage tasks");
@@ -24590,7 +24390,6 @@ async fn window_open_non_about_returns_lightweight_popup_and_dispatches_load() {
     assert_eq!(result, "[object Window]|true|true|function");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupLoadEvents.length)",
         "1",
         "non-about popup load event",
@@ -24634,7 +24433,6 @@ async fn lightweight_popup_document_write_during_load_replaces_existing_body() {
     assert_eq!(result, "pending");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupWriteDuringLoad)",
         "Filler Text",
         "popup document.write during load",
@@ -24703,7 +24501,6 @@ async fn lightweight_popup_promise_handshake_survives_source_close() {
     assert_eq!(result, "pending");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__popupHandshakeResult === 'pending')",
         "false",
         "popup ready/request/response handshake",
@@ -24763,7 +24560,6 @@ async fn lightweight_popup_parent_is_self_and_parent_post_message_stays_in_popup
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupParentMessages.length)",
         "3",
         "popup parent messages",
@@ -24820,7 +24616,6 @@ async fn lightweight_popup_child_frame_can_message_popup_opener() {
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__popupChildFrameMessages.length",
         "2",
         "popup child frame message",
@@ -24865,7 +24660,6 @@ async fn lightweight_popup_external_child_frame_can_message_popup_opener() {
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__popupExternalChildFrameMessages.length",
         "2",
         "popup external child frame message",
@@ -24924,7 +24718,6 @@ async fn lightweight_popup_load_waits_for_external_child_frame_and_focus_handler
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupChildLoadFocusEvents.length)",
         "5",
         "popup child load/focus events",
@@ -25003,7 +24796,6 @@ async fn lightweight_popup_post_message_interleaves_opener_promise_waiters() {
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupWatcherLog.filter(item => item.startsWith('message:')).length)",
         "3",
         "popup watcher messages",
@@ -25057,7 +24849,6 @@ async fn csp_sandbox_popup_storage_bucket_messages_reach_opener_once() {
     assert_eq!(result, "0|true");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__cspSandboxPopupMessages.length",
         "3",
         "CSP sandbox popup messages",
@@ -25122,7 +24913,6 @@ async fn sandbox_child_inside_popup_cannot_navigate_popup_top() {
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__sandboxPopupTopNavigationMessages.length",
         "1",
         "sandbox popup top navigation message",
@@ -25180,7 +24970,6 @@ async fn assert_sandbox_child_about_blank_popup_reloads_self_and_messages_top(
     assert_eq!(setup, "queued");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__sandboxPopupMessages.length",
         "1",
         "sandbox popup message",
@@ -25258,7 +25047,7 @@ async fn window_open_204_popup_ignores_navigation_and_preserves_initial_empty_hi
     assert_eq!(result, "about:blank#foo|#foo|1|");
 
     wait_for_one_page_resource_completion_executor_test_turn(&mut vm, "popup 204 completion").await;
-    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_page_task_executor_turns_for_setup(128)
         .await
         .expect("post-fragment popup work should use the selected-task dispatcher");
     assert_eq!(
@@ -25302,7 +25091,6 @@ async fn window_open_204_popup_ignores_navigation_and_preserves_initial_empty_hi
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__popup204Messages.length",
         "1",
         "popup 204 follow-up load message",
@@ -25346,7 +25134,6 @@ async fn window_open_without_url_replaces_initial_empty_history_on_first_navigat
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__initialEmptyPopupMessages.length",
         "1",
         "initial empty popup replacement load message",
@@ -25364,7 +25151,6 @@ async fn window_open_without_url_replaces_initial_empty_history_on_first_navigat
         .expect("second opener-relative popup navigation should evaluate");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__initialEmptyPopupMessages.length",
         "2",
         "second opener-relative popup load message",
@@ -25425,7 +25211,6 @@ async fn window_open_document_with_initial_iframe_keeps_one_joint_history_entry(
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__popupInitialIframeHistory.length",
         "2",
         "popup initial iframe history messages",
@@ -25468,7 +25253,7 @@ async fn lightweight_popup_javascript_url_navigation_runs_async_with_opener() {
     assert_eq!(setup, "after-setter|about:blank|true");
     vm.drain_pending_child_frame_work_for_test();
     assert!(
-        vm.run_next_due_timer_callback_for_test(&loader)
+        vm.run_next_due_timer_callback_for_test()
             .await
             .expect("popup javascript location timer should run"),
         "javascript: location navigation must enter through its exact timer turn"
@@ -25500,7 +25285,7 @@ async fn lightweight_popup_javascript_url_navigation_runs_async_with_opener() {
     assert_eq!(setup, "after-open|about:blank|true");
     vm.drain_pending_child_frame_work_for_test();
     assert!(
-        vm.run_next_due_timer_callback_for_test(&loader)
+        vm.run_next_due_timer_callback_for_test()
             .await
             .expect("popup javascript open timer should run"),
         "javascript: open navigation must enter through its exact timer turn"
@@ -25534,7 +25319,7 @@ async fn lightweight_popup_javascript_url_string_completion_replaces_document() 
     assert_eq!(setup, "about:blank|");
     vm.drain_pending_child_frame_work_for_test();
     assert!(
-        vm.run_next_due_timer_callback_for_test(&loader)
+        vm.run_next_due_timer_callback_for_test()
             .await
             .expect("popup javascript URL timer should run")
     );
@@ -25575,13 +25360,10 @@ async fn loaded_lightweight_popup_can_replace_itself_from_javascript_url_string_
         .expect("self-replacing popup setup should evaluate"),
         ""
     );
-    advance_page_task_executor_until_eval_equals(
-        &mut vm,
-        &loader,
-        "String(Boolean(__selfReplacingPopup.document.querySelector('#javascript-url-self-result')))",
-        "true",
-        "loaded popup javascript URL string completion",
-    )
+    advance_page_task_executor_until_eval_equals(&mut vm,
+"String(Boolean(__selfReplacingPopup.document.querySelector('#javascript-url-self-result')))",
+"true",
+"loaded popup javascript URL string completion")
     .await;
     assert_eq!(
         vm.eval(
@@ -25633,7 +25415,6 @@ async fn popup_javascript_url_string_document_keeps_inherited_frame_src_policy()
     );
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(Boolean(__javascriptUrlCspPopup.document.querySelector('iframe')))",
         "true",
         "popup javascript URL replacement iframe",
@@ -25651,7 +25432,6 @@ async fn popup_javascript_url_string_document_keeps_inherited_frame_src_policy()
     );
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupJavascriptUrlFrameCspEvents.length)",
         "1",
         "popup javascript URL inherited frame-src violation",
@@ -25708,7 +25488,7 @@ async fn lightweight_popup_javascript_url_uses_inline_navigation_csp_not_eval_cs
             break;
         }
         let _ = allowed
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance javascript URL task");
     }
@@ -25782,7 +25562,6 @@ popup.location.href = `javascript:
     .expect("popup javascript URL nested eval should queue");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupJavascriptUrlEvalResults.length)",
         "1",
         "popup javascript URL nested eval policy result",
@@ -25864,7 +25643,6 @@ open({popup_url_literal});
     .expect("popup nested eval setup should evaluate");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "popup nested eval document completion",
     )
     .await;
@@ -25873,7 +25651,6 @@ open({popup_url_literal});
         .expect("popup nested eval policy server should finish");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__popupNestedEvalResult)",
         expected,
         "popup nested eval policy result",
@@ -25932,7 +25709,6 @@ async fn lightweight_popup_post_message_round_trips_with_wasm_module() {
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__popupMessageEvents.length",
         "2",
         "typed popup Window.postMessage roundtrip",
@@ -25985,7 +25761,6 @@ async fn lightweight_popup_blob_document_executes_before_load_and_handles_wasm_m
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupEvents.length)",
         "4",
         "popup blob document and message round trip",
@@ -26046,7 +25821,6 @@ async fn lightweight_popup_document_script_scan_uses_native_dom_after_page_metho
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupNativeScanEvents.length)",
         "3",
         "popup native script scan",
@@ -26133,7 +25907,6 @@ async fn lightweight_popup_external_classic_script_does_not_block_page_owner() {
 
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "delayed popup document completion",
     )
     .await;
@@ -26158,7 +25931,6 @@ async fn lightweight_popup_external_classic_script_does_not_block_page_owner() {
     );
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupAsyncScriptEvents.length)",
         "4",
         "delayed popup script continuation and load",
@@ -26200,7 +25972,6 @@ async fn lightweight_popup_document_csp_blocks_inline_scripts() {
     assert_eq!(result, "0");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupCspEvents.length)",
         "1",
         "popup CSP load dispatch",
@@ -26241,7 +26012,6 @@ async fn lightweight_popup_document_response_csp_blocks_inline_scripts() {
     assert_eq!(result, "0");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "popup response CSP completion",
     )
     .await;
@@ -26250,7 +26020,6 @@ async fn lightweight_popup_document_response_csp_blocks_inline_scripts() {
         .expect("popup response CSP server should finish");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupResponseCspEvents.length)",
         "1",
         "popup response CSP load event",
@@ -26307,7 +26076,6 @@ async fn lightweight_popup_response_csp_sandbox_without_allow_scripts_blocks_inl
     assert_eq!(result, "0");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "popup response CSP sandbox completion",
     )
     .await;
@@ -26316,7 +26084,6 @@ async fn lightweight_popup_response_csp_sandbox_without_allow_scripts_blocks_inl
         .expect("popup response CSP sandbox server should finish");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupResponseSandboxScriptEvents.length)",
         "1",
         "popup response CSP sandbox load event",
@@ -26364,7 +26131,6 @@ async fn lightweight_popup_document_domain_self_assignment_uses_popup_owner_stat
     assert_eq!(result, "0");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "popup document-domain completion",
     )
     .await;
@@ -26373,7 +26139,6 @@ async fn lightweight_popup_document_domain_self_assignment_uses_popup_owner_stat
         .expect("popup document-domain server should finish");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupDomainProbe.length)",
         "1",
         "popup document-domain load event",
@@ -26425,7 +26190,6 @@ async fn lightweight_popup_response_csp_sandbox_disallows_document_domain_setter
     assert_eq!(result, "0");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "popup response CSP sandbox document-domain completion",
     )
     .await;
@@ -26434,7 +26198,6 @@ async fn lightweight_popup_response_csp_sandbox_disallows_document_domain_setter
         .expect("popup response CSP sandbox server should finish");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupResponseSandboxDomainProbe.length)",
         "1",
         "popup response CSP sandbox document-domain load event",
@@ -26477,7 +26240,6 @@ async fn lightweight_popup_document_response_csp_blocks_external_scripts() {
     assert_eq!(result, "0");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "popup response external CSP completion",
     )
     .await;
@@ -26486,7 +26248,6 @@ async fn lightweight_popup_document_response_csp_blocks_external_scripts() {
         .expect("popup response external CSP server should finish");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupResponseCspExternalEvents.length)",
         "1",
         "popup response external CSP load event",
@@ -26541,7 +26302,6 @@ async fn lightweight_popup_external_script_redirect_final_url_obeys_csp() {
     assert_eq!(result, "0");
     wait_for_one_page_resource_completion_selected_task_executor_test_turn(
         &mut vm,
-        &loader,
         "popup redirect CSP completion",
     )
     .await;
@@ -26553,7 +26313,6 @@ async fn lightweight_popup_external_script_redirect_final_url_obeys_csp() {
         .expect("popup redirect CSP target server should finish");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(__popupRedirectCspEvents.length)",
         "2",
         "popup redirect CSP load event",

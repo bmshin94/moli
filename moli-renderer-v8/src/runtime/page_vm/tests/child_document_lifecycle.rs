@@ -102,10 +102,7 @@ async fn selected_child_document_lifecycle_completes_each_event_reaction_and_run
         {
             assert!(
                 page_vm
-                    .run_exact_selected_page_task_for_test(
-                        PageSelectedTaskTestSelector::ChildDocumentLifecycle,
-                        &loader,
-                    )
+                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildDocumentLifecycle)
                     .await?,
                 "the next exact child lifecycle task should run through the selected dispatcher"
             );
@@ -166,10 +163,7 @@ async fn selected_child_document_lifecycle_completes_callback_that_replaces_the_
 
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::ChildDocumentLifecycle,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildDocumentLifecycle)
                 .await?,
             "the replacing lifecycle callback should run through the selected dispatcher"
         );
@@ -240,7 +234,7 @@ Promise.resolve().then(() => {
         page_vm.vm_mut().enqueue_test_pending_runtime_source_load();
 
         page_vm
-            .run_claimed_selected_page_task_for_test(retired, &loader)
+            .run_claimed_selected_page_task_for_test(retired)
             .await?;
         assert_eq!(
             page_vm
@@ -270,8 +264,7 @@ Promise.resolve().then(() => {
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::ChildDocumentLifecycle,
-                    &loader,
+                    PageSelectedTaskTestSelector::ChildDocumentLifecycle
                 )
                 .await?,
             "discarding the retired claim must preserve the replacement lifecycle action"

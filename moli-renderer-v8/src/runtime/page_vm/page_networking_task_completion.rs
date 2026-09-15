@@ -15,25 +15,18 @@ impl PageVm {
     pub(super) async fn finish_selected_page_networking_task(
         &mut self,
         action: PageNetworkingTurnAction,
-        loader: &crate::network::ResourceRequestClient,
     ) -> Result<()> {
         match action {
             PageNetworkingTurnAction::ResourceCompletion(action) => {
                 self.finish_selected_page_resource_completion_task(action)?;
             }
             PageNetworkingTurnAction::StyleElementEvent(action) => {
-                self.finish_selected_page_task_completion(
-                    action.into_page_task_completion(),
-                    loader,
-                )
-                .await?;
+                self.finish_selected_page_task_completion(action.into_page_task_completion())
+                    .await?;
             }
             PageNetworkingTurnAction::TextTrackLoad(action) => {
-                self.finish_selected_page_task_completion(
-                    action.into_page_task_completion(),
-                    loader,
-                )
-                .await?;
+                self.finish_selected_page_task_completion(action.into_page_task_completion())
+                    .await?;
             }
             PageNetworkingTurnAction::StylesheetCompletion(action) => {
                 let completion_owner = action.owner;
@@ -41,11 +34,8 @@ impl PageVm {
                     action.target_effect,
                     PageStylesheetNetworkingTargetEffect::AppliedToCurrentOwner
                 );
-                self.finish_selected_page_task_completion(
-                    action.into_page_task_completion(),
-                    loader,
-                )
-                .await?;
+                self.finish_selected_page_task_completion(action.into_page_task_completion())
+                    .await?;
                 let completion_owner_is_still_current = self.vm().stylesheet_task_owner_is_current(
                     self.document_lifecycle.identity().document,
                     completion_owner,
@@ -69,11 +59,8 @@ impl PageVm {
                 }
             }
             PageNetworkingTurnAction::WorkerHostBridge(action) => {
-                self.finish_selected_page_task_completion(
-                    action.into_page_task_completion(),
-                    loader,
-                )
-                .await?;
+                self.finish_selected_page_task_completion(action.into_page_task_completion())
+                    .await?;
             }
             PageNetworkingTurnAction::MainParserContinuation(_) => {}
         }

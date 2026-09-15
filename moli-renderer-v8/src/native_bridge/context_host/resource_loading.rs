@@ -218,11 +218,17 @@ impl JsContextHost {
         let crate::runtime::RendererNetworkOutputItem::Resource(item) = observation.item() else {
             unreachable!("resource completion carries a resource observation");
         };
+        let current_document = observation
+            .source()
+            .document()
+            .is_some_and(|(_, document)| Some(document) == self.root_document_lifecycle_identity());
         self.pending_network_output.push(item.as_ref().clone());
         self.append_live_turn_observation(crate::runtime::RendererProtocolObservation::Network(
             observation,
         ));
-        self.note_subresource_activity();
+        if current_document {
+            self.note_subresource_activity();
+        }
     }
 
     pub(crate) fn push_network_output_item(&mut self, mut item: ScriptNetworkOutputItem) {
@@ -270,24 +276,6 @@ impl JsContextHost {
         Some((owner_local_host_id, document))
     }
 
-    pub(crate) fn record_get_subresource_network_result(
-        &mut self,
-        frame_id: Option<String>,
-        document_url: url::Url,
-        request_url: url::Url,
-        resource_type: SubresourceResourceType,
-        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
-    ) {
-        self.record_get_subresource_network_result_with_initiator(
-            frame_id,
-            document_url,
-            request_url,
-            resource_type,
-            SubresourceRequestInitiatorType::Script,
-            result,
-        );
-    }
-
     pub(crate) fn record_get_subresource_network_result_with_initiator(
         &mut self,
         frame_id: Option<String>,
@@ -310,28 +298,6 @@ impl JsContextHost {
 
     /// Publish a completed request from a retired Document without treating it
     /// as activity of the currently installed Document.
-    pub(crate) fn record_historical_get_subresource_network_result_with_initiator(
-        &mut self,
-        frame_id: Option<String>,
-        document_url: url::Url,
-        request_url: url::Url,
-        resource_type: SubresourceResourceType,
-        request_initiator_type: SubresourceRequestInitiatorType,
-        result: &std::result::Result<crate::protocol_types::NavigationResponse, String>,
-    ) {
-        let record = Self::get_subresource_network_record_with_initiator(
-            frame_id,
-            document_url,
-            request_url,
-            resource_type,
-            request_initiator_type,
-            result,
-        );
-        self.push_network_output_item(ScriptNetworkOutputItem::SubresourceNetworkRecord(Box::new(
-            record,
-        )));
-    }
-
     fn get_subresource_network_record_with_initiator(
         frame_id: Option<String>,
         document_url: url::Url,

@@ -958,9 +958,6 @@ pub(crate) struct JsContextHost {
     internal_inspector_value_references: HashMap<u64, v8::Global<v8::Value>>,
     #[cfg(test)]
     completed_child_browsing_context_loads: Vec<ChildFrameNavigationSnapshot>,
-    #[cfg(test)]
-    completed_child_document_networks:
-        Vec<crate::protocol_types::ChildFrameDocumentNetworkActivitySnapshot>,
     active_child_subresource_request_scopes: Vec<DomHandle>,
     child_window_event_listeners:
         HashMap<DomHandle, IndexMap<String, Vec<ChildWindowEventListenerEntry>>>,
@@ -1234,6 +1231,7 @@ impl JsContextHost {
             return;
         }
         self.page_context_resources_closed = true;
+        self.pending_child_document_navigations.clear();
         self.retire_all_document_resource_loaders();
         self.page_default_context = None;
         self.v8_finalizers.clear_for_context_teardown();

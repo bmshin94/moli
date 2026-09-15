@@ -164,7 +164,7 @@ async fn indexed_db_databases_returns_committed_name_version_snapshot() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("IndexedDB databases list should advance");
     }
@@ -222,7 +222,6 @@ async fn indexed_db_databases_resolves_from_child_message_handler() {
     .expect("child databases message setup should evaluate");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__indexedDbChildDatabasesReady)",
         "true",
         "srcdoc IndexedDB child should publish its ready fact",
@@ -233,7 +232,6 @@ async fn indexed_db_databases_resolves_from_child_message_handler() {
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__indexedDbChildDatabasesMessages.length)",
         "1",
         "child IndexedDB databases response should arrive",
@@ -1061,7 +1059,7 @@ async fn indexed_db_can_roundtrip_crypto_key_internal_slots() {
 
     for _ in 0..64 {
         while vm
-            .run_one_webcrypto_task_executor_turn(&loader)
+            .run_one_webcrypto_task_executor_turn()
             .await
             .expect("WebCrypto production task should apply")
         {}
@@ -1072,7 +1070,7 @@ async fn indexed_db_can_roundtrip_crypto_key_internal_slots() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("indexeddb CryptoKey workflow should advance");
         if vm
@@ -1561,7 +1559,7 @@ async fn indexed_db_databases_in_cross_origin_child_excludes_top_origin_names() 
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("top database open should advance");
     }
@@ -1600,7 +1598,6 @@ async fn indexed_db_databases_in_cross_origin_child_excludes_top_origin_names() 
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__indexedDbDatabasesChildLoaded)",
         "true",
         "cross-origin IndexedDB child should reach its load event",
@@ -1628,7 +1625,7 @@ async fn indexed_db_databases_in_cross_origin_child_excludes_top_origin_names() 
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("child delete response should advance");
     }
@@ -1653,7 +1650,7 @@ async fn indexed_db_databases_in_cross_origin_child_excludes_top_origin_names() 
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("child database response should advance");
     }
@@ -1740,7 +1737,6 @@ async fn indexed_db_top_factory_ignores_stale_active_child_scope() {
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__indexedDbOriginIsolationChildLoaded)",
         "true",
         "origin-isolation child should reach load through selected Page tasks",
@@ -1748,7 +1744,6 @@ async fn indexed_db_top_factory_ignores_stale_active_child_scope() {
     .await;
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__indexedDbOriginIsolationResult !== 'pending')",
         "true",
         "origin isolation workflow should complete through selected Page tasks",
@@ -1824,7 +1819,7 @@ async fn indexed_db_blocked_upgrade_result_database_keeps_opener_owner() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("top blocked-upgrade owner setup should advance");
     }
@@ -1890,7 +1885,7 @@ parent.postMessage({ kind: "child-ready" }, "*");
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("blocked-upgrade owner child setup should advance");
     }
@@ -1911,7 +1906,7 @@ globalThis.__blockedUpgradeOwnerFrame.contentWindow.postMessage({ action: "open-
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("child open-v2 should advance");
     }
@@ -1923,7 +1918,6 @@ globalThis.__blockedUpgradeOwnerFrame.contentWindow.postMessage({ action: "open-
     );
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__blockedUpgradeOwnerTopVersionChangeBc.length > 0)",
         "true",
         "top versionchange BroadcastChannel delivery should advance",
@@ -1967,7 +1961,7 @@ globalThis.__blockedUpgradeOwnerFrame.contentWindow.postMessage({ action: "open-
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("top v3 open should advance");
     }
@@ -2065,7 +2059,7 @@ async fn indexed_db_continuations_preserve_lightweight_popup_sender() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("wait driver should drain popup delete response");
     }
@@ -2090,7 +2084,7 @@ globalThis.__indexedDbPopup.postMessage({ action: "get" }, "*");
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("wait driver should drain popup databases response");
     }
@@ -2162,12 +2156,12 @@ async fn indexed_db_continuation_broadcast_channel_stays_in_lightweight_popup_ow
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("Page task executor should advance popup IndexedDB BroadcastChannel workflow");
     }
 
-    vm.apply_pending_broadcast_channel_delivery_tasks(&loader, 4)
+    vm.apply_pending_broadcast_channel_delivery_tasks(4)
         .await
         .expect("any admitted BroadcastChannel executor tasks should apply");
 
@@ -2268,7 +2262,7 @@ async fn message_port_handler_indexed_db_uses_lightweight_popup_owner() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("popup MessagePort IndexedDB workflow should advance");
     }
@@ -2330,7 +2324,7 @@ async fn indexed_db_same_origin_popup_databases_share_top_level_owner() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("same-origin popup database setup should advance");
     }
@@ -2375,7 +2369,6 @@ async fn indexed_db_same_origin_popup_databases_share_top_level_owner() {
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__indexedDbSameOriginPopupResult !== 'pending')",
         "true",
         "same-origin popup IndexedDB workflow should complete through selected Page tasks",
@@ -2481,7 +2474,6 @@ async fn indexed_db_child_reply_does_not_leak_child_scope_to_top_continuation() 
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__childReplyScopeResult !== 'pending')",
         "true",
         "child IndexedDB reply continuation",
@@ -3924,7 +3916,7 @@ async fn indexed_db_get_all_options_rejects_detached_typed_array_query() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("indexeddb detached query should advance");
     }
@@ -4023,7 +4015,7 @@ async fn indexed_db_detached_realm_methods_keep_receiver_realm_state() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("cross-realm IndexedDB method workflow should advance");
     }
@@ -4220,7 +4212,7 @@ async fn indexed_db_open_key_cursor_transaction_completes_after_iteration() {
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("indexeddb openKeyCursor completion should advance");
     }
@@ -4287,7 +4279,6 @@ async fn indexed_db_child_open_key_cursor_transaction_complete_keeps_child_sende
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__indexedDbChildOpenKeyCursorComplete !== 'pending')",
         "true",
         "child IndexedDB cursor completion should arrive through selected Page tasks",
@@ -4402,7 +4393,7 @@ async fn indexed_db_transaction_stays_active_through_creation_task_microtasks() 
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("IndexedDB creation-task microtask workflow should advance");
     }
@@ -4457,7 +4448,7 @@ async fn indexed_db_object_store_open_key_cursor_rejects_after_transaction_inact
         {
             break;
         }
-        wait_for_one_selected_page_task_executor_test_turn(&mut vm, &loader)
+        wait_for_one_selected_page_task_executor_test_turn(&mut vm)
             .await
             .expect("indexeddb inactive openKeyCursor should advance");
     }

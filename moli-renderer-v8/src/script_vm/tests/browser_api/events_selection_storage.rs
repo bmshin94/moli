@@ -4324,7 +4324,7 @@ async fn selectionchange_is_queued_and_coalesced_per_task() {
     );
 
     assert!(
-        vm.run_one_oldest_ready_page_task_executor_turn(&loader)
+        vm.run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance queued selectionchange task")
     );
@@ -4375,12 +4375,9 @@ async fn storage_mutations_queue_events_to_child_window_body_handler() {
     );
 
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
-        )
-        .await
-        .expect("selected dispatcher should advance queued storage event")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::StorageEvent)
+            .await
+            .expect("selected dispatcher should advance queued storage event")
     );
     assert_eq!(
         vm.eval("JSON.stringify(__storageEvents)")
@@ -4392,8 +4389,7 @@ async fn storage_mutations_queue_events_to_child_window_body_handler() {
         .expect("same-value storage mutation should evaluate");
     assert!(
         !vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
+            PageDomManipulationTestFamily::StorageEvent
         )
         .await
         .expect("selected dispatcher should observe no same-value storage event")
@@ -4473,12 +4469,9 @@ async fn queued_storage_event_init_object_ignores_object_prototype_setters() {
     );
 
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
-        )
-        .await
-        .expect("selected dispatcher should advance queued storage event")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::StorageEvent)
+            .await
+            .expect("selected dispatcher should advance queued storage event")
     );
 
     assert_eq!(
@@ -4579,7 +4572,6 @@ async fn storage_event_promise_continuation_after_child_dispatch_keeps_top_scope
         let _ = vm
             .run_one_dom_manipulation_task_executor_turn(
                 PageDomManipulationTestFamily::StorageEvent,
-                &loader,
             )
             .await
             .expect("storage continuation selected dispatcher should advance");
@@ -4625,7 +4617,7 @@ async fn child_message_handler_can_reply_through_event_source_origin() {
 "#,
     )
     .expect("source-origin frame setup should evaluate");
-    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_page_task_executor_turns_for_setup(128)
         .await
         .expect("child setup should use the selected-task dispatcher");
 
@@ -4648,7 +4640,7 @@ __sourceOriginFrame.contentWindow.postMessage(
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("source-origin wait driver should advance");
     }
@@ -4691,7 +4683,6 @@ async fn http_child_load_message_roundtrip_accepts_frame_origin_default() {
     .expect("WPT-style child message setup should evaluate");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__wptStyleRoundtrips.length",
         "1",
         "WPT-style child message roundtrip",
@@ -4734,7 +4725,7 @@ async fn http_child_message_sent_before_navigation_commit_reaches_loaded_child()
 "#
     ))
     .expect("pending child message setup should evaluate");
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(128)
         .await
         .expect("pre-commit child setup should use only child selected tasks");
     wait_for_one_page_resource_completion_executor_test_turn(
@@ -4742,12 +4733,11 @@ async fn http_child_message_sent_before_navigation_commit_reaches_loaded_child()
         "pending-message child document completion",
     )
     .await;
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(128)
         .await
         .expect("loaded child setup should use only child selected tasks");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__pendingChildMessages.length",
         "1",
         "message queued before child navigation commit",
@@ -4801,7 +4791,7 @@ async fn captured_cross_origin_content_window_matches_message_source_after_child
 "#
     ))
     .expect("captured contentWindow message setup should evaluate");
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(128)
         .await
         .expect("captured-window child setup should use only child selected tasks");
     wait_for_one_page_resource_completion_executor_test_turn(
@@ -4809,7 +4799,7 @@ async fn captured_cross_origin_content_window_matches_message_source_after_child
         "captured-window child document completion",
     )
     .await;
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(128)
         .await
         .expect("captured-window loaded child should use only child selected tasks");
     assert_eq!(
@@ -4822,7 +4812,6 @@ async fn captured_cross_origin_content_window_matches_message_source_after_child
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "__capturedWindowMessages.length",
         "1",
         "captured WindowProxy message roundtrip",
@@ -4865,7 +4854,7 @@ async fn captured_cross_origin_content_window_keeps_safe_surface_during_realm_ga
 "#
     ))
     .expect("realm-gap child setup should evaluate");
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(128)
         .await
         .expect("realm-gap child setup should use only child selected tasks");
     wait_for_one_page_resource_completion_executor_test_turn(
@@ -4873,7 +4862,7 @@ async fn captured_cross_origin_content_window_keeps_safe_surface_during_realm_ga
         "realm-gap child document completion",
     )
     .await;
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(128)
         .await
         .expect("realm-gap loaded child should use only child selected tasks");
 
@@ -4957,7 +4946,6 @@ async fn same_origin_nested_children_share_window_security_token_without_top_acc
     .expect("nested same-origin child setup should evaluate");
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__nestedOriginResult !== null)",
         "true",
         "nested same-origin child result",
@@ -5002,7 +4990,7 @@ async fn queued_window_message_does_not_rebind_to_replacement_child_local_window
 "#,
     )
     .expect("initial child window-message owner setup should evaluate");
-    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_page_task_executor_turns_for_setup(128)
         .await
         .expect("initial child setup should use the selected-task dispatcher");
     for _ in 0..8 {
@@ -5014,7 +5002,7 @@ async fn queued_window_message_does_not_rebind_to_replacement_child_local_window
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("initial child readiness should advance");
     }
@@ -5036,14 +5024,13 @@ async fn queued_window_message_does_not_rebind_to_replacement_child_local_window
     .expect("queued message plus child replacement should evaluate");
     assert!(
         vm.run_one_child_frame_task_executor_turn(
-            crate::frame_owner_model::ChildFrameSemanticTurnKind::NavigationCommit,
-            &loader,
+            crate::frame_owner_model::ChildFrameSemanticTurnKind::NavigationCommit
         )
         .await
         .expect("replacement child navigation commit should use the selected-task dispatcher"),
         "replacement child navigation commit should be runnable before the stale message"
     );
-    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_page_task_executor_turns_for_setup(128)
         .await
         .expect("replacement child setup should use the selected-task dispatcher");
 
@@ -5055,17 +5042,17 @@ async fn queued_window_message_does_not_rebind_to_replacement_child_local_window
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("child setup should use the selected-task dispatcher");
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("child replacement should advance");
     }
     for _ in 0..4 {
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("stale window-message timer should drain");
     }
@@ -5120,7 +5107,7 @@ onmessage = event => __documentOpenWindowMessages.push(event.data);
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("document.open window message should advance");
     }
@@ -5159,7 +5146,7 @@ document.close();
     assert_ne!(after_owner.document_id, before_owner.document_id);
     assert_eq!(after_owner.local_window_id, before_owner.local_window_id);
 
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("preserved LocalWindow timer should drain");
     assert_eq!(
@@ -5205,7 +5192,7 @@ __childTimerOwnerFrame.srcdoc = `<!doctype html><script>
     )
     .expect("child timer replacement should evaluate");
     vm.drain_pending_child_frame_work_for_test();
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("retired child timer should leave the timer queue quiescent");
 
@@ -5251,7 +5238,7 @@ __timerRelevantRealmFrame.srcdoc = `<!doctype html><script>
     )
     .expect("child callback-realm replacement should evaluate");
     vm.drain_pending_child_frame_work_for_test();
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("destroyed callback-realm timer should leave the queue quiescent");
 
@@ -5292,7 +5279,7 @@ String(timerId > 0 && sourceTimerId > 0)
     );
 
     vm.drain_pending_child_frame_work_for_test();
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("materialized child timer should drain");
     assert_eq!(
@@ -5347,7 +5334,7 @@ String(timerId > 0)
     );
 
     vm.drain_pending_child_frame_work_for_test();
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("preserved initial-empty timer should drain");
     assert_eq!(
@@ -5397,7 +5384,7 @@ String(timerId > 0)
     );
 
     vm.drain_pending_child_frame_work_for_test();
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("retired initial-empty LocalWindow timer should leave the queue quiescent");
     assert_eq!(
@@ -5438,7 +5425,7 @@ popup.clearTimeout(cancelledPopupTimer);
         "queued"
     );
 
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("scoped LocalWindow timers should drain");
     assert_eq!(
@@ -5463,7 +5450,7 @@ popup.close();
 "#,
     )
     .expect("popup timer close setup should evaluate");
-    vm.advance_timers_until_deadline_for_test(&loader)
+    vm.advance_timers_until_deadline_for_test()
         .await
         .expect("closed popup timer should leave the timer queue quiescent");
     assert_eq!(
@@ -5498,7 +5485,7 @@ globalThis.__childIntervalOwnerFrame = frame;
     .expect("child interval navigation setup should evaluate");
     vm.drain_pending_child_frame_work_for_test();
     assert!(
-        vm.run_next_due_timer_callback_for_test(&loader)
+        vm.run_next_due_timer_callback_for_test()
             .await
             .expect("first child interval turn should run")
     );
@@ -5508,7 +5495,6 @@ globalThis.__childIntervalOwnerFrame = frame;
         .expect("child interval replacement state should evaluate");
     assert_eq!(events_after_replacement, "tick|replacement-ready");
     vm.advance_timers_until_deadline_for_test_with_deadline(
-        &loader,
         std::time::Instant::now() + std::time::Duration::from_millis(20),
     )
     .await
@@ -5557,7 +5543,7 @@ async fn queued_window_message_survives_source_local_window_retirement() {
     .expect("source-retirement window-message setup should evaluate");
     for _ in 0..128 {
         if !vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("initial child setup should use the selected-task dispatcher")
         {
@@ -5573,7 +5559,7 @@ async fn queued_window_message_survives_source_local_window_retirement() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("initial source-retirement readiness should advance");
     }
@@ -5581,13 +5567,13 @@ async fn queued_window_message_survives_source_local_window_retirement() {
     vm.eval("__sourceRetirementFrame.contentWindow.postMessage('go', '*')")
         .expect("message to retiring source should queue");
     assert!(
-        vm.run_one_window_message_executor_turn(&loader)
+        vm.run_one_window_message_executor_turn()
             .await
             .expect("target child message should run")
     );
     for _ in 0..128 {
         if !vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("replacement child setup should use the selected-task dispatcher")
         {
@@ -5606,7 +5592,7 @@ async fn queued_window_message_survives_source_local_window_retirement() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("source-retirement messages should advance");
     }
@@ -5644,7 +5630,7 @@ async fn child_post_message_reply_is_delivered_after_sender_installs_late_listen
 "#,
     )
     .expect("late listener child setup should evaluate");
-    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_page_task_executor_turns_for_setup(128)
         .await
         .expect("child setup should use the selected-task dispatcher");
 
@@ -5673,7 +5659,7 @@ async fn child_post_message_reply_is_delivered_after_sender_installs_late_listen
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("late listener reply should advance");
     }
@@ -5731,12 +5717,9 @@ return __storageEvents.length;
         "0"
     );
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
-        )
-        .await
-        .expect("selected dispatcher should advance first surrogate storage event")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::StorageEvent)
+            .await
+            .expect("selected dispatcher should advance first surrogate storage event")
     );
 
     vm.eval(
@@ -5750,12 +5733,9 @@ localStorage.setItem(key, value);
     )
     .expect("second surrogate storage mutation should evaluate");
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
-        )
-        .await
-        .expect("selected dispatcher should advance second surrogate storage event")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::StorageEvent)
+            .await
+            .expect("selected dispatcher should advance second surrogate storage event")
     );
 
     assert_eq!(
@@ -5831,12 +5811,9 @@ async fn repeated_iframe_src_assignment_reloads_child_storage_event_handler() {
         "storage events must remain queued after the reload"
     );
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
-        )
-        .await
-        .expect("selected dispatcher should advance reloaded child storage event")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::StorageEvent)
+            .await
+            .expect("selected dispatcher should advance reloaded child storage event")
     );
     assert_eq!(
         vm.eval("__storageEvents.join('||')")
@@ -5966,11 +5943,11 @@ async fn transferred_child_message_port_rehomes_and_retires_with_local_window() 
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("child setup should use the selected-task dispatcher");
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance child readiness");
     }
@@ -6000,11 +5977,11 @@ __messagePortOwnerFrame.contentWindow.postMessage(
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("child setup should use the selected-task dispatcher");
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance MessagePort transfer");
     }
@@ -6052,11 +6029,11 @@ __messagePortOwnerFrame.srcdoc =
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("child setup should use the selected-task dispatcher");
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance child replacement");
     }
@@ -6115,7 +6092,7 @@ async fn stale_child_message_port_does_not_dispatch_to_reused_iframe_generation(
         .expect("stale child MessagePort setup should evaluate");
     assert_eq!(setup, "queued");
 
-    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_page_task_executor_turns_for_setup(128)
         .await
         .expect("child setup should use the selected-task dispatcher");
     for _ in 0..4 {
@@ -6131,7 +6108,7 @@ async fn stale_child_message_port_does_not_dispatch_to_reused_iframe_generation(
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should observe first child ready");
     }
@@ -6143,7 +6120,7 @@ __messagePortGenerationFrame.srcdoc = "<!doctype html><script>parent.postMessage
 "#,
     )
     .expect("second child navigation should evaluate");
-    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+    vm.drain_ready_page_task_executor_turns_for_setup(128)
         .await
         .expect("child setup should use the selected-task dispatcher");
     for _ in 0..4 {
@@ -6159,7 +6136,7 @@ __messagePortGenerationFrame.srcdoc = "<!doctype html><script>parent.postMessage
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should observe second child ready");
     }
@@ -6168,7 +6145,7 @@ __messagePortGenerationFrame.srcdoc = "<!doctype html><script>parent.postMessage
         .expect("posting to stale child MessagePort should evaluate");
     for _ in 0..4 {
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should flush stale child MessagePort wake");
     }
@@ -6219,12 +6196,9 @@ async fn child_storage_mutations_queue_events_to_parent_window() {
     );
 
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
-        )
-        .await
-        .expect("selected dispatcher should advance child-origin storage event")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::StorageEvent)
+            .await
+            .expect("selected dispatcher should advance child-origin storage event")
     );
     assert_eq!(
         vm.eval("JSON.stringify(__storageEvents)")
@@ -6283,7 +6257,7 @@ async fn opaque_origin_frames_reject_web_storage_access() {
     assert_eq!(setup, "queued");
 
     for _ in 0..8 {
-        vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+        vm.drain_ready_page_task_executor_turns_for_setup(128)
             .await
             .expect("child setup should use the selected-task dispatcher");
         let message_count = vm
@@ -6293,13 +6267,13 @@ async fn opaque_origin_frames_reject_web_storage_access() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("opaque WebStorage child load should advance");
     }
     for _ in 0..4 {
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("opaque WebStorage storage event drain should advance");
     }
@@ -6449,7 +6423,6 @@ async fn third_party_about_blank_popup_does_not_reuse_opener_or_first_party_stor
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        &loader,
         "String(globalThis.__aboutBlankPopupStorageMessage !== null)",
         "true",
         "about:blank popup partition result",
@@ -6514,7 +6487,6 @@ async fn run_web_storage_partition_probe(
 
     advance_page_task_executor_until_eval_equals(
         &mut vm,
-        loader,
         "String(globalThis.__partitionMessage !== null)",
         "true",
         "third-party WebStorage partition result",
@@ -6899,12 +6871,9 @@ async fn document_domain_exact_self_assignment_keeps_storage_event_delivery() {
     );
 
     assert!(
-        vm.run_one_dom_manipulation_task_executor_turn(
-            PageDomManipulationTestFamily::StorageEvent,
-            &loader,
-        )
-        .await
-        .expect("selected dispatcher should advance document.domain storage event")
+        vm.run_one_dom_manipulation_task_executor_turn(PageDomManipulationTestFamily::StorageEvent)
+            .await
+            .expect("selected dispatcher should advance document.domain storage event")
     );
     assert_eq!(
         vm.eval("JSON.stringify(__documentDomainStorageEvents)")
@@ -6953,7 +6922,7 @@ async fn child_window_post_message_dispatches_a_trusted_message_event() {
             break;
         }
         if !vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("child postMessage setup should advance")
         {
@@ -7016,7 +6985,7 @@ async fn window_post_message_validates_and_normalizes_target_origin() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should drain queued window message");
     }
@@ -7075,7 +7044,7 @@ async fn window_post_message_allows_promise_continuations_between_events() {
             break;
         }
         let _ = vm
-            .run_one_window_message_executor_turn(&loader)
+            .run_one_window_message_executor_turn()
             .await
             .expect("wait driver should drain ordered window messages");
     }
@@ -7119,7 +7088,7 @@ JSON.stringify(__postedMessageTaskEvents)
     );
 
     assert!(
-        vm.run_one_window_message_executor_turn(&loader)
+        vm.run_one_window_message_executor_turn()
             .await
             .expect("first posted-message task should run")
     );
@@ -7135,7 +7104,7 @@ JSON.stringify(__postedMessageTaskEvents)
     assert!(!vm.has_ready_timeout());
 
     assert!(
-        vm.run_one_window_message_executor_turn(&loader)
+        vm.run_one_window_message_executor_turn()
             .await
             .expect("second posted-message task should run")
     );
@@ -7182,7 +7151,7 @@ async fn window_post_message_array_second_argument_uses_options_defaults_without
 
     assert_eq!(result, "0");
     let _ = vm
-        .run_one_oldest_ready_page_task_executor_turn(&loader)
+        .run_one_oldest_ready_page_task_executor_turn()
         .await
         .expect("wait driver should drain raw-array window message");
     assert_eq!(
@@ -7288,6 +7257,7 @@ async fn child_response_csp_sandbox_disallows_document_domain_setter() {
 (() => {{
   const frame = document.createElement("iframe");
   frame.src = {child_url_literal};
+  frame.id = "response-csp-sandbox";
   (document.body || document.documentElement || document).appendChild(frame);
   globalThis.__responseCspSandboxFrame = frame;
   return "queued";
@@ -7296,17 +7266,28 @@ async fn child_response_csp_sandbox_disallows_document_domain_setter() {
         ))
         .expect("child response CSP sandbox setup should evaluate");
     assert_eq!(setup, "queued");
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 256)
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(256)
         .await
         .expect("child response CSP setup should use the selected-task dispatcher");
 
-    wait_for_one_page_resource_completion_selected_task_executor_test_turn(
-        &mut vm,
-        &loader,
-        "child response CSP sandbox completion",
-    )
-    .await;
-    vm.drain_ready_child_frame_task_executor_turns_for_setup(&loader, 256)
+    let child = vm
+        .element_handle_by_id_for_test("response-csp-sandbox")
+        .unwrap();
+    let target = vm
+        .current_child_document_navigation_fetch_target(child)
+        .expect("the child response must still be pending");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while vm.current_child_document_navigation_fetch_target(child) == Some(target) {
+            wait_for_one_page_resource_completion_selected_task_executor_test_turn(
+                &mut vm,
+                "child response CSP sandbox completion",
+            )
+            .await;
+        }
+    })
+    .await
+    .expect("the exact child navigation must complete after its native progress");
+    vm.drain_ready_child_frame_task_executor_turns_for_setup(256)
         .await
         .expect("child response CSP lifecycle should use the selected-task dispatcher");
     let requests = server
@@ -7658,7 +7639,7 @@ async fn window_post_message_structured_clones_data_and_ports() {
 
     assert_eq!(result, "0");
     let _ = vm
-        .run_one_oldest_ready_page_task_executor_turn(&loader)
+        .run_one_oldest_ready_page_task_executor_turn()
         .await
         .expect("wait driver should drain cloned window message");
     assert_eq!(
@@ -7701,7 +7682,7 @@ async fn window_post_message_options_transfer_list_transfers_ports() {
 
     assert_eq!(result, "0");
     let _ = vm
-        .run_one_oldest_ready_page_task_executor_turn(&loader)
+        .run_one_oldest_ready_page_task_executor_turn()
         .await
         .expect("wait driver should drain options-transfer window message");
     assert_eq!(
@@ -7760,7 +7741,7 @@ async fn message_port_dispatch_uses_lightweight_popup_owner_scope() {
             break;
         }
         let _ = vm
-            .run_one_oldest_ready_page_task_executor_turn(&loader)
+            .run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance popup-owned MessagePort");
     }
@@ -7823,7 +7804,7 @@ async fn window_message_handler_broadcast_channel_stays_in_lightweight_popup_own
             break;
         }
         let outcome = vm
-            .run_one_window_message_executor_turn(&loader)
+            .run_one_window_message_executor_turn()
             .await
             .expect("typed popup Window.postMessage turn should apply");
         assert!(
@@ -7832,7 +7813,7 @@ async fn window_message_handler_broadcast_channel_stays_in_lightweight_popup_own
         );
     }
 
-    vm.apply_pending_broadcast_channel_delivery_tasks(&loader, 4)
+    vm.apply_pending_broadcast_channel_delivery_tasks(4)
         .await
         .expect("any admitted BroadcastChannel executor tasks should apply");
 
@@ -8046,7 +8027,7 @@ async fn queued_selectionchange_ignores_page_tampered_document_dispatch_event() 
 
     assert_eq!(result, "no|no|1");
     assert!(
-        vm.run_one_oldest_ready_page_task_executor_turn(&loader)
+        vm.run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance queued selectionchange dispatch")
     );
@@ -8094,7 +8075,7 @@ async fn selectionchange_mutation_inside_listener_queues_a_later_task() {
 
     assert_eq!(result, "|count:0");
     assert!(
-        vm.run_one_oldest_ready_page_task_executor_turn(&loader)
+        vm.run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance first selectionchange task")
     );
@@ -8104,7 +8085,7 @@ async fn selectionchange_mutation_inside_listener_queues_a_later_task() {
         "event:1:0|count:1"
     );
     assert!(
-        vm.run_one_oldest_ready_page_task_executor_turn(&loader)
+        vm.run_one_oldest_ready_page_task_executor_turn()
             .await
             .expect("wait driver should advance reentrant selectionchange task")
     );
@@ -8139,7 +8120,7 @@ async fn selectionchange_without_document_listener_does_not_schedule_host_task()
 
     assert_eq!(result, "0|2");
     assert!(
-        !vm.run_one_user_interaction_executor_turn(&loader)
+        !vm.run_one_user_interaction_executor_turn()
             .await
             .expect("exact UserInteraction source should remain empty"),
         "a selection mutation without a Document listener must not enqueue a selectionchange task"

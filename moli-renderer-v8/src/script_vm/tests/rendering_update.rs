@@ -1,9 +1,7 @@
 use super::{ChildFrameSemanticTurnKind, new_storage_page_task_executor_test_vm};
-use crate::network::ResourceRequestClient;
 
 #[tokio::test(flavor = "current_thread")]
 async fn deferred_layout_resources_coalesce_on_the_existing_rendering_source() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
     let mut vm = new_storage_page_task_executor_test_vm("https://layout-resource-turn.test/");
     for _ in 0..3 {
         assert!(
@@ -12,22 +10,15 @@ async fn deferred_layout_resources_coalesce_on_the_existing_rendering_source() {
                 .queue_layout_resource_admission(Vec::new())
         );
     }
+    assert!(vm.run_one_rendering_update_executor_turn().await.unwrap());
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
-            .await
-            .unwrap()
-    );
-    assert!(
-        !vm.run_one_rendering_update_executor_turn(&loader)
-            .await
-            .unwrap(),
+        !vm.run_one_rendering_update_executor_turn().await.unwrap(),
         "repeated paused capture must not manufacture extra rendering turns"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn deferred_layout_resources_do_not_retarget_after_document_open() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).unwrap();
     let mut vm = new_storage_page_task_executor_test_vm("https://layout-resource-retirement.test/");
     let before = vm.current_main_document_task_owner().unwrap();
     let root = vm
@@ -49,26 +40,17 @@ async fn deferred_layout_resources_do_not_retarget_after_document_open() {
     vm.eval("document.open(); document.write('<!doctype html><title>replacement</title>'); document.close(); 'replaced'").unwrap();
     assert_ne!(before, vm.current_main_document_task_owner().unwrap());
     let resources = vm.css_image_resource_observability_for_test();
-    assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
-            .await
-            .unwrap()
-    );
+    assert!(vm.run_one_rendering_update_executor_turn().await.unwrap());
     assert_eq!(
         vm.css_image_resource_observability_for_test(),
         resources,
         "retired capture references must not admit resources into the replacement"
     );
-    assert!(
-        !vm.run_one_rendering_update_executor_turn(&loader)
-            .await
-            .unwrap()
-    );
+    assert!(!vm.run_one_rendering_update_executor_turn().await.unwrap());
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn window_scroll_coalesces_into_one_rendering_update_without_a_timer() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://scroll-rendering-update.test/");
 
     vm.eval(
@@ -95,7 +77,7 @@ scrollTo(0, 20);
         "scroll events must remain deferred until the rendering turn"
     );
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("rendering update should run"),
         "coalesced scrolls should retain one production source task"
@@ -106,7 +88,7 @@ scrollTo(0, 20);
         "scroll:20|scrollend:20"
     );
     assert!(
-        !vm.run_one_rendering_update_executor_turn(&loader)
+        !vm.run_one_rendering_update_executor_turn()
             .await
             .expect("empty rendering source should remain usable"),
         "three synchronous scrolls of one Document must coalesce to one update"
@@ -115,7 +97,6 @@ scrollTo(0, 20);
 
 #[tokio::test(flavor = "current_thread")]
 async fn animation_and_scroll_share_rendering_fifo_but_consume_one_task_per_turn() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://animation-scroll-rendering-fifo.test/");
 
@@ -147,7 +128,7 @@ scrollTo(0, 12);
         "neither rendering operation may manufacture a PageTimer"
     );
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("animation rendering task should run first")
     );
@@ -158,7 +139,7 @@ scrollTo(0, 12);
         "one selected rendering task must not drain the following scroll task"
     );
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("scroll rendering task should run second")
     );
@@ -168,7 +149,7 @@ scrollTo(0, 12);
         "animation|scroll|scrollend"
     );
     assert!(
-        !vm.run_one_rendering_update_executor_turn(&loader)
+        !vm.run_one_rendering_update_executor_turn()
             .await
             .expect("drained rendering source should remain usable")
     );
@@ -176,7 +157,6 @@ scrollTo(0, 12);
 
 #[tokio::test(flavor = "current_thread")]
 async fn scroll_handler_reentrancy_queues_a_new_turn_and_checkpoints_after_scrollend() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://scroll-reentrant-update.test/");
 
     vm.eval(
@@ -199,7 +179,7 @@ scrollTo(0, 10);
     .expect("reentrant scroll fixture should initialize");
 
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("first rendering update should run")
     );
@@ -211,7 +191,7 @@ scrollTo(0, 10);
     );
 
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("reentrant rendering update should run"),
         "scrolling from a handler must become a distinct subsequent turn"
@@ -226,7 +206,6 @@ scrollTo(0, 10);
 
 #[tokio::test(flavor = "current_thread")]
 async fn throwing_scroll_handler_does_not_abort_scrollend_or_the_task_checkpoint() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://scroll-listener-error.test/");
 
     vm.eval(
@@ -245,7 +224,7 @@ scrollTo(0, 10);
     .expect("throwing scroll-listener fixture should initialize");
 
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("listener failure must not abort the rendering turn")
     );
@@ -260,7 +239,6 @@ scrollTo(0, 10);
 
 #[tokio::test(flavor = "current_thread")]
 async fn scroll_handler_document_replacement_does_not_retarget_pending_scrollend() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://scroll-handler-replacement.test/");
 
     vm.eval(
@@ -286,7 +264,7 @@ scrollTo(0, 10);
     .expect("scroll replacement fixture should initialize");
 
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("rendering update should dispatch the retired Document scroll")
     );
@@ -301,7 +279,6 @@ scrollTo(0, 10);
 
 #[tokio::test(flavor = "current_thread")]
 async fn unchanged_window_scroll_position_queues_neither_rendering_work_nor_timer() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm("https://scroll-no-change.test/");
 
     vm.eval(
@@ -317,7 +294,7 @@ scrollTo(0, 0);
 
     assert!(!vm.has_ready_timeout());
     assert!(
-        !vm.run_one_rendering_update_executor_turn(&loader)
+        !vm.run_one_rendering_update_executor_turn()
             .await
             .expect("empty rendering source should remain usable")
     );
@@ -330,7 +307,6 @@ scrollTo(0, 0);
 
 #[tokio::test(flavor = "current_thread")]
 async fn child_document_scroll_dispatches_in_its_exact_default_context() {
-    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
         new_storage_page_task_executor_test_vm("https://child-scroll-rendering-update.test/");
 
@@ -354,19 +330,16 @@ void frame.contentWindow;
         ChildFrameSemanticTurnKind::HostLoad,
     ] {
         assert!(
-            !vm.run_one_child_frame_task_executor_turn(turn, &loader)
+            !vm.run_one_child_frame_task_executor_turn(turn)
                 .await
                 .expect("initial about:blank child task probe should succeed"),
             "the synchronous initial about:blank child must not leave {turn:?} work"
         );
     }
     assert!(
-        vm.run_one_child_frame_task_executor_turn(
-            ChildFrameSemanticTurnKind::RealmMaterialization,
-            &loader,
-        )
-        .await
-        .expect("child realm materialization turn should succeed"),
+        vm.run_one_child_frame_task_executor_turn(ChildFrameSemanticTurnKind::RealmMaterialization)
+            .await
+            .expect("child realm materialization turn should succeed"),
         "child Window exposure should retain one production realm-materialization task"
     );
     let child_context_id = vm
@@ -390,7 +363,7 @@ scrollTo(0, 15);
 
     assert!(!vm.has_ready_timeout());
     assert!(
-        vm.run_one_rendering_update_executor_turn(&loader)
+        vm.run_one_rendering_update_executor_turn()
             .await
             .expect("child rendering update should run")
     );

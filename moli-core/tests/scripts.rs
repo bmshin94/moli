@@ -185,9 +185,12 @@ async fn parse_time_async_classic_scripts_can_run_between_parser_chunks_before_l
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
 
-    let page = browser
-        .fetch(&server.url("/compat/parse-time-async-classic-chunked"))
-        .await?;
+    let page = tokio::time::timeout(
+        Duration::from_secs(5),
+        browser.fetch(&server.url("/compat/parse-time-async-classic-chunked")),
+    )
+    .await
+    .expect("async script must execute and release the pending HTML tail")?;
 
     assert_eq!(
         diagnostic_global(&page, "parseTimeAsyncSawTail"),
@@ -196,6 +199,13 @@ async fn parse_time_async_classic_scripts_can_run_between_parser_chunks_before_l
     assert_eq!(
         diagnostic_global(&page, "parseTimeAsyncSawDcl"),
         Some(&JsValueSnapshot::Bool(false))
+    );
+    assert!(
+        page.serialize_html_async()
+            .await
+            .unwrap()
+            .contains("<div id=\"late\">late</div>"),
+        "the acknowledged HTML tail must reach the final DOM"
     );
 
     server.shutdown().await;

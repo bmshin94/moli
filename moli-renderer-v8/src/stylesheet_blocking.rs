@@ -6,8 +6,8 @@ use moli_web_mime::{
 };
 use url::Url;
 
-use crate::network::ResourceRequestClient;
-use crate::service_worker_runtime::{ServiceWorkerClientId, ServiceWorkerRequestDestination};
+use crate::network::context::{DocumentResourceLoader, ResourceResponseProvenance};
+use crate::service_worker_runtime::ServiceWorkerClientId;
 use crate::types::{AsyncSubresourceFetchResponseFilter, SubresourceResourceType};
 
 pub(crate) use moli_stylesheet_blocking::{
@@ -33,48 +33,51 @@ pub(crate) struct ServiceWorkerStylesheetFetchContext {
 
 #[derive(Clone)]
 pub(crate) struct RendererStylesheetFetcher {
-    loader: ResourceRequestClient,
-    task_runner: crate::network::RendererResourceTaskRunner,
+    loader: DocumentResourceLoader,
     service_worker_context: Option<ServiceWorkerStylesheetFetchContext>,
     request_resource_type: moli_fetch::RequestResourceType,
     link_preload: bool,
+    initiator: crate::types::SubresourceRequestInitiatorType,
 }
 
 impl RendererStylesheetFetcher {
     pub(crate) fn new(
-        loader: ResourceRequestClient,
-        task_runner: crate::network::RendererResourceTaskRunner,
+        loader: DocumentResourceLoader,
         service_worker_context: Option<ServiceWorkerStylesheetFetchContext>,
     ) -> Self {
         Self {
             loader,
-            task_runner,
             service_worker_context,
             request_resource_type: moli_fetch::RequestResourceType::CssStyleSheet,
             link_preload: false,
+            initiator: crate::types::SubresourceRequestInitiatorType::Parser,
         }
     }
 
     pub(crate) fn for_speculative_preload(
-        loader: ResourceRequestClient,
-        task_runner: crate::network::RendererResourceTaskRunner,
+        loader: DocumentResourceLoader,
         service_worker_context: Option<ServiceWorkerStylesheetFetchContext>,
         request_resource_type: moli_fetch::RequestResourceType,
         link_preload: bool,
     ) -> Self {
         Self {
             loader,
-            task_runner,
             service_worker_context,
             request_resource_type,
             link_preload,
+            initiator: crate::types::SubresourceRequestInitiatorType::Parser,
         }
+    }
+
+    pub(crate) fn for_css_imports(mut self) -> Self {
+        self.initiator = crate::types::SubresourceRequestInitiatorType::Css;
+        self
     }
 }
 
 impl StylesheetFetcher for RendererStylesheetFetcher {
     fn spawn_stylesheet_task(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
-        self.task_runner.spawn(task);
+        self.loader.spawn_resource_task(task);
     }
 
     fn fetch_stylesheet_resource(
@@ -83,7 +86,7 @@ impl StylesheetFetcher for RendererStylesheetFetcher {
         url: Url,
         options: StylesheetFetchOptions,
     ) -> Pin<Box<dyn Future<Output = StylesheetFetchTerminal> + Send + 'static>> {
-        if self.loader.author_styles_disabled() {
+        if self.loader.request_client().author_styles_disabled() {
             return Box::pin(async move {
                 StylesheetFetchTerminal::network_error(format!(
                     "failed to fetch stylesheet `{url}`: net::ERR_BLOCKED_BY_CLIENT"
@@ -91,20 +94,20 @@ impl StylesheetFetcher for RendererStylesheetFetcher {
             });
         }
         let loader = self.loader.clone();
-        let resource_task_runner = self.task_runner.clone();
         let service_worker_context = self.service_worker_context.clone();
         let request_resource_type = self.request_resource_type;
         let link_preload = self.link_preload;
+        let initiator = self.initiator;
         Box::pin(async move {
             fetch_stylesheet_readiness_with_service_worker(
                 loader,
-                resource_task_runner,
                 document_url,
                 url,
                 options,
                 service_worker_context,
                 request_resource_type,
                 link_preload,
+                initiator,
             )
             .await
         })
@@ -131,15 +134,15 @@ impl StylesheetFetcher for RendererStylesheetFetcher {
     }
 }
 
-pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
-    loader: ResourceRequestClient,
-    resource_task_runner: crate::network::RendererResourceTaskRunner,
+async fn fetch_stylesheet_readiness_with_service_worker(
+    loader: DocumentResourceLoader,
     document_url: Url,
     url: Url,
     options: StylesheetFetchOptions,
     service_worker_context: Option<ServiceWorkerStylesheetFetchContext>,
     request_resource_type: moli_fetch::RequestResourceType,
     link_preload: bool,
+    initiator: crate::types::SubresourceRequestInitiatorType,
 ) -> StylesheetFetchTerminal {
     let request = stylesheet_readiness_request(
         &document_url,
@@ -149,41 +152,21 @@ pub(crate) async fn fetch_stylesheet_readiness_with_service_worker(
         link_preload,
         None,
     );
+    let mut loader = loader;
     if let Some(context) = service_worker_context {
-        match context
-            .browser_context_runtime
-            .fetch_service_worker_subresource_for_client_with_metadata(
-                context.client_id,
-                document_url.clone(),
-                &request,
-                &loader,
-                resource_task_runner,
-                ServiceWorkerRequestDestination::Style,
-                SubresourceResourceType::Stylesheet,
-            )
-            .await
-        {
-            Ok(Some(response)) => {
-                let response_provenance = StylesheetResponseProvenance::ServiceWorker {
-                    filter: response.response_filter,
-                };
-                return stylesheet_terminal_from_response(
-                    &document_url,
-                    &url,
-                    &options,
-                    *response.response,
-                    response_provenance,
-                );
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return StylesheetFetchTerminal::network_error(format!(
-                    "failed to fetch stylesheet `{url}` through service worker: {error}"
-                ));
-            }
-        }
+        loader.bind_service_worker(context.browser_context_runtime, context.client_id);
     }
-    fetch_stylesheet_readiness_with_request(loader, document_url, url, options, request).await
+    match loader
+        .fetch_resource(request, SubresourceResourceType::Stylesheet, initiator)
+        .await
+    {
+        Ok((response, provenance)) => {
+            stylesheet_terminal_from_response(&document_url, &url, &options, response, provenance)
+        }
+        Err(error) => StylesheetFetchTerminal::network_error(format!(
+            "failed to fetch stylesheet `{url}`: {error}"
+        )),
+    }
 }
 
 pub(crate) fn stylesheet_request_mode_and_credentials(
@@ -233,36 +216,7 @@ fn stylesheet_readiness_request(
     request
 }
 
-async fn fetch_stylesheet_readiness_with_request(
-    loader: ResourceRequestClient,
-    document_url: Url,
-    url: Url,
-    options: StylesheetFetchOptions,
-    request: moli_fetch::Request,
-) -> StylesheetFetchTerminal {
-    match loader.fetch_text_stream(request).await {
-        Ok(response) => stylesheet_terminal_from_response(
-            &document_url,
-            &url,
-            &options,
-            crate::protocol_types::NavigationResponse::from(response),
-            StylesheetResponseProvenance::Network,
-        ),
-        Err(error) => StylesheetFetchTerminal::network_error(format!(
-            "failed to fetch stylesheet `{url}`: {error}"
-        )),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StylesheetResponseProvenance {
-    Network,
-    ServiceWorker {
-        filter: Option<AsyncSubresourceFetchResponseFilter>,
-    },
-}
-
-impl StylesheetResponseProvenance {
+impl ResourceResponseProvenance {
     fn is_cors_same_origin(self, document_url: &Url, response_url: &Url) -> bool {
         match self {
             Self::Network => moli_url::same_origin(document_url, response_url),
@@ -282,12 +236,12 @@ fn stylesheet_terminal_from_response(
     request_url: &Url,
     options: &StylesheetFetchOptions,
     response: crate::protocol_types::NavigationResponse,
-    response_provenance: StylesheetResponseProvenance,
+    response_provenance: ResourceResponseProvenance,
 ) -> StylesheetFetchTerminal {
     let (request_mode, credentials_mode) = options.request_mode_and_credentials();
     let cors_usability =
         (request_mode == moli_fetch::RequestMode::Cors).then(|| match response_provenance {
-            StylesheetResponseProvenance::ServiceWorker {
+            ResourceResponseProvenance::ServiceWorker {
                 filter:
                     Some(
                         AsyncSubresourceFetchResponseFilter::Opaque
@@ -296,8 +250,8 @@ fn stylesheet_terminal_from_response(
             } => Err(format!(
                 "failed to fetch stylesheet `{request_url}`: CORS response is opaque"
             )),
-            StylesheetResponseProvenance::ServiceWorker { filter: None } => Ok(()),
-            StylesheetResponseProvenance::Network => crate::network_host::validate_cors_response(
+            ResourceResponseProvenance::ServiceWorker { filter: None } => Ok(()),
+            ResourceResponseProvenance::Network => crate::network_host::validate_cors_response(
                 document_url,
                 &response.final_url,
                 &response.headers,
@@ -499,7 +453,7 @@ mod tests {
             &stylesheet_url,
             &options,
             response,
-            StylesheetResponseProvenance::Network,
+            ResourceResponseProvenance::Network,
         );
 
         assert!(terminal.is_ready());
@@ -531,7 +485,7 @@ mod tests {
             &stylesheet_url,
             &options,
             response,
-            StylesheetResponseProvenance::Network,
+            ResourceResponseProvenance::Network,
         );
 
         assert!(!terminal.is_ready());
@@ -560,7 +514,7 @@ mod tests {
             &stylesheet_url,
             &StylesheetFetchOptions::default(),
             response,
-            StylesheetResponseProvenance::Network,
+            ResourceResponseProvenance::Network,
         );
 
         assert!(!terminal.is_ready());
@@ -592,7 +546,7 @@ mod tests {
             &request_url,
             &StylesheetFetchOptions::default(),
             response,
-            StylesheetResponseProvenance::ServiceWorker { filter: None },
+            ResourceResponseProvenance::ServiceWorker { filter: None },
         );
 
         assert!(terminal.is_ready());
@@ -623,7 +577,7 @@ mod tests {
             &request_url,
             &options,
             response,
-            StylesheetResponseProvenance::ServiceWorker { filter: None },
+            ResourceResponseProvenance::ServiceWorker { filter: None },
         );
 
         assert!(terminal.is_ready());

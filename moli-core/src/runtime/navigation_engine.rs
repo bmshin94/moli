@@ -75,28 +75,6 @@ pub enum CommittedDocumentResourceSource {
     Synthetic,
 }
 
-fn streaming_raw_response_from_navigation_response(
-    response: NavigationResponse,
-) -> Result<StreamingRawResponse> {
-    let head = response.head();
-    let body = response.clone_body_bytes();
-    let (body_tx, body_rx) = tokio::sync::mpsc::unbounded_channel();
-    if !body.is_empty() {
-        body_tx
-            .send(body)
-            .map_err(|_| anyhow!("failed to enqueue service worker main resource body"))?;
-    }
-    drop(body_tx);
-    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
-    let _ = completion_tx.send(Ok(()));
-    Ok(StreamingRawResponse::new_with_head(
-        head,
-        body_rx,
-        FetchCancelHandle::new(),
-        completion_rx,
-    ))
-}
-
 #[derive(Clone)]
 pub struct NavigationResourceStorageHandles {
     cookie_store: SharedBrowserCookieStore,
@@ -1038,11 +1016,9 @@ impl NavigationEngine {
         } = service_worker_fetch;
         if let Some(response) = response {
             navigation_loader.note_service_worker_response_ready()?;
-            let final_url = response.final_url.clone();
+            let final_url = response.response().final_url.clone();
             return Ok(NavigationStreamingRawResponse {
-                fetch_result: NetworkFetchResult::without_request_observation(
-                    streaming_raw_response_from_navigation_response(response)?,
-                ),
+                fetch_result: response,
                 reserved_service_worker_client: reserved_client,
                 document_fetch_context_seed: navigation_loader.commit(final_url)?,
             });

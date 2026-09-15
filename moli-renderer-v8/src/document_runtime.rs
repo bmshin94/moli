@@ -50,6 +50,8 @@ use super::{
 };
 #[cfg(test)]
 use crate::dom::native::ShadowRootBindingSnapshot;
+#[cfg(test)]
+use crate::network::ResourceRequestClient;
 use crate::{
     dom::{
         NodeId,
@@ -64,7 +66,6 @@ use crate::{
         DocumentParserSessionControlHandle, ParserResumePermit, ParserSuspensionCause,
     },
     module_runtime::ModuleMapKey,
-    network::ResourceRequestClient,
     parser::{HtmlParser, ParserInputContext, ParserInputSession},
     selector::{QueryEngine, SelectorError},
     service_worker_runtime::ServiceWorkerClientId,
@@ -440,7 +441,6 @@ pub(crate) struct ConnectedLoadNetworkResult {
     pub(crate) blocking_operation: Option<crate::stylesheet_blocking::StylesheetBlockingOperation>,
     pub(crate) source_operation: Option<Arc<ConnectedLoadOperation>>,
     pub(crate) import_roots: Vec<ConnectedStyleImportRoot>,
-    pub(crate) document_url: Url,
     pub(crate) request_url: Url,
     pub(crate) source_owners: Vec<DomHandle>,
     pub(crate) resource_type: SubresourceResourceType,
@@ -495,13 +495,6 @@ pub(crate) enum DocumentWriteExternalScriptLoadApplication {
     Applied,
     SupersededDuringApplication,
     RejectedStaleTarget,
-}
-
-#[derive(Debug)]
-struct DocumentWriteScriptPreload {
-    request: crate::runtime::BufferedScriptPreloadRequest,
-    target: crate::types::DocumentWriteExternalScriptFetchTarget,
-    ready_completion: Option<crate::types::DocumentWriteExternalScriptLoadCompletion>,
 }
 
 /// A parser-blocking script reached by a live `document.write`-style parser
@@ -809,8 +802,6 @@ pub(super) struct DocumentRuntime {
     /// The Document shares this resource residence with parser re-entry while
     /// scanner/tokenizer state remains owned by phase one.
     main_document_script_preloads: crate::runtime::DocumentScriptPreloadStore,
-    document_write_script_preloads:
-        HashMap<crate::runtime::BufferedScriptPreloadKey, DocumentWriteScriptPreload>,
     pending_document_write_external_script_load: Option<PendingDocumentWriteExternalScriptLoad>,
     pending_document_write_stylesheet_blocked_script:
         Option<PendingDocumentWriteStylesheetBlockedScript>,
@@ -2579,7 +2570,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: document.final_url().unwrap().clone(),
                 request_url: stale_url.clone(),
                 source_owners: vec![link],
                 resource_type: SubresourceResourceType::Stylesheet,
@@ -2626,7 +2616,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: document.final_url().unwrap().clone(),
                 request_url: current_url.clone(),
                 source_owners: vec![link],
                 resource_type: SubresourceResourceType::Stylesheet,
@@ -2678,7 +2667,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: detached_load.fetch().document_url().clone(),
                 request_url: detached_load.request_url().clone(),
                 source_owners: vec![link],
                 resource_type: SubresourceResourceType::Stylesheet,
@@ -2730,7 +2718,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: detached_load.fetch().document_url().clone(),
                 request_url: detached_load.request_url().clone(),
                 source_owners: vec![link],
                 resource_type: SubresourceResourceType::Stylesheet,
@@ -3046,6 +3033,21 @@ mod tests {
         );
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
         let mut runtime = DocumentRuntime::new_networked(&document, &loader);
+        let mut network = crate::page_task_queue::RendererResourceCompletionTestHarness::new();
+        let source = crate::runtime::RendererBrowserContextRuntime::new();
+        let root = crate::runtime::RendererDocumentLifecycleJournalHandle::new_initial(
+            crate::PageId::new_for_testing(1),
+        );
+        let mut document_loader = runtime.current_document_resource_loader().unwrap();
+        document_loader.bind_network(
+            source.network_for_document(
+                crate::runtime::RendererOwnerLocalHostId::new_for_testing(1),
+                root.identity(),
+            ),
+            network.sender(),
+            None,
+        );
+        runtime.install_standalone_document_resource_loader(&document_loader);
         let script_node_id = NodeId::new(document.script_handles()[0].index());
         let inputs = moli_stylesheet_blocking::collect_document_owned_blocking_stylesheets_before(
             &document,
@@ -3075,11 +3077,31 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         let result = results.into_iter().next().unwrap();
-        let result_document_url = result.document_url;
         let request_url = result.request_url;
         let source_owners = result.source_owners;
         let result = result.result;
-        assert_eq!(result_document_url, document_url);
+        let mut starts = 0;
+        while let Some(event) = network.pop_next_async_subresource_event() {
+            let crate::types::AsyncSubresourceFetchEvent::NativeNetwork(observation) = event else {
+                panic!("stylesheet producer must publish native resource facts")
+            };
+            let crate::runtime::RendererNetworkOutputItem::Resource(item) = observation.item()
+            else {
+                panic!("stylesheet producer must publish resources")
+            };
+            if let crate::types::ScriptNetworkOutputItem::SubresourceRequestStarted(request) =
+                item.as_ref()
+            {
+                starts += 1;
+                assert_eq!(request.document_url(), &document_url);
+                assert_eq!(request.url(), &request_url);
+                assert_eq!(
+                    request.request_initiator_type(),
+                    crate::types::SubresourceRequestInitiatorType::Css
+                );
+            }
+        }
+        assert_eq!(starts, 1, "one native request owns the stylesheet import");
         assert_eq!(
             request_url,
             Url::parse(&format!("http://{addr}/imported.css")).unwrap()
@@ -3340,7 +3362,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: document_url.clone(),
                 request_url: request_url.clone(),
                 source_owners: vec![link],
                 resource_type: SubresourceResourceType::Script,
@@ -3434,7 +3455,6 @@ mod tests {
                     blocking_operation: None,
                     source_operation: None,
                     import_roots: Vec::new(),
-                    document_url: document_url.clone(),
                     request_url: request_url.clone(),
                     source_owners: vec![owner],
                     resource_type: SubresourceResourceType::Stylesheet,
@@ -3506,7 +3526,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: document_url.clone(),
                 request_url: request_url.clone(),
                 source_owners: vec![owner],
                 resource_type: SubresourceResourceType::Stylesheet,
@@ -3566,7 +3585,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: document_url.clone(),
                 request_url: request_url.clone(),
                 source_owners: vec![owner],
                 resource_type: SubresourceResourceType::Stylesheet,
@@ -3706,7 +3724,6 @@ mod tests {
                 blocking_operation: None,
                 source_operation: None,
                 import_roots: Vec::new(),
-                document_url: document.final_url().unwrap().clone(),
                 request_url: stylesheet_url.clone(),
                 source_owners: vec![handle],
                 resource_type: SubresourceResourceType::Stylesheet,

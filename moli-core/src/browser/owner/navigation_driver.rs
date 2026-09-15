@@ -196,7 +196,7 @@ impl Browser {
                         .into_iter()
                         .find(|response| response.request == request);
                     if previous.is_some() {
-                        browser.complete_native_response(request, Err(failure.clone()))?;
+                        browser.complete_native_response(request, Err(failure.clone().into()))?;
                     } else {
                         browser.record_native_response(NavigationResponseSnapshot {
                             request,
@@ -208,7 +208,8 @@ impl Browser {
                                 request: None,
                             }),
                             observations: Default::default(),
-                            body: Some(Err(failure)),
+                            received_bytes: 0,
+                            body: Some(Err(failure.into())),
                         })?;
                     }
                     browser.cancel_navigation(
@@ -695,17 +696,18 @@ async fn navigate(
         })
         .await?;
     }
-    let mut snapshot = NavigationResponseSnapshot {
+    let snapshot = NavigationResponseSnapshot {
         request,
         response: Ok(response.clone()),
         observations: observations.clone(),
+        received_bytes: 0,
         body: None,
     };
+    on_owner(owner, move |browser| {
+        browser.record_native_response(snapshot)
+    })
+    .await?;
     if moli_web_mime::response_headers_indicate_attachment_download(&response.headers) {
-        on_owner(owner, move |browser| {
-            browser.record_native_response(snapshot)
-        })
-        .await?;
         let body = match body_source {
             DocumentBodySource::StreamingRaw { response, .. } => {
                 crate::browser::DownloadBody::Streaming(Box::new(response))
@@ -737,24 +739,15 @@ async fn navigate(
         return Ok(());
     }
     let PreparedNavigationBody::Document { body, capture } =
-        prepare_response_body(body_source, &response).await?
+        prepare_response_body(owner, request, body_source, &response).await?
     else {
         let error = std::sync::Arc::new(crate::browser::NavigationError {
             unreachable_url: response.final_url.clone(),
             error_text: "net::ERR_HTTP_RESPONSE_CODE_FAILURE".into(),
         });
-        snapshot.body = Some(Err(error.error_text.clone()));
-        on_owner(owner, move |browser| {
-            browser.record_native_response(snapshot)
-        })
-        .await?;
         let html = http_error_page_html(&error.unreachable_url, response.status);
         return commit_error_document(owner, request, &mut load, error, html, completed).await;
     };
-    on_owner(owner, move |browser| {
-        browser.record_native_response(snapshot)
-    })
-    .await?;
     let final_url = response.final_url.clone();
     let destination = on_owner(owner, move |browser| {
         browser.navigation_destination(contents, final_url)
@@ -775,11 +768,7 @@ async fn navigate(
     if let Some(completed) = completed.take() {
         let _ = completed.send(Ok(BrowserNavigationOutcome::Document(Box::new(snapshot))));
     }
-    let body = capture.finish().await;
-    on_owner(owner, move |browser| {
-        browser.complete_native_response(request, body)
-    })
-    .await?;
+    let _ = capture.finish().await;
     Ok(())
 }
 
@@ -878,6 +867,7 @@ async fn commit_fetch_error(
             request: failure.request_context().cloned(),
         }),
         observations: failure.observation_journal().clone(),
+        received_bytes: 0,
         body: None,
     };
     on_owner(owner, move |browser| {
@@ -923,7 +913,7 @@ async fn commit_error_document(
         let _ = completed.send(Ok(BrowserNavigationOutcome::Document(Box::new(snapshot))));
     }
     on_owner(owner, move |browser| {
-        browser.complete_native_response(request, Err(error.error_text.clone()))
+        browser.complete_native_response(request, Err(error.error_text.clone().into()))
     })
     .await
 }
@@ -990,23 +980,124 @@ async fn decide_transfer(
     }
 }
 
-struct NativeBodyCapture(Option<tokio::task::JoinHandle<Result<CapturedBody, String>>>);
+/// The capture and its transport task share one writer. Dropping the navigation
+/// consumes the writer before aborting the pump, so its prefix and terminal
+/// cannot be replaced by a later generic navigation error.
+struct NativeBodyCapture {
+    pump: Option<tokio::task::JoinHandle<Result<CapturedBody, String>>>,
+    writer: Option<std::rc::Rc<NativeBodyWriter>>,
+}
 
 impl NativeBodyCapture {
     async fn finish(mut self) -> Result<CapturedBody, String> {
-        self.0
-            .take()
+        let result = self
+            .pump
+            .as_mut()
             .expect("native body capture")
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+        self.pump = None;
+        result
     }
 }
 
 impl Drop for NativeBodyCapture {
     fn drop(&mut self) {
-        if let Some(pump) = &self.0 {
+        if let Some(writer) = &self.writer {
+            writer.cancel();
+        }
+        if let Some(pump) = &self.pump {
             pump.abort();
         }
+    }
+}
+
+struct NativeBodyWriter {
+    owner: BrowserLocalSender,
+    request: NavigationRequest,
+    writer: std::cell::RefCell<Option<CapturedBodyWriter>>,
+    response: std::cell::RefCell<moli_fetch::StreamingRawResponse>,
+}
+
+impl NativeBodyWriter {
+    fn new(
+        owner: &BrowserLocalSender,
+        request: NavigationRequest,
+        response: moli_fetch::StreamingRawResponse,
+    ) -> Self {
+        Self {
+            owner: owner.clone(),
+            request,
+            writer: std::cell::RefCell::new(Some(CapturedBodyWriter::default())),
+            response: std::cell::RefCell::new(response),
+        }
+    }
+
+    async fn next_chunk(&self) -> Option<Vec<u8>> {
+        std::future::poll_fn(|cx| self.response.borrow_mut().poll_next_chunk(cx)).await
+    }
+
+    async fn finish_response(&self) -> Result<(), String> {
+        std::future::poll_fn(|cx| self.response.borrow_mut().poll_finish(cx))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    fn append(&self, bytes: &[u8]) -> Result<(), String> {
+        self.writer
+            .borrow_mut()
+            .as_mut()
+            .expect("active native body")
+            .append(bytes)
+            .map_err(|error| error.to_string())?;
+        let request = self.request;
+        let count = bytes.len();
+        self.owner
+            .send(Box::new(move |browser| {
+                let _ = browser.record_native_response_data(request, count);
+            }))
+            .map_err(|_| "Browser owner stopped".to_owned())
+    }
+
+    fn complete(&self, result: Result<(), String>) -> Result<CapturedBody, String> {
+        let body = self
+            .writer
+            .borrow_mut()
+            .take()
+            .expect("single native body terminal")
+            .finish()
+            .map_err(|error| crate::browser::NavigationBodyFailure::from(error.to_string()));
+        let body = body.and_then(|body| match result {
+            Ok(()) => Ok(body),
+            Err(error_text) => Err(crate::browser::NavigationBodyFailure {
+                error_text,
+                partial_body: Some(body),
+            }),
+        });
+        let result = body.clone().map_err(|failure| failure.error_text);
+        let request = self.request;
+        let _ = self.owner.send(Box::new(move |browser| {
+            let _ = browser.complete_native_response(request, body);
+        }));
+        result
+    }
+
+    fn cancel(&self) {
+        if self.writer.borrow().is_some() {
+            self.response.borrow().cancellation_handle().cancel();
+            while let Some(bytes) = self.response.borrow_mut().try_next_chunk() {
+                if self.append(&bytes).is_err() {
+                    break;
+                }
+            }
+            let _ = self.complete(Err(moli_fetch::NET_ERR_ABORTED_ERROR_TEXT.to_owned()));
+        }
+    }
+}
+
+impl Drop for NativeBodyWriter {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -1019,6 +1110,8 @@ enum PreparedNavigationBody {
 }
 
 async fn prepare_response_body(
+    owner: &BrowserLocalSender,
+    request: NavigationRequest,
     source: DocumentBodySource,
     head: &moli_fetch::ResponseHead,
 ) -> Result<PreparedNavigationBody, String> {
@@ -1026,35 +1119,39 @@ async fn prepare_response_body(
     let xml = moli_web_mime::response_document_content_type(&head.headers)
         .is_some_and(|mime| moli_web_mime::is_dom_parser_xml_mime(&mime));
     let captured = match source {
-        DocumentBodySource::StreamingRaw { mut response, .. } => {
+        DocumentBodySource::StreamingRaw { response, .. } => {
+            let writer = std::rc::Rc::new(NativeBodyWriter::new(owner, request, response));
             let mut first = None;
             if error_status {
-                while let Some(chunk) = response.next_chunk().await {
+                while let Some(chunk) = writer.next_chunk().await {
                     if !chunk.is_empty() {
                         first = Some(chunk);
                         break;
                     }
                 }
                 if first.is_none() {
-                    response.finish().await.map_err(|error| error.to_string())?;
+                    let result = writer.finish_response().await;
+                    let _ = writer
+                        .complete(result.and(Err("net::ERR_HTTP_RESPONSE_CODE_FAILURE".into())));
                     return Ok(PreparedNavigationBody::EmptyErrorResponse);
                 }
             }
             if !xml {
-                let (body, capture) = stream_raw_response(response, first);
+                let (body, capture) = stream_raw_response(first, writer);
                 return Ok(PreparedNavigationBody::Document { body, capture });
             }
             // XML preparation has a single completed input, not the HTML
             // parser's early commit boundary. Keep the capture bounded/spooled.
-            let mut writer = CapturedBodyWriter::default();
             if let Some(first) = first {
-                writer.append(&first).map_err(|error| error.to_string())?;
+                writer.append(&first)?;
             }
-            while let Some(chunk) = response.next_chunk().await {
-                writer.append(&chunk).map_err(|error| error.to_string())?;
+            while let Some(chunk) = writer.next_chunk().await {
+                writer.append(&chunk)?;
             }
-            response.finish().await.map_err(|error| error.to_string())?;
-            writer.finish().map_err(|error| error.to_string())?
+            let result = writer.finish_response().await;
+            let captured = writer.complete(result)?;
+            let (body, capture) = replay_captured_body(captured)?;
+            return Ok(PreparedNavigationBody::Document { body, capture });
         }
         DocumentBodySource::BufferedRaw { response, .. } => {
             let bytes = response
@@ -1066,7 +1163,24 @@ async fn prepare_response_body(
         }
         DocumentBodySource::CapturedRaw { body, .. } => body,
     };
-    if error_status && captured.is_empty() {
+    let empty_error = error_status && captured.is_empty();
+    let observed = captured.clone();
+    on_owner(owner, move |browser| {
+        browser.record_native_response_data(request, observed.len())?;
+        browser.complete_native_response(
+            request,
+            if empty_error {
+                Err(crate::browser::NavigationBodyFailure {
+                    error_text: "net::ERR_HTTP_RESPONSE_CODE_FAILURE".into(),
+                    partial_body: Some(observed),
+                })
+            } else {
+                Ok(observed)
+            },
+        )
+    })
+    .await?;
+    if empty_error {
         return Ok(PreparedNavigationBody::EmptyErrorResponse);
     }
     let (body, capture) = replay_captured_body(captured)?;
@@ -1074,35 +1188,35 @@ async fn prepare_response_body(
 }
 
 fn stream_raw_response(
-    mut response: moli_fetch::StreamingRawResponse,
     first: Option<Vec<u8>>,
+    writer: std::rc::Rc<NativeBodyWriter>,
 ) -> (ExternalRawDocumentBodyStream, NativeBodyCapture) {
     let (completion, completed) = oneshot::channel();
     let (sender, body) = ExternalRawDocumentBodyStream::channel(completed);
+    let capture_writer = writer.clone();
     let pump = tokio::task::spawn_local(async move {
         let result = async {
-            let mut writer = CapturedBodyWriter::default();
             let mut sender = Some(sender);
             let mut first = first;
             loop {
                 let chunk = match first.take() {
                     Some(chunk) => Some(chunk),
-                    None => response.next_chunk().await,
+                    None => writer.next_chunk().await,
                 };
                 let Some(chunk) = chunk else {
                     break;
                 };
-                writer.append(&chunk).map_err(|error| error.to_string())?;
+                writer.append(&chunk)?;
                 if let Some(output) = &sender
                     && output.send(chunk).await.is_err()
                 {
                     sender = None;
                 }
             }
-            response.finish().await.map_err(|error| error.to_string())?;
-            writer.finish().map_err(|error| error.to_string())
+            writer.finish_response().await
         }
         .await;
+        let result = writer.complete(result);
         let _ = completion.send(
             result
                 .as_ref()
@@ -1111,7 +1225,13 @@ fn stream_raw_response(
         );
         result
     });
-    (body, NativeBodyCapture(Some(pump)))
+    (
+        body,
+        NativeBodyCapture {
+            pump: Some(pump),
+            writer: Some(capture_writer),
+        },
+    )
 }
 
 fn replay_captured_body(
@@ -1139,5 +1259,111 @@ fn replay_captured_body(
         );
         result
     });
-    Ok((body, NativeBodyCapture(Some(pump))))
+    Ok((
+        body,
+        NativeBodyCapture {
+            pump: Some(pump),
+            writer: None,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::{
+        BrowserContextStoragePartitionHandles, BrowserService, StoragePartitionKind,
+        WebContentsCreation,
+    };
+
+    #[tokio::test]
+    async fn native_navigation_cancel_preserves_queued_unread_bytes() {
+        let service = BrowserService::start().unwrap();
+        let browser = service.handle();
+        let context = browser
+            .create_context(
+                BrowserContextStoragePartitionHandles::memory(),
+                StoragePartitionKind::Ephemeral,
+                None,
+                None,
+            )
+            .unwrap();
+        context.bind_page_navigation_engines(Default::default());
+        let (contents, _) = context
+            .create_web_contents(WebContentsCreation::default())
+            .unwrap();
+        let _provider = browser.register_document_decision_provider().unwrap();
+        let url: Url = "https://queued.test/document".parse().unwrap();
+        let waiter = context
+            .navigate_document(contents, native_url_request(url.clone()))
+            .unwrap();
+        let request = waiter.request();
+        let cancel = moli_fetch::FetchCancelHandle::new();
+        let original_cancel = cancel.clone();
+        let (chunks, body) = tokio::sync::mpsc::unbounded_channel();
+        let (_finished, completion) = oneshot::channel();
+        chunks.send(vec![0, 255, 128, 65]).unwrap();
+        let (_, mut events) = browser.subscribe().unwrap();
+        browser
+            .execute(move |browser| {
+                let head = moli_fetch::ResponseHead {
+                    final_url: url,
+                    status: 200,
+                    headers: Vec::new(),
+                    request_cookie_report: None,
+                    cookie_set_reports: Vec::new(),
+                    redirected: false,
+                    redirect_chain: Vec::new(),
+                    from_cache: false,
+                    negotiated_http_version: None,
+                };
+                browser
+                    .record_native_response(NavigationResponseSnapshot {
+                        request,
+                        response: Ok(head.clone()),
+                        observations: Default::default(),
+                        received_bytes: 0,
+                        body: None,
+                    })
+                    .unwrap();
+                // Keep both producer channels open and cancel before polling the
+                // consumer. Only the already queued prefix belongs to this request.
+                let response =
+                    moli_fetch::StreamingRawResponse::new_with_head(head, body, cancel, completion);
+                drop(NativeBodyWriter::new(
+                    &browser.local_sender,
+                    request,
+                    response,
+                ));
+            })
+            .unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(response) = context
+                    .navigation_responses(contents)
+                    .unwrap()
+                    .into_iter()
+                    .find(|response| response.request == request && response.body.is_some())
+                {
+                    break response;
+                }
+                events.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(original_cancel.is_cancelled());
+        assert!(
+            chunks.send(vec![66]).is_err(),
+            "the retired input cannot accept new bytes"
+        );
+        assert_eq!(response.received_bytes, 4);
+        let failure = response.body.unwrap().unwrap_err();
+        assert_eq!(failure.error_text, moli_fetch::NET_ERR_ABORTED_ERROR_TEXT);
+        assert_eq!(
+            failure.partial_body.unwrap().materialize_bytes().unwrap(),
+            [0, 255, 128, 65]
+        );
+        service.shutdown();
+    }
 }

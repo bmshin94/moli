@@ -52,7 +52,6 @@ pub(super) struct ChildBrowsingContextEntry {
     committed_navigation_entry_seed: NavigationHistoryEntrySeed,
     cached_snapshot: Option<ChildBrowsingContextSnapshot>,
     document_policy_container: ChildDocumentPolicyContainer,
-    completed_document_network: Option<CompletedChildDocumentNetwork>,
     completed_frame_owner_resource_timing: Option<CompletedFrameOwnerResourceTiming>,
     performance_time_origin: ChildPerformanceTimeOrigin,
     pending_document_load_id: Option<u64>,
@@ -63,12 +62,6 @@ pub(super) struct ChildBrowsingContextEntry {
     pending_service_worker_client_id: Option<ServiceWorkerClientId>,
     pending_service_worker_client_navigation: Option<ServiceWorkerClientNavigateContinuation>,
     pending_top_level_history_length_increment: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CompletedChildDocumentNetwork {
-    owner: FrameDocumentTaskOwner,
-    observation: crate::runtime::RendererChildDocumentNetworkObservation,
 }
 
 pub(super) type ChildDocumentPolicyContainer = DocumentPolicyContainer;
@@ -407,7 +400,6 @@ impl ChildBrowsingContextEntry {
             credentialless_storage_nonce,
         );
         self.commit_current_navigation_entry_seed();
-        self.clear_completed_document_network();
     }
 
     pub(super) fn commit_child_document_after_failed_async_start(
@@ -422,7 +414,6 @@ impl ChildBrowsingContextEntry {
         self.reset_performance_time_origin();
         self.clear_pending_document_load();
         self.clear_document_runtime_state();
-        self.clear_completed_document_network();
         self.set_document_credentialless_state(credentialless, credentialless_storage_nonce);
         self.set_document_sandbox_policy(sandbox);
         self.sync_document_policy_from_snapshot(snapshot);
@@ -441,7 +432,6 @@ impl ChildBrowsingContextEntry {
         self.reset_performance_time_origin();
         self.clear_pending_document_load();
         self.clear_document_runtime_state();
-        self.clear_completed_document_network();
         self.set_document_credentialless_state(credentialless, credentialless_storage_nonce);
         self.set_document_sandbox_policy(sandbox);
         if let Some(snapshot) = snapshot {
@@ -507,44 +497,6 @@ impl ChildBrowsingContextEntry {
             owner_element_id: self.id.clone(),
             security_origin_inherited: self.security_origin_inherited(),
         }
-    }
-
-    fn completed_document_network(&self) -> Option<CompletedChildDocumentNetwork> {
-        self.completed_document_network.clone()
-    }
-
-    fn completed_document_network_for_refresh(
-        &self,
-        attribute_bootstrap_changed: bool,
-    ) -> Option<CompletedChildDocumentNetwork> {
-        if attribute_bootstrap_changed {
-            None
-        } else {
-            self.completed_document_network()
-        }
-    }
-
-    pub(super) fn bind_completed_document_network(
-        &mut self,
-        owner: FrameDocumentTaskOwner,
-        network: Option<crate::runtime::RendererChildDocumentNetworkObservation>,
-    ) {
-        self.completed_document_network =
-            network.map(|observation| CompletedChildDocumentNetwork { owner, observation });
-    }
-
-    pub(super) fn clear_completed_document_network(&mut self) {
-        self.completed_document_network = None;
-    }
-
-    pub(super) fn take_completed_document_network_for_owner(
-        &mut self,
-        owner: FrameDocumentTaskOwner,
-    ) -> Option<crate::runtime::RendererChildDocumentNetworkObservation> {
-        self.completed_document_network
-            .take()
-            .filter(|network| network.owner == owner)
-            .map(|network| network.observation)
     }
 
     fn completed_frame_owner_resource_timing_for_refresh(

@@ -16,6 +16,10 @@ pub(crate) struct ResourceResponseHead {
 #[derive(Clone, Debug)]
 pub(crate) enum ResourceResponseFailure {
     Request(String),
+    Network {
+        message: String,
+        context: Arc<moli_fetch::NetworkFetchFailureContext>,
+    },
     PartialBody {
         message: String,
         response: Arc<ResourceResponseHead>,
@@ -26,7 +30,9 @@ pub(crate) enum ResourceResponseFailure {
 impl ResourceResponseFailure {
     pub(crate) fn with_message(mut self, replacement: String) -> Self {
         match &mut self {
-            Self::Request(message) | Self::PartialBody { message, .. } => *message = replacement,
+            Self::Request(message)
+            | Self::Network { message, .. }
+            | Self::PartialBody { message, .. } => *message = replacement,
         }
         self
     }
@@ -35,7 +41,9 @@ impl ResourceResponseFailure {
 impl fmt::Display for ResourceResponseFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Request(message) | Self::PartialBody { message, .. } => f.write_str(message),
+            Self::Request(message)
+            | Self::Network { message, .. }
+            | Self::PartialBody { message, .. } => f.write_str(message),
         }
     }
 }
@@ -50,7 +58,14 @@ impl From<String> for ResourceResponseFailure {
 
 impl From<anyhow::Error> for ResourceResponseFailure {
     fn from(error: anyhow::Error) -> Self {
-        Self::Request(format!("{error:#}"))
+        let message = format!("{error:#}");
+        match error.downcast::<moli_fetch::NetworkFetchFailureContext>() {
+            Ok(context) => Self::Network {
+                message,
+                context: Arc::new(context),
+            },
+            Err(_) => Self::Request(message),
+        }
     }
 }
 
@@ -61,7 +76,8 @@ pub(crate) type ResourceResponseResult = Result<Response, ResourceResponseFailur
 /// lets cache admission replay its current progress before a later chunk wins.
 pub(crate) trait ResourceResponseObserver: Send + Sync {
     fn response_started(&self, response: Arc<ResourceResponseHead>);
-    fn data_received(&self, bytes: usize);
+    fn data_received(&self, bytes: &[u8]);
+    fn cancelled(&self, failure: &ResourceResponseFailure);
 }
 
 /// Preserve the physical response, including the received prefix on failure.
@@ -82,7 +98,7 @@ pub(crate) async fn collect_observed_response(
     while let Some(chunk) = response.next_chunk().await {
         bytes.extend_from_slice(&chunk);
         if let Some(observer) = observer {
-            observer.data_received(chunk.len());
+            observer.data_received(&chunk);
         }
     }
     if let Err(error) = response.finish().await {
@@ -237,6 +253,28 @@ enum ResourceStreamBody {
 }
 
 impl ResourceResponseStream {
+    pub(crate) async fn collect(
+        &self,
+        observed: moli_fetch::NetworkFetchResult<moli_fetch::StreamingRawResponse>,
+    ) -> Result<ResourceBodyResponse, ResourceResponseFailure> {
+        let (mut response, request_observation) = observed.into_parts();
+        self.response_started(ResourceResponseHead {
+            head: response.head(),
+            status_text: None,
+            network_request_headers: request_observation.map(|request| request.into_headers()),
+        });
+        while let Some(bytes) = response.next_chunk().await {
+            self.data_received(&bytes);
+        }
+        response
+            .finish()
+            .await
+            .map_err(|error| self.failure(format!("{error:#}")))?;
+        Ok(self
+            .finish_response()
+            .expect("collected response owns its head"))
+    }
+
     pub(crate) fn new(network: Arc<ResourceTransfer>) -> Arc<Self> {
         Arc::new(Self {
             network,

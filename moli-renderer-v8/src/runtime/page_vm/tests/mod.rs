@@ -22,8 +22,7 @@ use crate::module_script_continuation::{
     ModuleScriptContinuation, NativeModuleOwnerActions,
 };
 use crate::page_resource_completion::{
-    MainModuleFetchNetworkAttribution, MainModulepreloadFetchCompletion,
-    MainParserDeferredClassicSourceNetworkAttribution, MainParserModuleGraphFetchCompletion,
+    MainModulepreloadFetchCompletion, MainParserModuleGraphFetchCompletion,
     MainParserModuleGraphFetchTarget, PageResourceCompletionBodyActivity,
     PageResourceCompletionDocumentEffect, PageResourceCompletionOutputEffect,
     PageResourceCompletionPostCheckpointEffect, PageResourceCompletionTurnAction,
@@ -47,11 +46,10 @@ use crate::runtime::{
 };
 use crate::script_vm::{PostParseLifecycleAdvance, PostParseLifecycleCompletionAction};
 use crate::types::{
-    ChildBlockingStylesheetLoadCompletion, ChildBlockingStylesheetNetworkResult,
-    ChildClassicScriptLoadCompletion, ChildClassicScriptNetworkAttribution,
+    ChildBlockingStylesheetLoadCompletion, ChildClassicScriptLoadCompletion,
     ChildDynamicImportFetchCompletion, ChildModuleDependencyFetchCompletion,
-    ChildModuleFetchNetworkAttribution, ChildModulepreloadFetchCompletion,
-    ChildParserModuleRootFetchCompletion, ModuleGraphFetchCompletion, ModuleGraphFetchOrdering,
+    ChildModulepreloadFetchCompletion, ChildParserModuleRootFetchCompletion,
+    ChildStylesheetResponse, ModuleGraphFetchCompletion, ModuleGraphFetchOrdering,
     ModuleGraphFetchRequester, ScriptKind, ScriptMode, ScriptNetworkOutput,
     ScriptNetworkOutputItem, ScriptObservableOutput, ScriptObservableOutputItem, ScriptRun,
     ScriptRunOutcome, ScriptSkipReason, ScriptSourceKind, SubresourceBodyFinishedResult,
@@ -230,28 +228,18 @@ async fn page_resource_completion_rejects_stale_document_before_application() {
                 },
             )
         };
-        let network_attribution_for = |parser_position| {
-            MainParserDeferredClassicSourceNetworkAttribution::new(
-                Url::parse("https://stale-defer.test/document").unwrap(),
-                Url::parse(&format!(
-                    "https://stale-defer.test/script-{parser_position}.js"
-                ))
-                .unwrap(),
-            )
-        };
+
         let mut queue = RendererPageNetworkingSource::new_for_test();
         queue.enqueue_local_for_test(
             RendererPageResourceCompletion::main_parser_deferred_classic_source(
                 root_document,
                 completion_for(stale_owner, 1, 9, Some("stale defer request failed")),
-                network_attribution_for(1),
             ),
         );
         queue.enqueue_local_for_test(
             RendererPageResourceCompletion::main_parser_deferred_classic_source(
                 root_document,
                 completion_for(later_stale_owner, 2, 10, None),
-                network_attribution_for(2),
             ),
         );
         let activity_epoch_before = page_vm.vm().subresource_activity_epoch();
@@ -276,7 +264,7 @@ async fn page_resource_completion_rejects_stale_document_before_application() {
                 },
                 body_activity: PageResourceCompletionBodyActivity::NoPageCodeOrEventDispatch,
                 post_checkpoint_effect: PageResourceCompletionPostCheckpointEffect::None,
-                output_effect: PageResourceCompletionOutputEffect::CaptureRequired,
+                output_effect: PageResourceCompletionOutputEffect::None,
             }
         );
 
@@ -312,25 +300,11 @@ async fn page_resource_completion_rejects_stale_document_before_application() {
             activity_epoch_before,
             "stale defer Network output must not become current Document activity"
         );
-        let (network_records, websocket_events, websocket_lifecycle_events) =
-            split_network_output_items(page_vm.vm_mut().take_network_output());
-        assert!(websocket_events.is_empty());
-        assert!(websocket_lifecycle_events.is_empty());
-        assert_eq!(network_records.len(), 1);
-        assert_eq!(
-            network_records[0].document_url().as_str(),
-            "https://stale-defer.test/document"
+        assert!(
+            page_vm.vm_mut().take_network_output().is_empty(),
+            "business completion must not manufacture Network output"
         );
-        assert_eq!(
-            network_records[0].url().as_str(),
-            "https://stale-defer.test/script-1.js"
-        );
-        assert_eq!(
-            network_records[0].outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "stale defer request failed".to_owned(),
-            }
-        );
+
         assert_eq!(
             page_vm
                 .vm_mut()
@@ -344,7 +318,7 @@ async fn page_resource_completion_rejects_stale_document_before_application() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stale_child_classic_completion_preserves_network_without_document_activity() {
+async fn stale_child_classic_completion_has_no_document_or_network_effect() {
     run_page_vm_async_test(async move {
         let mut page_vm = test_page_vm();
         let root_document = page_vm.document_lifecycle.identity().document;
@@ -363,14 +337,6 @@ async fn stale_child_classic_completion_preserves_network_without_document_activ
                 handle: child_handle,
                 script_handle: crate::dom::native::NativeNodeId::new(402),
                 result: Ok("globalThis.__staleChildClassicRan = true".to_owned()),
-                network_result: Some(Arc::new(Err(
-                    "stale child classic request failed".to_owned()
-                ))),
-                network_attribution: ChildClassicScriptNetworkAttribution {
-                    frame_id: Some("stale-child-classic-frame".to_owned()),
-                    document_url: Url::parse("https://stale-child.test/classic-document").unwrap(),
-                    request_url: Url::parse("https://stale-child.test/classic.js").unwrap(),
-                },
             },
         ));
         let activity_epoch_before = page_vm.vm().subresource_activity_epoch();
@@ -393,7 +359,7 @@ async fn stale_child_classic_completion_preserves_network_without_document_activ
                 },
                 body_activity: PageResourceCompletionBodyActivity::NoPageCodeOrEventDispatch,
                 post_checkpoint_effect: PageResourceCompletionPostCheckpointEffect::None,
-                output_effect: PageResourceCompletionOutputEffect::CaptureRequired,
+                output_effect: PageResourceCompletionOutputEffect::None,
             }
         );
 
@@ -403,35 +369,11 @@ async fn stale_child_classic_completion_preserves_network_without_document_activ
             activity_epoch_before,
             "a retired child classic request must not become current Document activity"
         );
-        let (network_records, websocket_events, websocket_lifecycle_events) =
-            split_network_output_items(page_vm.vm_mut().take_network_output());
-        assert!(websocket_events.is_empty());
-        assert!(websocket_lifecycle_events.is_empty());
-        assert_eq!(network_records.len(), 1);
-        let network_record = &network_records[0];
-        assert_eq!(network_record.frame_id(), Some("stale-child-classic-frame"));
-        assert_eq!(
-            network_record.document_url().as_str(),
-            "https://stale-child.test/classic-document"
+        assert!(
+            page_vm.vm_mut().take_network_output().is_empty(),
+            "business completion must not manufacture Network output"
         );
-        assert_eq!(
-            network_record.url().as_str(),
-            "https://stale-child.test/classic.js"
-        );
-        assert_eq!(
-            network_record.resource_type(),
-            SubresourceResourceType::Script
-        );
-        assert_eq!(
-            network_record.request_initiator_type(),
-            SubresourceRequestInitiatorType::Script
-        );
-        assert_eq!(
-            network_record.outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "stale child classic request failed".to_owned(),
-            }
-        );
+
         assert_eq!(
             page_vm
                 .vm_mut()
@@ -460,15 +402,6 @@ async fn child_classic_completion_queue_runs_exactly_one_terminal_per_owner_turn
             handle: child_handle,
             script_handle: crate::dom::native::NativeNodeId::new(script_handle),
             result: Ok(format!("globalThis.__staleChildClassic{load_id} = true")),
-            network_result: None,
-            network_attribution: ChildClassicScriptNetworkAttribution {
-                frame_id: Some("stale-child-classic-turn-frame".to_owned()),
-                document_url: Url::parse("https://stale-child-turn.test/document").unwrap(),
-                request_url: Url::parse(&format!(
-                    "https://stale-child-turn.test/script-{load_id}.js"
-                ))
-                .unwrap(),
-            },
         };
         let mut queue = RendererPageNetworkingSource::new_for_test();
         queue.enqueue_local_for_test(RendererPageResourceCompletion::child_classic_script(
@@ -526,7 +459,7 @@ async fn child_classic_completion_queue_runs_exactly_one_terminal_per_owner_turn
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stale_child_module_completions_preserve_network_and_run_one_terminal_per_turn() {
+async fn stale_child_module_completions_run_one_terminal_per_turn_without_network_effect() {
     run_page_vm_async_test(async move {
         let mut page_vm = test_page_vm();
         let root_document = page_vm.document_lifecycle.identity().document;
@@ -565,7 +498,6 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
                     stale_owner,
                     47,
                     "stale-child-module-root",
-                    Some("stale child module root failed"),
                 ),
             ),
         );
@@ -577,7 +509,6 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
                     stale_owner,
                     53,
                     "stale-child-module-dependency",
-                    Some("stale child module dependency failed"),
                 ),
             ),
         );
@@ -587,7 +518,6 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
                 ChildDocumentModuleFetchTarget::new(child_handle, stale_owner, FrameRealmId(109)),
                 57,
                 "stale-child-modulepreload",
-                Some("stale child modulepreload failed"),
             ),
         ));
         queue.enqueue_local_for_test(RendererPageResourceCompletion::child_modulepreload_fetch(
@@ -596,7 +526,6 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
                 ChildDocumentModuleFetchTarget::new(child_handle, stale_owner, FrameRealmId(109)),
                 59,
                 "stale-child-module-no-network",
-                None,
             ),
         ));
         let activity_epoch_before = page_vm.vm().subresource_activity_epoch();
@@ -621,7 +550,7 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
         );
         assert_eq!(
             root.action.output_effect,
-            PageResourceCompletionOutputEffect::CaptureRequired
+            PageResourceCompletionOutputEffect::None
         );
 
         assert!(queue.has_ready_completion());
@@ -638,7 +567,7 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
         );
         assert_eq!(
             dependency.action.output_effect,
-            PageResourceCompletionOutputEffect::CaptureRequired
+            PageResourceCompletionOutputEffect::None
         );
 
         assert!(queue.has_ready_completion());
@@ -655,7 +584,7 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
         );
         assert_eq!(
             modulepreload.action.output_effect,
-            PageResourceCompletionOutputEffect::CaptureRequired
+            PageResourceCompletionOutputEffect::None
         );
 
         assert!(queue.has_ready_completion());
@@ -683,44 +612,11 @@ async fn stale_child_module_completions_preserve_network_and_run_one_terminal_pe
             "retired child module Network facts must not become current Document activity"
         );
 
-        let (network_records, websocket_events, websocket_lifecycle_events) =
-            split_network_output_items(page_vm.vm_mut().take_network_output());
-        assert!(websocket_events.is_empty());
-        assert!(websocket_lifecycle_events.is_empty());
-        assert_eq!(network_records.len(), 3);
-        assert_eq!(
-            network_records
-                .iter()
-                .map(|record| record.frame_id())
-                .collect::<Vec<_>>(),
-            vec![
-                Some("stale-child-module-root-frame"),
-                Some("stale-child-module-dependency-frame"),
-                Some("stale-child-modulepreload-frame"),
-            ]
+        assert!(
+            page_vm.vm_mut().take_network_output().is_empty(),
+            "business completion must not manufacture Network output"
         );
-        assert!(network_records.iter().all(|record| {
-            record.resource_type() == SubresourceResourceType::Script
-                && record.request_initiator_type() == SubresourceRequestInitiatorType::Parser
-        }));
-        assert_eq!(
-            network_records[0].outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "stale child module root failed".to_owned(),
-            }
-        );
-        assert_eq!(
-            network_records[1].outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "stale child module dependency failed".to_owned(),
-            }
-        );
-        assert_eq!(
-            network_records[2].outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "stale child modulepreload failed".to_owned(),
-            }
-        );
+
         Ok::<_, anyhow::Error>(())
     })
     .await
@@ -748,24 +644,15 @@ async fn child_module_completion_rejects_replaced_realm_with_same_document_owner
             .vm()
             .current_child_document_module_fetch_target(child_handle)
             .expect("first child realm should have an exact module target");
-        let root_completion = test_child_parser_module_root_completion_for_target(
-            retired_target,
-            61,
-            "stale-child-module-root-realm",
-            Some("retired child realm root fetch failed"),
-        );
-        let dependency_completion = test_child_module_dependency_completion_for_target(
-            retired_target,
-            67,
-            "stale-child-module-dependency-realm",
-            Some("retired child realm dependency fetch failed"),
-        );
-        let modulepreload_completion = test_child_modulepreload_completion_for_target(
-            retired_target,
-            71,
-            "stale-child-modulepreload-realm",
-            Some("retired child realm modulepreload failed"),
-        );
+        let root_completion = test_child_parser_module_root_completion_for_target(retired_target,
+61,
+"stale-child-module-root-realm");
+        let dependency_completion = test_child_module_dependency_completion_for_target(retired_target,
+67,
+"stale-child-module-dependency-realm");
+        let modulepreload_completion = test_child_modulepreload_completion_for_target(retired_target,
+71,
+"stale-child-modulepreload-realm");
 
         page_vm
             .vm_mut()
@@ -828,7 +715,7 @@ async fn child_module_completion_rejects_replaced_realm_with_same_document_owner
         );
         assert_eq!(
             root_outcome.action.output_effect,
-            PageResourceCompletionOutputEffect::CaptureRequired
+            PageResourceCompletionOutputEffect::None
         );
 
         let dependency_outcome = page_vm
@@ -843,7 +730,7 @@ async fn child_module_completion_rejects_replaced_realm_with_same_document_owner
         );
         assert_eq!(
             dependency_outcome.action.output_effect,
-            PageResourceCompletionOutputEffect::CaptureRequired
+            PageResourceCompletionOutputEffect::None
         );
 
         let modulepreload_outcome = page_vm
@@ -858,7 +745,7 @@ async fn child_module_completion_rejects_replaced_realm_with_same_document_owner
         );
         assert_eq!(
             modulepreload_outcome.action.output_effect,
-            PageResourceCompletionOutputEffect::CaptureRequired
+            PageResourceCompletionOutputEffect::None
         );
 
         assert_eq!(
@@ -867,41 +754,8 @@ async fn child_module_completion_rejects_replaced_realm_with_same_document_owner
             "historical Network output from a retired realm must not become current Document activity"
         );
 
-        let (network_records, websocket_events, websocket_lifecycle_events) =
-            split_network_output_items(page_vm.vm_mut().take_network_output());
-        assert!(websocket_events.is_empty());
-        assert!(websocket_lifecycle_events.is_empty());
-        assert_eq!(network_records.len(), 3);
-        assert_eq!(
-            network_records[0].frame_id(),
-            Some("stale-child-module-root-realm-frame")
-        );
-        assert_eq!(
-            network_records[0].outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "retired child realm root fetch failed".to_owned(),
-            }
-        );
-        assert_eq!(
-            network_records[1].frame_id(),
-            Some("stale-child-module-dependency-realm-frame")
-        );
-        assert_eq!(
-            network_records[1].outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "retired child realm dependency fetch failed".to_owned(),
-            }
-        );
-        assert_eq!(
-            network_records[2].frame_id(),
-            Some("stale-child-modulepreload-realm-frame")
-        );
-        assert_eq!(
-            network_records[2].outcome(),
-            &SubresourceNetworkOutcome::Failure {
-                error_text: "retired child realm modulepreload failed".to_owned(),
-            }
-        );
+        assert!(page_vm.vm_mut().take_network_output().is_empty(), "business completion must not manufacture Network output");
+
         Ok::<_, anyhow::Error>(())
     })
     .await
@@ -1152,7 +1006,6 @@ async fn production_child_module_route_reaches_exact_realm_page_turn() {
                     target,
                     67,
                     "production-child-module-route",
-                    Some("production routed module fetch failed"),
                 ),
             )
             .expect("production sender should enqueue the typed child module terminal");
@@ -1186,20 +1039,17 @@ async fn production_child_module_route_reaches_exact_realm_page_turn() {
         );
 
         assert!(!page_queue.has_ready_completion());
-        assert!(
-            page_vm.vm().subresource_activity_epoch() > activity_epoch_before,
-            "current-target Network output must be attributed to current Document activity"
+        assert_eq!(
+            page_vm.vm().subresource_activity_epoch(),
+            activity_epoch_before,
+            "routing a module result must not manufacture network activity"
         );
 
-        let (network_records, websocket_events, websocket_lifecycle_events) =
-            split_network_output_items(page_vm.vm_mut().take_network_output());
-        assert!(websocket_events.is_empty());
-        assert!(websocket_lifecycle_events.is_empty());
-        assert_eq!(network_records.len(), 1);
-        assert_eq!(
-            network_records[0].frame_id(),
-            Some("production-child-module-route-frame")
+        assert!(
+            page_vm.vm_mut().take_network_output().is_empty(),
+            "business completion must not manufacture Network output"
         );
+
         Ok::<_, anyhow::Error>(())
     })
     .await
@@ -1224,6 +1074,38 @@ async fn stale_child_unusable_stylesheet_preserves_physical_output_without_docum
             vec![("Content-Type".to_owned(), "text/html".to_owned())],
             "<html>not a stylesheet</html>".to_owned(),
         );
+        let observations = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let observer = observations.clone();
+        let host = page_vm.vm().context_host_weak_for_test().upgrade().unwrap();
+        let (network, started) = crate::network::ResourceTransfer::start(
+            host.borrow()
+                .document_network_reporter()
+                .unwrap()
+                .start_request()
+                .unwrap(),
+            move |event| observer.lock().push(event),
+            |network| {
+                crate::types::SubresourceRequestStarted::new(
+                    network.handle(),
+                    Some("stale-child-frame".into()),
+                    Url::parse("https://stale-child.test/document").unwrap(),
+                    request_url.clone(),
+                    "GET".into(),
+                    Vec::new(),
+                    None,
+                    SubresourceResourceType::Stylesheet,
+                    SubresourceRequestInitiatorType::Parser,
+                    None,
+                )
+            },
+        );
+        host.borrow_mut()
+            .record_native_resource_observation(started);
+        crate::network::ResourceBodyResponse::from(physical_response.clone())
+            .publish(&network, None);
+        for event in observations.lock().drain(..) {
+            host.borrow_mut().record_native_resource_observation(event);
+        }
         let mut queue = RendererPageNetworkingSource::new_for_test();
         queue.enqueue_local_for_test(RendererPageResourceCompletion::child_blocking_stylesheet(
             root_document,
@@ -1233,11 +1115,8 @@ async fn stale_child_unusable_stylesheet_preserves_physical_output_without_docum
                 signature: crate::DocumentBlockingStylesheetSignature::ParserCreatedStyleImport {
                     urls: Vec::new(),
                 },
-                network_results: vec![ChildBlockingStylesheetNetworkResult {
-                    frame_id: Some("stale-child-frame".to_owned()),
-                    document_url: Url::parse("https://stale-child.test/document").unwrap(),
+                network_results: vec![ChildStylesheetResponse {
                     request_url,
-                    initiator_type: SubresourceRequestInitiatorType::Parser,
                     terminal:
                         crate::stylesheet_blocking::StylesheetFetchTerminal::unusable_response(
                             physical_response,
@@ -1348,9 +1227,10 @@ async fn park_current_document_websocket_for_test(
     );
 }
 
-fn run_next_resource_completion_as_typed_page_turn(
+async fn run_next_resource_result_as_typed_page_turn(
     page_vm: &mut PageVm,
 ) -> anyhow::Result<PageResourceCompletionTurnOutcome> {
+    wait_for_resource_result(page_vm, "typed resource result").await;
     let mut page_resource_queue = page_vm.page_resource_completion_queue();
     page_vm
         .apply_one_page_resource_terminal_owner_admission_for_test(&mut page_resource_queue)?
@@ -1361,22 +1241,46 @@ async fn wait_for_typed_page_resource_completion(page_vm: &mut PageVm) -> bool {
     page_vm.wait_for_page_resource_completion_for_test().await
 }
 
-fn test_child_module_network_attribution(label: &str) -> ChildModuleFetchNetworkAttribution {
-    ChildModuleFetchNetworkAttribution::parser(
-        Some(format!("{label}-frame")),
-        Url::parse(&format!("https://{label}.test/document")).unwrap(),
-        Url::parse(&format!("https://{label}.test/module.js")).unwrap(),
-    )
+fn resource_result_is_ready(
+    queue: &mut impl crate::page_resource_completion::RendererPageResourceCompletionTestSource,
+) -> bool {
+    queue.next_ready_owner().is_some_and(|owner| {
+        !matches!(owner.local_owner(),
+        crate::page_resource_completion::RendererPageResourceCompletionLocalOwner::AsyncSubresource(
+            crate::types::AsyncSubresourceFetchEventTarget::NativeNetwork
+        ))
+    })
 }
 
-fn test_child_dynamic_import_network_attribution(
-    label: &str,
-) -> ChildModuleFetchNetworkAttribution {
-    ChildModuleFetchNetworkAttribution::dynamic_import(
-        Some(format!("{label}-frame")),
-        Url::parse(&format!("https://{label}.test/document")).unwrap(),
-        Url::parse(&format!("https://{label}.test/module.js")).unwrap(),
-    )
+fn run_ready_native_resource_turns(page_vm: &mut PageVm) -> anyhow::Result<()> {
+    while matches!(
+        page_vm.page_resource_completion_queue().next_ready_owner().map(|owner| owner.local_owner()),
+        Some(crate::page_resource_completion::RendererPageResourceCompletionLocalOwner::AsyncSubresource(
+            crate::types::AsyncSubresourceFetchEventTarget::NativeNetwork
+        ))
+    ) {
+        let mut queue = page_vm.page_resource_completion_queue();
+        page_vm.apply_one_page_resource_terminal_owner_admission_for_test(&mut queue)?
+            .expect("a queued native receipt must consume its own Page turn");
+    }
+    Ok(())
+}
+
+async fn wait_for_resource_result(page_vm: &mut PageVm, label: &str) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            run_ready_native_resource_turns(page_vm).expect("queued native receipt");
+            if resource_result_is_ready(&mut page_vm.page_resource_completion_queue()) {
+                break;
+            }
+            assert!(
+                wait_for_typed_page_resource_completion(page_vm).await,
+                "resource source remains live for {label}"
+            );
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label} did not produce its result before timeout"));
 }
 
 fn test_child_parser_module_root_completion(
@@ -1384,13 +1288,11 @@ fn test_child_parser_module_root_completion(
     owner: FrameDocumentTaskOwner,
     request_id: u64,
     label: &str,
-    network_error: Option<&str>,
 ) -> ChildParserModuleRootFetchCompletion {
     test_child_parser_module_root_completion_for_target(
         ChildDocumentModuleFetchTarget::new(child_handle, owner, FrameRealmId(109)),
         request_id,
         label,
-        network_error,
     )
 }
 
@@ -1398,16 +1300,12 @@ fn test_child_parser_module_root_completion_for_target(
     target: ChildDocumentModuleFetchTarget,
     request_id: u64,
     label: &str,
-    network_error: Option<&str>,
 ) -> ChildParserModuleRootFetchCompletion {
-    let network_attribution = test_child_module_network_attribution(label);
     ChildParserModuleRootFetchCompletion::new(
         target,
         FrameRequestId(request_id),
-        ModuleMapKey::java_script(network_attribution.request_url().clone()),
+        ModuleMapKey::java_script(Url::parse(&format!("https://{label}.test/module.js")).unwrap()),
         Err(format!("{label} root completion")),
-        network_error.map(|error| Arc::new(Err(error.to_owned()))),
-        network_attribution,
     )
 }
 
@@ -1416,13 +1314,11 @@ fn test_child_module_dependency_completion(
     owner: FrameDocumentTaskOwner,
     request_id: u64,
     label: &str,
-    network_error: Option<&str>,
 ) -> ChildModuleDependencyFetchCompletion {
     test_child_module_dependency_completion_for_target(
         ChildDocumentModuleFetchTarget::new(child_handle, owner, FrameRealmId(109)),
         request_id,
         label,
-        network_error,
     )
 }
 
@@ -1430,17 +1326,13 @@ fn test_child_module_dependency_completion_for_target(
     target: ChildDocumentModuleFetchTarget,
     request_id: u64,
     label: &str,
-    network_error: Option<&str>,
 ) -> ChildModuleDependencyFetchCompletion {
-    let network_attribution = test_child_module_network_attribution(label);
     let task = test_child_module_dependency_fetch_task_for_target(target, request_id, label);
     ChildModuleDependencyFetchCompletion::new(
         target.child_handle(),
         FrameRequestId(request_id),
         task,
         Err(format!("{label} dependency completion")),
-        network_error.map(|error| Arc::new(Err(error.to_owned()))),
-        network_attribution,
     )
 }
 
@@ -1500,14 +1392,11 @@ fn test_child_modulepreload_completion_for_target(
     target: ChildDocumentModuleFetchTarget,
     load_id: u64,
     label: &str,
-    network_error: Option<&str>,
 ) -> ChildModulepreloadFetchCompletion {
     ChildModulepreloadFetchCompletion::new(
         target,
         load_id,
         Err(format!("{label} modulepreload completion")),
-        network_error.map(|error| Arc::new(Err(error.to_owned()))),
-        test_child_module_network_attribution(label),
     )
 }
 
@@ -1515,14 +1404,11 @@ fn test_child_dynamic_import_completion_for_target(
     target: ChildDocumentModuleFetchTarget,
     load_id: u64,
     label: &str,
-    network_error: Option<&str>,
 ) -> ChildDynamicImportFetchCompletion {
     ChildDynamicImportFetchCompletion::new(
         target,
         load_id,
         Err(format!("{label} dynamic import completion")),
-        network_error.map(|error| Arc::new(Err(error.to_owned()))),
-        test_child_dynamic_import_network_attribution(label),
     )
 }
 
@@ -1882,16 +1768,11 @@ enum ChildModulepreloadStartupTurn {
     ChildSemanticTurn(ChildFrameSemanticTurnKind),
 }
 
-async fn run_expected_child_modulepreload_event_action_for_test(
-    page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
-    label: &str,
-) {
+async fn run_expected_child_modulepreload_event_action_for_test(page_vm: &mut PageVm, label: &str) {
     assert!(
         page_vm
             .run_exact_selected_page_task_for_test(
-                PageSelectedTaskTestSelector::ChildModulepreloadEventAction,
-                loader,
+                PageSelectedTaskTestSelector::ChildModulepreloadEventAction
             )
             .await
             .unwrap_or_else(|error| panic!("{label} selected task should succeed: {error:#}")),
@@ -1905,7 +1786,6 @@ async fn run_expected_child_modulepreload_event_action_for_test(
 /// or cross-source fairness evidence.
 async fn drive_child_modulepreload_startup_until_resource_completion_ready(
     page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
     max_turns: usize,
 ) -> Vec<ChildModulepreloadStartupTurn> {
     let mut turns = Vec::new();
@@ -1921,8 +1801,7 @@ async fn drive_child_modulepreload_startup_until_resource_completion_ready(
             assert!(
                 page_vm
                     .run_exact_selected_page_task_for_test(
-                        PageSelectedTaskTestSelector::ModulepreloadStart,
-                        loader,
+                        PageSelectedTaskTestSelector::ModulepreloadStart
                     )
                     .await
                     .expect("selected child modulepreload start should succeed"),
@@ -1993,7 +1872,6 @@ async fn run_expected_child_realm_materialization_for_wait(
 }
 
 async fn run_expected_child_module_script_terminal_turn(page_vm: &mut PageVm, label: &str) {
-    let loader = page_vm.request_client.clone();
     let claimed = page_vm
         .claim_exact_selected_page_task_for_test(
             PageSelectedTaskTestSelector::ChildModuleScriptTerminal,
@@ -2015,7 +1893,7 @@ async fn run_expected_child_module_script_terminal_turn(page_vm: &mut PageVm, la
         "{label} must belong to the current child Document/realm",
     );
     page_vm
-        .run_claimed_selected_page_task_for_test(claimed, &loader)
+        .run_claimed_selected_page_task_for_test(claimed)
         .await
         .unwrap_or_else(|error| panic!("{label} selected task failed: {error:#}"));
 }
@@ -2170,7 +2048,6 @@ fn enqueue_parser_owned_module_script_fetch_completion_for_target_for_test(
     module_url: &Url,
     source: &str,
 ) {
-    let document_url = page_vm.vm().document_runtime.document_url().clone();
     page_vm
         .vm()
         .resource_completion_sender_for_test()
@@ -2182,7 +2059,7 @@ fn enqueue_parser_owned_module_script_fetch_completion_for_target_for_test(
                 ModuleSource::text(source.to_owned()),
             )),
             None,
-            MainModuleFetchNetworkAttribution::new(document_url, module_url.clone()),
+            module_url.clone(),
         ))
         .expect("module graph completion should enqueue");
 }
@@ -2197,7 +2074,6 @@ fn enqueue_parser_owned_module_script_fetch_error_for_test(
         .vm()
         .current_main_parser_module_graph_fetch_target(load_id)
         .unwrap_or_else(|| panic!("parser module fetch {load_id} must retain its exact target"));
-    let document_url = page_vm.vm().document_runtime.document_url().clone();
     page_vm
         .vm()
         .resource_completion_sender_for_test()
@@ -2205,15 +2081,15 @@ fn enqueue_parser_owned_module_script_fetch_error_for_test(
             target,
             Err(message.to_owned()),
             None,
-            MainModuleFetchNetworkAttribution::new(document_url, module_url.clone()),
+            module_url.clone(),
         ))
         .expect("module graph error completion should enqueue");
 }
 
-fn run_next_main_module_fetch_terminal_for_test(
+async fn run_next_main_module_fetch_terminal_for_test(
     page_vm: &mut PageVm,
 ) -> anyhow::Result<Option<RendererOwnerResourceActivitySource>> {
-    let outcome = run_next_resource_completion_as_typed_page_turn(page_vm)?;
+    let outcome = run_next_resource_result_as_typed_page_turn(page_vm).await?;
     anyhow::ensure!(
         outcome.action.source == RendererOwnerResourceActivitySource::ModuleGraphFetch,
         "expected a typed main module fetch terminal, got {:?}",
@@ -2222,13 +2098,9 @@ fn run_next_main_module_fetch_terminal_for_test(
     Ok(Some(outcome.action.source))
 }
 
-async fn run_next_native_module_owner_event_for_test(
-    page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
-    label: &str,
-) {
+async fn run_next_native_module_owner_event_for_test(page_vm: &mut PageVm, label: &str) {
     let outcome = page_vm
-        .run_page_main_document_runtime_body_for_test(loader)
+        .run_page_main_document_runtime_body_for_test()
         .await
         .unwrap_or_else(|error| panic!("{label} owner event should run: {error}"))
         .unwrap_or_else(|| panic!("{label} should retain one native module owner-event turn"));
@@ -2249,7 +2121,6 @@ fn enqueue_main_modulepreload_fetch_error_for_test(
         .vm()
         .current_main_modulepreload_fetch_target(load_id)
         .unwrap_or_else(|| panic!("modulepreload fetch {load_id} must retain its exact target"));
-    let document_url = page_vm.vm().document_runtime.document_url().clone();
     page_vm
         .vm()
         .resource_completion_sender_for_test()
@@ -2257,14 +2128,13 @@ fn enqueue_main_modulepreload_fetch_error_for_test(
             target,
             Err(message.to_owned()),
             None,
-            MainModuleFetchNetworkAttribution::new(document_url, module_url.clone()),
+            module_url.clone(),
         ))
         .expect("modulepreload graph completion should enqueue");
 }
 
 async fn run_parser_module_completion_turns_for_test(
     page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
     expected_ready_turns: usize,
     label: &str,
 ) {
@@ -2273,13 +2143,13 @@ async fn run_parser_module_completion_turns_for_test(
         .perform_script_task_checkpoint(None)
         .expect("module evaluation reaction checkpoint should run");
     while page_vm
-        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ModuleReaction, loader)
+        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ModuleReaction)
         .await
         .expect("module reactions should run")
     {}
     for turn in 0..expected_ready_turns {
         assert!(
-            run_one_parser_owned_main_document_runtime_turn_for_test(page_vm, loader)
+            run_one_parser_owned_main_document_runtime_turn_for_test(page_vm)
                 .await
                 .expect("module evaluation completion should run"),
             "{label} should run parser-owned ready turn {} of {expected_ready_turns}",
@@ -2294,16 +2164,12 @@ async fn run_parser_module_completion_turns_for_test(
 
 async fn run_one_parser_owned_main_document_runtime_turn_for_test(
     page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
 ) -> anyhow::Result<bool> {
     page_vm.admit_ready_parser_owned_document_script_action();
     page_vm
-        .run_exact_selected_page_task_for_test(
-            PageSelectedTaskTestSelector::MainDocumentRuntime(
+        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::MainDocumentRuntime(
                 crate::page_task_queue::PageMainDocumentRuntimeActionKind::ParserOwnedModuleContinuation,
-            ),
-            loader,
-        )
+            ))
         .await
 }
 
@@ -2338,11 +2204,7 @@ fn install_parser_module_defer_work(
 /// This helper intentionally does not prove selected-task checkpoint or exact
 /// DCL handoff behavior. Tests asserting a complete parser task must use
 /// `run_and_finish_ready_parser_deferred_task_for_test()` instead.
-async fn run_ready_parser_deferred_body_for_test(
-    page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
-    label: &str,
-) {
+async fn run_ready_parser_deferred_body_for_test(page_vm: &mut PageVm, label: &str) {
     let action = poll_post_parse_document_processing_action_for_test(page_vm)
         .unwrap_or_else(|| panic!("{label} should expose a ready parser-deferred owner action"));
     let crate::document_runtime::DocumentProcessingAction::PostParsePageOwnedWork(work) = action
@@ -2354,16 +2216,12 @@ async fn run_ready_parser_deferred_body_for_test(
         "{label} should produce the armed parser-deferred marker, got {work:?}"
     );
     page_vm
-        .execute_post_parse_page_owned_task_on_named_owner_lane(loader, *work)
+        .execute_post_parse_page_owned_task_on_named_owner_lane(*work)
         .await
         .unwrap_or_else(|error| panic!("{label} parser-deferred turn should run: {error}"));
 }
 
-async fn run_and_finish_ready_parser_deferred_task_for_test(
-    page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
-    label: &str,
-) {
+async fn run_and_finish_ready_parser_deferred_task_for_test(page_vm: &mut PageVm, label: &str) {
     let action = poll_post_parse_document_processing_action_for_test(page_vm)
         .unwrap_or_else(|| panic!("{label} should expose a ready parser-deferred owner action"));
     let crate::document_runtime::DocumentProcessingAction::PostParsePageOwnedWork(work) = action
@@ -2375,7 +2233,7 @@ async fn run_and_finish_ready_parser_deferred_task_for_test(
         "{label} should produce the armed parser-deferred marker, got {work:?}"
     );
     let completion = page_vm
-        .execute_post_parse_page_owned_task_on_named_owner_lane(loader, *work)
+        .execute_post_parse_page_owned_task_on_named_owner_lane(*work)
         .await
         .unwrap_or_else(|error| panic!("{label} parser-deferred body should run: {error}"));
     let super::parser_completion::SelectedPostParsePageOwnedCompletion::MainParser(completion) =
@@ -2401,13 +2259,12 @@ fn poll_post_parse_document_processing_action_for_test(
 
 async fn run_main_async_script_load_delay_settlement_for_test(
     page_vm: &mut PageVm,
-    loader: &crate::network::ResourceRequestClient,
     owner: crate::frame_owner_model::FrameDocumentTaskOwner,
     label: &str,
 ) {
     for turn in 0..2 {
         if let Some(outcome) = page_vm
-            .run_page_main_document_runtime_body_for_test(loader)
+            .run_page_main_document_runtime_body_for_test()
             .await
             .unwrap_or_else(|error| panic!("{label} follow-up turn should run: {error}"))
         {
@@ -2441,7 +2298,7 @@ async fn run_main_async_script_load_delay_settlement_for_test(
                 assert_eq!(binding.owner(), owner);
             }
             page_vm
-                .execute_post_parse_page_owned_task_on_named_owner_lane(loader, *work)
+                .execute_post_parse_page_owned_task_on_named_owner_lane(*work)
                 .await
                 .unwrap_or_else(|error| panic!("{label} lifecycle follow-up should run: {error}"));
         }
@@ -2499,12 +2356,10 @@ async fn main_parser_async_classic_owns_load_delay_from_discovery_through_settle
         let shared_load =
             SharedScriptSourceLoad::ready_ok("globalThis.__mainParserAsyncClassicExecuted = 1;");
         let mut scheduler = crate::document_script_scheduler::DocumentScriptScheduler::new();
-        let resource_task_runner = page_vm.resource_task_runner();
 
         assert!(scheduler.accept_parser_discovered_async_candidate(
             script.clone(),
-            &loader,
-            resource_task_runner,
+            &page_vm.main_document_resource_loader(),
             Some(shared_load),
             None,
             |_| {
@@ -2515,7 +2370,7 @@ async fn main_parser_async_classic_owns_load_delay_from_discovery_through_settle
                         crate::frame_owner_model::MainDocumentScriptLoadDelayKind::Classic,
                     )
                     .expect("parser discovery should bind classic lifecycle ownership")
-            },
+            }
         ));
         assert_eq!(
             page_vm
@@ -2545,7 +2400,6 @@ async fn main_parser_async_classic_owns_load_delay_from_discovery_through_settle
 
         page_vm
             .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
                 PostParsePageOwnedWork::document_script_work(
                     PageOwnedDocumentScriptWork::parser_async_script(
                         DocumentScriptExecutionLane::ParseTimeAsync,
@@ -2582,7 +2436,6 @@ async fn main_parser_async_classic_owns_load_delay_from_discovery_through_settle
 
         run_main_async_script_load_delay_settlement_for_test(
             &mut page_vm,
-            &loader,
             owner,
             "main parser async classic",
         )
@@ -2647,7 +2500,9 @@ async fn main_parser_async_module_owns_load_delay_until_evaluation_start() {
             "globalThis.__mainParserAsyncModuleExecuted = 1; export const value = 1;",
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)?.is_some(),
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+                .await?
+                .is_some(),
             "async module graph completion should apply"
         );
         assert!(
@@ -2655,7 +2510,7 @@ async fn main_parser_async_module_owns_load_delay_until_evaluation_start() {
             "watching a completed async graph should queue owner work"
         );
         assert!(
-            run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm, &loader).await?,
+            run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm).await?,
             "async module graph-ready work should start evaluation"
         );
         assert_eq!(
@@ -2674,7 +2529,6 @@ async fn main_parser_async_module_owns_load_delay_until_evaluation_start() {
 
         run_main_async_script_load_delay_settlement_for_test(
             &mut page_vm,
-            &loader,
             owner,
             "main parser async module",
         )
@@ -2776,7 +2630,7 @@ async fn main_parser_async_inline_module_is_watched_before_graph_start() {
             Some(true)
         );
         assert!(
-            run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm, &loader)
+            run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm)
                 .await?
         );
         assert_eq!(
@@ -2786,12 +2640,9 @@ async fn main_parser_async_inline_module_is_watched_before_graph_start() {
             "1"
         );
 
-        run_main_async_script_load_delay_settlement_for_test(
-            &mut page_vm,
-            &loader,
-            owner,
-            "main parser async inline module",
-        )
+        run_main_async_script_load_delay_settlement_for_test(&mut page_vm,
+owner,
+"main parser async inline module")
         .await;
         assert_eq!(
             page_vm
@@ -2837,9 +2688,13 @@ async fn main_parser_async_module_graph_failure_settles_exact_load_delay() {
             &module_url,
             "async module graph failed",
         );
-        assert!(run_next_main_module_fetch_terminal_for_test(&mut page_vm)?.is_some());
         assert!(
-            run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm, &loader).await?,
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+                .await?
+                .is_some()
+        );
+        assert!(
+            run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm).await?,
             "graph failure should run through the watched PendingScript owner"
         );
         assert_eq!(
@@ -2852,7 +2707,6 @@ async fn main_parser_async_module_graph_failure_settles_exact_load_delay() {
 
         run_main_async_script_load_delay_settlement_for_test(
             &mut page_vm,
-            &loader,
             owner,
             "main parser async module graph failure",
         )
@@ -2933,7 +2787,6 @@ async fn main_document_lifecycle_sets_interactive_before_defer_and_loads_later()
 
         page_vm
             .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
                 PostParsePageOwnedWork::main_document_interactive(interactive),
             )
             .await
@@ -2947,7 +2800,7 @@ async fn main_document_lifecycle_sets_interactive_before_defer_and_loads_later()
         );
 
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(&loader, defer_marker)
+            .execute_post_parse_page_owned_task_on_named_owner_lane(defer_marker)
             .await
             .expect("main defer script should run");
         assert_eq!(
@@ -2960,7 +2813,6 @@ async fn main_document_lifecycle_sets_interactive_before_defer_and_loads_later()
 
         page_vm
             .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
                 PostParsePageOwnedWork::main_document_domcontentloaded(owner),
             )
             .await
@@ -2975,7 +2827,6 @@ async fn main_document_lifecycle_sets_interactive_before_defer_and_loads_later()
 
         page_vm
             .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
                 PostParsePageOwnedWork::main_document_window_load(owner),
             )
             .await
@@ -2994,7 +2845,7 @@ async fn main_document_lifecycle_sets_interactive_before_defer_and_loads_later()
 #[test]
 fn parser_eof_releases_preloads_only_for_the_current_document_transition() {
     fn ready_store(url: Url) -> crate::runtime::DocumentScriptPreloadStore {
-        let request = crate::runtime::BufferedScriptPreloadRequest {
+        let request = crate::runtime::script_preloads::BufferedScriptPreloadRequest {
             url: url.clone(),
             initiator_url: url,
             kind_hint: ScriptKind::Classic,
@@ -3092,7 +2943,6 @@ async fn main_document_replacement_during_interactive_retires_old_lifecycle_acti
 
         page_vm
             .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
                 PostParsePageOwnedWork::main_document_interactive(interactive),
             )
             .await
@@ -3112,14 +2962,12 @@ async fn main_document_replacement_during_interactive_retires_old_lifecycle_acti
 
         page_vm
             .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
                 PostParsePageOwnedWork::main_document_domcontentloaded(retired_owner),
             )
             .await
             .expect("stale DOMContentLoaded work should be consumed");
         page_vm
             .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
                 PostParsePageOwnedWork::main_document_window_load(retired_owner),
             )
             .await
@@ -3266,6 +3114,7 @@ globalThis.__childClassicWaitValue = 91;
             .run(async move {
                 let mut page_vm = page_vm;
                 let script_url = format!("{base_url}/child-classic.js");
+                let activity_epoch_before_completion = page_vm.vm().subresource_activity_epoch();
                 page_vm.vm_mut().eval(&format!(
                     r#"
 (() => {{
@@ -3306,10 +3155,7 @@ globalThis.__childClassicWaitValue = 91;
                     "pending child external classic script should block inline script and load"
                 );
                 let blocked_host_load_before_completion = page_vm
-                    .run_exact_selected_page_task_for_test(
-                        PageSelectedTaskTestSelector::ChildHostLoad,
-                        &loader,
-                    )
+                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildHostLoad)
                     .await?;
                 let blocked_host_load_pump_before_completion =
                     page_vm.run_next_child_frame_task_source_for_semantic_test().await;
@@ -3317,15 +3163,8 @@ globalThis.__childClassicWaitValue = 91;
                     .vm_mut()
                     .eval("__childClassicWaitEvents.join('|')")?;
 
+                wait_for_resource_result(&mut page_vm, "child classic source completion").await;
                 let page_resource_queue = page_vm.page_resource_completion_queue();
-                if !page_resource_queue.has_ready_completion() {
-                    tokio::time::timeout(
-                        Duration::from_secs(2),
-                        page_vm.page_task_queue.wait_for_page_runtime_wake(),
-                    )
-                    .await
-                    .expect("child classic completion should arrive before timeout");
-                }
                 let (_, queued_completion) = page_resource_queue
                     .pop_front()
                     .expect("child classic completion should remain queued");
@@ -3335,18 +3174,17 @@ globalThis.__childClassicWaitValue = 91;
                     other => panic!("expected child classic completion, got {other:?}"),
                 };
                 let root_document = page_vm.document_lifecycle.identity().document;
-                assert!(
-                    completion.network_result.is_some(),
-                    "loader-backed child classic completion must retain its Network fact"
-                );
-                let expected_network_frame_id = completion.network_attribution.frame_id.clone();
-                let expected_network_document_url =
-                    completion.network_attribution.document_url.clone();
-                let expected_network_request_url =
-                    completion.network_attribution.request_url.clone();
-                let _ = page_vm.vm_mut().take_network_output();
-                let activity_epoch_before_completion =
-                    page_vm.vm().subresource_activity_epoch();
+                let expected_network_frame_id = page_vm.vm()
+                    .child_browsing_context_frame_id_by_owner_node_id(completion.handle)
+                    .expect("request must retain the actual child frame identity");
+                let snapshot = page_vm.vm_mut()
+                    .child_browsing_context_document_snapshot_by_frame_id(&expected_network_frame_id)
+                    .expect("request must retain the committed child Document");
+                let expected_network_frame_id = Some(expected_network_frame_id);
+                let expected_network_document_url = Url::parse(&snapshot.url).unwrap();
+                let expected_network_request_url = Url::parse(&script_url).unwrap();
+                let (network_records, websocket_events, websocket_lifecycle_events) =
+                    split_network_output_items(page_vm.vm_mut().take_network_output());
                 let first = page_vm
                     .apply_selected_page_resource_completion_turn(
                         RendererPageResourceCompletion::child_classic_script(
@@ -3369,8 +3207,8 @@ globalThis.__childClassicWaitValue = 91;
                         > activity_epoch_before_completion,
                     "a current child classic Network terminal must advance current Document activity"
                 );
-                let (network_records, websocket_events, websocket_lifecycle_events) =
-                    split_network_output_items(page_vm.vm_mut().take_network_output());
+                assert!(page_vm.vm_mut().take_network_output().is_empty(),
+                    "script business completion cannot publish a second physical request");
                 assert!(websocket_events.is_empty());
                 assert!(websocket_lifecycle_events.is_empty());
                 assert_eq!(network_records.len(), 1);
@@ -3388,7 +3226,7 @@ globalThis.__childClassicWaitValue = 91;
                 assert_eq!(network_record.resource_type(), SubresourceResourceType::Script);
                 assert_eq!(
                     network_record.request_initiator_type(),
-                    SubresourceRequestInitiatorType::Script
+                    SubresourceRequestInitiatorType::Parser
                 );
                 assert!(matches!(
                     network_record.outcome(),
@@ -3612,23 +3450,13 @@ async fn page_vm_child_parser_blocking_classic_waits_for_preceding_stylesheet() 
                 );
                 assert!(
                     !page_vm
-                        .run_exact_selected_page_task_for_test(
-                            PageSelectedTaskTestSelector::ChildHostLoad,
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildHostLoad)
                         .await?,
                     "HostLoad must not bypass a stylesheet-blocked parser"
                 );
 
+                wait_for_resource_result(&mut page_vm, "child stylesheet").await;
                 let page_resource_queue = page_vm.page_resource_completion_queue();
-                if !page_resource_queue.has_ready_completion() {
-                    tokio::time::timeout(
-                        Duration::from_secs(2),
-                        page_vm.page_task_queue.wait_for_page_runtime_wake(),
-                    )
-                    .await
-                    .expect("child stylesheet completion should arrive");
-                }
                 let (_, queued_completion) = page_resource_queue
                     .pop_front()
                     .expect("child stylesheet completion should remain queued");
@@ -3838,16 +3666,9 @@ parent.__childDeferStylesheetEvents.push(
 
                 let mut script_completion_sources = Vec::new();
                 while script_completion_sources.len() != 2 {
-                    if !page_vm.page_resource_completion_queue().has_ready_completion() {
-                        tokio::time::timeout(
-                            Duration::from_secs(2),
-                            wait_for_typed_page_resource_completion(&mut page_vm),
-                        )
-                        .await
-                        .expect("child deferred script completion should arrive");
-                    }
+                    wait_for_resource_result(&mut page_vm, "child deferred script").await;
                     let completion =
-                        run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                        run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                     assert_ne!(
                         completion.action.source(),
                         RendererOwnerResourceActivitySource::ChildBlockingStylesheet,
@@ -3877,16 +3698,9 @@ parent.__childDeferStylesheetEvents.push(
                     "no script or HostLoad turn should be runnable before stylesheet completion"
                 );
 
-                if !page_vm.page_resource_completion_queue().has_ready_completion() {
-                    tokio::time::timeout(
-                        Duration::from_secs(2),
-                        wait_for_typed_page_resource_completion(&mut page_vm),
-                    )
-                    .await
-                    .expect("delayed child stylesheet completion should arrive");
-                }
+                wait_for_resource_result(&mut page_vm, "delayed child stylesheet").await;
                 let stylesheet_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 assert_eq!(
                     page_vm
                         .vm_mut()
@@ -4039,10 +3853,7 @@ async fn page_vm_failed_child_stylesheet_installs_empty_sheet_before_host_load()
                 ];
                 assert!(
                     !page_vm
-                        .run_exact_selected_page_task_for_test(
-                            PageSelectedTaskTestSelector::ChildHostLoad,
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildHostLoad)
                         .await?,
                     "HostLoad must remain blocked after DCL while a child stylesheet is pending"
                 );
@@ -4054,18 +3865,8 @@ async fn page_vm_failed_child_stylesheet_installs_empty_sheet_before_host_load()
                     "blocked stylesheet lifecycle must not produce HostLoad progress"
                 );
 
-                if !page_vm
-                    .page_resource_completion_queue()
-                    .has_ready_completion()
-                {
-                    tokio::time::timeout(
-                        Duration::from_secs(2),
-                        wait_for_typed_page_resource_completion(&mut page_vm),
-                    )
-                    .await
-                    .expect("failed stylesheet-only completion should arrive");
-                }
-                let completion = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                wait_for_resource_result(&mut page_vm, "failed child stylesheet").await;
+                let completion = run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let child_context_id = page_vm
                     .live_child_default_runtime_realm_inventory()
                     .into_iter()
@@ -4211,25 +4012,12 @@ body { background-image: url('/css-image.png'); }
                 )
                 .await;
 
-                if !page_vm
-                    .page_resource_completion_queue()
-                    .has_ready_completion()
-                {
-                    tokio::time::timeout(
-                        Duration::from_secs(2),
-                        wait_for_typed_page_resource_completion(&mut page_vm),
-                    )
-                    .await
-                    .expect("stylesheet completion should arrive");
-                }
+                wait_for_resource_result(&mut page_vm, "child stylesheet before fonts").await;
                 let stylesheet_outcome =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 assert!(
                     !page_vm
-                        .run_exact_selected_page_task_for_test(
-                            PageSelectedTaskTestSelector::ChildHostLoad,
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildHostLoad)
                         .await?,
                     "HostLoad must remain blocked while stylesheet subresources are pending"
                 );
@@ -4239,7 +4027,7 @@ body { background-image: url('/css-image.png'); }
                         if !page_vm.page_resource_completion_queue().has_ready_completion() {
                             wait_for_typed_page_resource_completion(&mut page_vm).await;
                         }
-                        let outcome = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                        let outcome = run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                         if !matches!(outcome.action.owner.local_owner(),
                             crate::page_resource_completion::RendererPageResourceCompletionLocalOwner::AsyncSubresource(
                                 crate::types::AsyncSubresourceFetchEventTarget::NativeNetwork))
@@ -4405,7 +4193,7 @@ globalThis.__childClassicDeferWaitValue = 73;
                 }
 
                 let first =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let first_events = page_vm
                     .vm_mut()
                     .eval("__childClassicDeferWaitEvents.join('|')")?;
@@ -4611,7 +4399,7 @@ async fn page_vm_child_defer_classic_source_failure_releases_parser_order_slot()
                     .expect("failed child defer completion should arrive");
                 }
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let events_after_completion = page_vm
                     .vm_mut()
                     .eval("__childClassicDeferFailureEvents.join('|')")?;
@@ -4788,7 +4576,7 @@ async fn page_vm_moved_child_defer_disposes_in_flight_slot_before_later_module()
                         .expect("moved child defer completion should arrive");
                     }
                     let completion =
-                        run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                        run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                     if matches!(
                         completion.action.source(),
                         RendererOwnerResourceActivitySource::ChildClassicScript
@@ -4820,7 +4608,7 @@ async fn page_vm_moved_child_defer_disposes_in_flight_slot_before_later_module()
                     )
                     .await
                     .expect("later module source completion should arrive");
-                    let completion = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    let completion = run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                     assert!(matches!(
                         completion.action.source(),
                         RendererOwnerResourceActivitySource::ModuleGraphFetch
@@ -5012,7 +4800,7 @@ globalThis.__childClassicAsyncWaitValue = 41;
                 }
 
                 let first =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let first_events = page_vm
                     .vm_mut()
                     .eval("__childClassicAsyncWaitEvents.join('|')")?;
@@ -5222,7 +5010,7 @@ parent.__childClassicDeferOrderEvents.push("current:" + document.currentScript.i
                     );
                 }
                 let second_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let events_after_second_completion = page_vm
                     .vm_mut()
                     .eval("__childClassicDeferOrderEvents.join('|')")?;
@@ -5239,7 +5027,7 @@ parent.__childClassicDeferOrderEvents.push("current:" + document.currentScript.i
                     );
                 }
                 let first_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let events_after_first_completion = page_vm
                     .vm_mut()
                     .eval("__childClassicDeferOrderEvents.join('|')")?;
@@ -5506,7 +5294,7 @@ globalThis.__childModuleDeferOrderSecond = 2;
                     );
                 }
                 let second_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let events_after_second_completion = page_vm
                     .vm_mut()
                     .eval("__childModuleDeferOrderEvents.join('|')")?;
@@ -5532,7 +5320,7 @@ globalThis.__childModuleDeferOrderSecond = 2;
                     );
                 }
                 let first_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let events_after_first_completion = page_vm
                     .vm_mut()
                     .eval("__childModuleDeferOrderEvents.join('|')")?;
@@ -5803,7 +5591,7 @@ async fn page_vm_child_parser_defer_preserves_cross_kind_document_order() {
                         });
                     }
                     let completion =
-                        run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                        run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                     completion_sources.push(completion.action.source());
                     if completion.action.source()
                         == RendererOwnerResourceActivitySource::ModuleGraphFetch
@@ -5870,7 +5658,7 @@ async fn page_vm_child_parser_defer_preserves_cross_kind_document_order() {
                     .expect("third classic completion should arrive");
                 }
                 let third_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 completion_sources.push(third_completion.action.source());
 
                 execution_sources.push(
@@ -6077,7 +5865,7 @@ globalThis.__childModuleDeferFailureOrderFirst = 1;
                     );
                 }
                 let second_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let events_after_second_completion = page_vm
                     .vm_mut()
                     .eval("__childModuleDeferFailureOrderEvents.join('|')")?;
@@ -6108,7 +5896,7 @@ globalThis.__childModuleDeferFailureOrderFirst = 1;
                     );
                 }
                 let first_completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let events_after_first_completion = page_vm
                     .vm_mut()
                     .eval("__childModuleDeferFailureOrderEvents.join('|')")?;
@@ -6370,22 +6158,11 @@ globalThis.__childParserModuleWaitValue = 188;
                     "parser should continue past child module-defer script while root fetch is pending; sources={bootstrap_sources:?}"
                 );
 
-                if !page_resource_queue.has_ready_completion() {
-                    tokio::time::timeout(Duration::from_secs(2), async {
-                        while !page_resource_queue.has_ready_completion() {
-                            owner_wake_rx
-                                .recv()
-                                .await
-                                .expect("owner wake route should remain open");
-                        }
-                    })
-                    .await
-                    .expect("child parser module completion should arrive before timeout");
-                }
-
-                let _ = page_vm.vm_mut().take_network_output();
                 let activity_epoch_before_completion =
                     page_vm.vm().subresource_activity_epoch();
+                child_document_completion::wait_for_page_resource_completion(
+                    &mut page_vm, &mut page_resource_queue, &mut owner_wake_rx, "child script result").await;
+
                 let first = page_vm
                     .apply_one_page_resource_terminal_owner_admission_for_test(&mut page_resource_queue)?
                     .expect("production child module completion should consume one typed turn");
@@ -6596,6 +6373,7 @@ globalThis.__childJoinedParserRootValue = 501;
                         break;
                     }
                 }
+                run_ready_native_resource_turns(&mut page_vm)?;
                 let resource_ready_before_wait = page_vm
                     .page_resource_completion_queue()
                     .has_ready_completion();
@@ -6614,7 +6392,7 @@ globalThis.__childJoinedParserRootValue = 501;
                 }
 
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
 
                 run_expected_child_module_script_terminal_turn(
@@ -6798,10 +6576,7 @@ globalThis.__childModuleHostLoadValue = 203;
                 ))?;
 
                 let initial_host_load_before_root_fetch = page_vm
-                    .run_exact_selected_page_task_for_test(
-                        PageSelectedTaskTestSelector::ChildHostLoad,
-                        &loader,
-                    )
+                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildHostLoad)
                     .await?;
                 let navigation_commit_source = page_vm.run_next_child_frame_task_source_for_semantic_test().await;
                 run_expected_child_realm_materialization_for_wait(
@@ -6813,10 +6588,7 @@ globalThis.__childModuleHostLoadValue = 203;
                     page_vm.run_next_child_frame_task_source_for_semantic_test().await
                         == Some(ChildFrameSemanticTurnKind::DocumentScriptReady);
                 let host_load_attempt_before_root_fetch = page_vm
-                    .run_exact_selected_page_task_for_test(
-                        PageSelectedTaskTestSelector::ChildHostLoad,
-                        &loader,
-                    )
+                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildHostLoad)
                     .await?;
                 let events_after_pre_root_host_load_attempt = page_vm
                     .vm_mut()
@@ -6839,6 +6611,7 @@ globalThis.__childModuleHostLoadValue = 203;
                         break;
                     }
                 }
+                run_ready_native_resource_turns(&mut page_vm)?;
                 let resource_ready_before_wait = page_vm
                     .page_resource_completion_queue()
                     .has_ready_completion();
@@ -6854,7 +6627,7 @@ globalThis.__childModuleHostLoadValue = 203;
                 }
 
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
 
                 run_expected_child_module_script_terminal_turn(
@@ -7070,7 +6843,7 @@ globalThis.__childAsyncModuleValue = 307;
                     assert!(arrived, "child async module completion sender should remain open");
                 }
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
                 run_expected_child_module_script_terminal_turn(
                     &mut page_vm,
@@ -7252,6 +7025,7 @@ parent.__childModuleTlaHostLoadEvents.push("module-after");
                         break;
                     }
                 }
+                run_ready_native_resource_turns(&mut page_vm)?;
                 let resource_ready_before_wait = page_vm
                     .page_resource_completion_queue()
                     .has_ready_completion();
@@ -7266,9 +7040,9 @@ parent.__childModuleTlaHostLoadEvents.push("module-after");
                     assert!(arrived, "child TLA module completion sender should remain open");
                 }
 
-                let loader = page_vm.main_document_resource_loader();
+
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
 
                 run_expected_child_module_script_terminal_turn(
@@ -7295,7 +7069,7 @@ parent.__childModuleTlaHostLoadEvents.push("module-after");
                     .vm_mut()
                     .eval("__childModuleTlaHostLoadEvents.join('|')")?;
                 let parent_completion_recheck = page_vm
-                    .run_page_main_document_runtime_body_for_test(loader.request_client())
+                    .run_page_main_document_runtime_body_for_test()
                     .await?
                     .expect("child HostLoad must publish one typed parent completion recheck");
 
@@ -7304,10 +7078,7 @@ parent.__childModuleTlaHostLoadEvents.push("module-after");
                     .eval("__resolveChildModuleTlaHostLoad(); 'ok'")?;
                 assert!(
                     page_vm
-                        .run_exact_selected_page_task_for_test(
-                            PageSelectedTaskTestSelector::ModuleReaction,
-                            loader.request_client(),
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ModuleReaction)
                         .await?,
                     "resolved child TLA should enqueue one typed module reaction"
                 );
@@ -7530,6 +7301,7 @@ globalThis.__childDynamicImportLeafValue = 701;
 
                 let mut startup_sources = Vec::new();
                 for _ in 0..8 {
+                    run_ready_native_resource_turns(&mut page_vm)?;
                     if page_resource_queue.has_ready_completion() {
                         break;
                     }
@@ -7542,18 +7314,8 @@ globalThis.__childDynamicImportLeafValue = 701;
                     .vm_mut()
                     .eval("__childDynamicImportHostLoadEvents.join('|')")?;
 
-                if !page_resource_queue.has_ready_completion() {
-                    tokio::time::timeout(Duration::from_secs(2), async {
-                        while !page_resource_queue.has_ready_completion() {
-                            owner_wake_rx
-                                .recv()
-                                .await
-                                .expect("owner-attached dynamic-import route should remain open");
-                        }
-                    })
-                    .await
-                    .expect("child dynamic root completion should arrive before timeout");
-                }
+                child_document_completion::wait_for_page_resource_completion(
+                    &mut page_vm, &mut page_resource_queue, &mut owner_wake_rx, "child script result").await;
 
                 let completion = page_vm
                     .apply_one_page_resource_terminal_owner_admission_for_test(&mut page_resource_queue)?
@@ -7600,11 +7362,12 @@ globalThis.__childDynamicImportLeafValue = 701;
                 let mut post_load_progress_sources = Vec::new();
                 let mut events_after_dynamic_fetch_scheduled = String::new();
                 for _ in 0..8 {
+                    run_ready_native_resource_turns(&mut page_vm)?;
                     if page_resource_queue.has_ready_completion() {
                         break;
                     }
                     if let Some(outcome) = page_vm
-                        .run_page_main_document_runtime_body_for_test(&loader)
+                        .run_page_main_document_runtime_body_for_test()
                         .await?
                     {
                         post_load_progress_sources.push(
@@ -7635,10 +7398,7 @@ globalThis.__childDynamicImportLeafValue = 701;
                             "the first typed owner action should schedule the dynamic fetch"
                         );
                         page_vm
-                            .finish_selected_page_task_completion(
-                                action.action.into_page_task_completion(),
-                                &loader,
-                            )
+                            .finish_selected_page_task_completion(action.action.into_page_task_completion())
                             .await?;
                         post_load_progress_sources
                             .push(PostLoadProgressSource::TypedDynamicImportOwnerAction);
@@ -7650,23 +7410,10 @@ globalThis.__childDynamicImportLeafValue = 701;
                     break;
                 }
 
-                if !page_resource_queue.has_ready_completion() {
-                    tokio::time::timeout(Duration::from_secs(2), async {
-                        while !page_resource_queue.has_ready_completion() {
-                            owner_wake_rx.recv().await.expect(
-                                "owner-attached dynamic-import completion route should remain open",
-                            );
-                        }
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "child dynamic import completion should arrive before timeout: progress={post_load_progress_sources:?} events={events_after_dynamic_fetch_scheduled}"
-                        )
-                    });
-                }
                 let activity_epoch_before_dynamic_completion =
                     page_vm.vm().subresource_activity_epoch();
+                child_document_completion::wait_for_page_resource_completion(
+                    &mut page_vm, &mut page_resource_queue, &mut owner_wake_rx, "child script result").await;
                 let dynamic_fetch_completion = page_vm
                     .apply_one_page_resource_terminal_owner_admission_for_test(&mut page_resource_queue)?
                     .expect("child dynamic import fetch completion should be ready");
@@ -7676,7 +7423,7 @@ globalThis.__childDynamicImportLeafValue = 701;
                 );
                 assert_eq!(
                     dynamic_fetch_completion.action.output_effect,
-                    PageResourceCompletionOutputEffect::CaptureRequired
+                    PageResourceCompletionOutputEffect::None
                 );
                 assert!(
                     page_vm.vm().subresource_activity_epoch()
@@ -7721,10 +7468,7 @@ globalThis.__childDynamicImportLeafValue = 701;
                         "__childDynamicImportHostLoadEvents.join('|')",
                     )?;
                 page_vm
-                    .finish_selected_page_task_completion(
-                        dynamic_owner_action.action.into_page_task_completion(),
-                        &loader,
-                    )
+                    .finish_selected_page_task_completion(dynamic_owner_action.action.into_page_task_completion())
                     .await?;
                 let events_after_dynamic_owner_action = page_vm
                     .vm_mut()
@@ -7928,6 +7672,7 @@ async fn page_vm_child_module_graph_failure_blocks_host_load_until_error_dispatc
                         break;
                     }
                 }
+                run_ready_native_resource_turns(&mut page_vm)?;
                 let resource_ready_before_wait = page_vm
                     .page_resource_completion_queue()
                     .has_ready_completion();
@@ -7943,7 +7688,7 @@ async fn page_vm_child_module_graph_failure_blocks_host_load_until_error_dispatc
                 }
 
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
 
                 run_expected_child_module_script_terminal_turn(
@@ -8119,7 +7864,7 @@ parent.__childScriptEventNestedEvents.push("module:" + (globalThis === self));
                     );
                 }
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
 
                 run_expected_child_module_script_terminal_turn(
@@ -8321,7 +8066,7 @@ export const depValue = "dep-value";
                     );
                 }
 
-                let root = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                let root = run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 assert_eq!(
                     root.action.document_effect,
                     PageResourceCompletionDocumentEffect::AppliedToCurrentOwner
@@ -8346,10 +8091,7 @@ export const depValue = "dep-value";
                 assert_eq!(root_network_records[0].url().as_str(), root_url);
                 assert!(
                     page_vm
-                        .run_exact_selected_page_task_for_test(
-                            PageSelectedTaskTestSelector::ChildModuleDependencyFetchStart,
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildModuleDependencyFetchStart)
                         .await?,
                     "module terminal should queue one selected dependency-start task",
                 );
@@ -8370,7 +8112,7 @@ export const depValue = "dep-value";
                 let activity_epoch_before_dependency =
                     page_vm.vm().subresource_activity_epoch();
                 let dependency =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 assert_eq!(
                     dependency.action.document_effect,
                     PageResourceCompletionDocumentEffect::AppliedToCurrentOwner
@@ -8599,7 +8341,7 @@ parent.__childModuleDependencyFailureEvents.push("root:" + depValue);
                     );
                 }
 
-                run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 run_expected_child_module_script_terminal_turn(
                     &mut page_vm,
                     "child dependency-failure root terminal",
@@ -8608,10 +8350,7 @@ parent.__childModuleDependencyFailureEvents.push("root:" + depValue);
                 let _ = page_vm.vm_mut().take_network_output();
                 assert!(
                     page_vm
-                        .run_exact_selected_page_task_for_test(
-                            PageSelectedTaskTestSelector::ChildModuleDependencyFetchStart,
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildModuleDependencyFetchStart)
                         .await?,
                     "module terminal should queue one selected dependency-start task",
                 );
@@ -8632,7 +8371,7 @@ parent.__childModuleDependencyFailureEvents.push("root:" + depValue);
                 }
 
                 let dependency =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 assert_eq!(
                     dependency.action.document_effect,
                     PageResourceCompletionDocumentEffect::AppliedToCurrentOwner
@@ -8761,7 +8500,6 @@ parent.__childModuleDependencyFailureEvents.push("root:" + depValue);
 #[tokio::test]
 async fn page_vm_child_modulepreload_terminal_event_does_not_delay_complete() {
     run_page_vm_async_test(async move {
-        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
         let page_vm = test_page_vm();
         let local_executor = page_vm.local_executor.clone();
 
@@ -8814,10 +8552,7 @@ async fn page_vm_child_modulepreload_terminal_event_does_not_delay_complete() {
 
                 assert!(
                     page_vm
-                        .run_exact_selected_page_task_for_test(
-                            PageSelectedTaskTestSelector::ChildModulepreloadEventAction,
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ChildModulepreloadEventAction)
                         .await?,
                     "the deliberately withheld modulepreload error action must remain queued"
                 );
@@ -8943,6 +8678,7 @@ async fn page_vm_child_modulepreload_fetch_does_not_delay_iframe_load() {
                 let mut typed_modulepreload_start_ran = false;
                 let mut startup_sources = Vec::new();
                 for _ in 0..10 {
+                    run_ready_native_resource_turns(&mut page_vm)?;
                     if page_resource_queue.has_ready_completion() {
                         break;
                     }
@@ -8951,10 +8687,7 @@ async fn page_vm_child_modulepreload_fetch_does_not_delay_iframe_load() {
                     {
                         assert!(
                             page_vm
-                                .run_exact_selected_page_task_for_test(
-                                    PageSelectedTaskTestSelector::ModulepreloadStart,
-                                    &loader,
-                                )
+                                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ModulepreloadStart)
                                 .await?,
                             "typed modulepreload start should enter the production selected dispatcher",
                         );
@@ -8971,18 +8704,10 @@ async fn page_vm_child_modulepreload_fetch_does_not_delay_iframe_load() {
                     };
                     startup_sources.push(source);
                 }
-                if !page_resource_queue.has_ready_completion() {
-                    tokio::time::timeout(Duration::from_secs(2), async {
-                        while !page_resource_queue.has_ready_completion() {
-                            owner_wake_rx
-                                .recv()
-                                .await
-                                .expect("owner-attached modulepreload wake route should remain open");
-                        }
-                    })
-                    .await
-                    .expect("typed modulepreload completion should arrive before timeout");
-                }
+                let activity_epoch_before_completion =
+                    page_vm.vm().subresource_activity_epoch();
+                child_document_completion::wait_for_page_resource_completion(
+                    &mut page_vm, &mut page_resource_queue, &mut owner_wake_rx, "child script result").await;
                 let events_before_completion = page_vm
                     .vm_mut()
                     .eval("__childStandaloneModulepreloadEvents.join('|')")?;
@@ -8990,8 +8715,6 @@ async fn page_vm_child_modulepreload_fetch_does_not_delay_iframe_load() {
                     "document.querySelector('iframe').contentDocument.readyState",
                 )?;
 
-                let activity_epoch_before_completion =
-                    page_vm.vm().subresource_activity_epoch();
                 let completion = page_vm
                     .apply_one_page_resource_terminal_owner_admission_for_test(&mut page_resource_queue)?
                     .expect("typed modulepreload completion should consume one Page owner turn");
@@ -9001,7 +8724,7 @@ async fn page_vm_child_modulepreload_fetch_does_not_delay_iframe_load() {
                 );
                 assert_eq!(
                     completion.action.output_effect,
-                    PageResourceCompletionOutputEffect::CaptureRequired
+                    PageResourceCompletionOutputEffect::None
                 );
                 assert!(
                     page_vm.vm().subresource_activity_epoch()
@@ -9020,11 +8743,8 @@ async fn page_vm_child_modulepreload_fetch_does_not_delay_iframe_load() {
                 assert!(network_records[0].frame_id().is_some());
                 assert_eq!(network_records[0].document_url().as_str(), "about:srcdoc");
                 assert_eq!(network_records[0].url().as_str(), preload_url);
-                run_expected_child_modulepreload_event_action_for_test(
-                    &mut page_vm,
-                    &loader,
-                    "owner-scheduled child modulepreload event dispatch",
-                )
+                run_expected_child_modulepreload_event_action_for_test(&mut page_vm,
+"owner-scheduled child modulepreload event dispatch")
                 .await;
                 let events_after_preload_event = page_vm
                     .vm_mut()
@@ -9155,11 +8875,8 @@ globalThis.__childModulepreloadJoinValue = 551;
                 ))?;
 
                 let startup_sources =
-                    drive_child_modulepreload_startup_until_resource_completion_ready(
-                        &mut page_vm,
-                        &loader,
-                        8,
-                    )
+                    drive_child_modulepreload_startup_until_resource_completion_ready(&mut page_vm,
+8)
                     .await;
                 let events_before_completion = page_vm
                     .vm_mut()
@@ -9179,13 +8896,10 @@ globalThis.__childModulepreloadJoinValue = 551;
                 }
 
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
 
-                run_expected_child_modulepreload_event_action_for_test(
-                    &mut page_vm,
-                    &loader,
-                    "child modulepreload event dispatch",
-                )
+                run_expected_child_modulepreload_event_action_for_test(&mut page_vm,
+"child modulepreload event dispatch")
                 .await;
                 let events_after_preload_event = page_vm
                     .vm_mut()
@@ -9364,11 +9078,8 @@ async fn page_vm_child_modulepreload_failure_wakes_joined_root_before_host_load(
                 ))?;
 
                 let startup_sources =
-                    drive_child_modulepreload_startup_until_resource_completion_ready(
-                        &mut page_vm,
-                        &loader,
-                        8,
-                    )
+                    drive_child_modulepreload_startup_until_resource_completion_ready(&mut page_vm,
+8)
                     .await;
                 let events_before_completion = page_vm
                     .vm_mut()
@@ -9388,13 +9099,10 @@ async fn page_vm_child_modulepreload_failure_wakes_joined_root_before_host_load(
                 }
 
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
 
-                run_expected_child_modulepreload_event_action_for_test(
-                    &mut page_vm,
-                    &loader,
-                    "child failed modulepreload event dispatch",
-                )
+                run_expected_child_modulepreload_event_action_for_test(&mut page_vm,
+"child failed modulepreload event dispatch")
                 .await;
                 let events_after_preload_event = page_vm
                     .vm_mut()
@@ -9582,20 +9290,11 @@ globalThis.__childDocumentLoadWaitValue = 42;
                     "child document script and frame load should wait for document completion"
                 );
 
-                if !page_vm.page_resource_completion_queue().has_ready_completion() {
-                    let arrived = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        wait_for_typed_page_resource_completion(&mut page_vm),
-                    )
-                    .await
-                    .expect("child document completion should arrive before timeout");
-                    assert!(
-                        arrived,
-                        "child document completion sender should remain open"
-                    );
-                }
+                child_document_completion::wait_for_child_document_completion(
+                    &mut page_vm, "child document completion",
+                ).await;
 
-                let first = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                let first = run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let first_events = page_vm
                     .vm_mut()
                     .eval("__childDocumentLoadWaitEvents.join('|')")?;
@@ -9741,7 +9440,7 @@ parent.__multiChildDocumentEvents.push("child-b-script:" + (globalThis === self)
         .await;
         let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
         let document_url = Url::parse(&format!("{base_url}/page")).expect("page url");
-        let (owner_wake_tx, mut owner_wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (owner_wake_tx, _owner_wake_rx) = tokio::sync::mpsc::unbounded_channel();
         let owner_wake = crate::page_task_queue::RendererOwnerWakeSender::new(
             owner_wake_tx,
             crate::runtime::RendererPageToken::new_for_testing(PageId::new_for_testing(1)),
@@ -9824,10 +9523,8 @@ parent.__multiChildDocumentEvents.push("child-b-script:" + (globalThis === self)
 
                 let mut completion_sources = Vec::new();
                 for label in ["first child document", "second child document"] {
-                    child_document_completion::wait_for_page_resource_completion(
-                        &mut page_resource_queue,
-                        &mut owner_wake_rx,
-                        label,
+                    child_document_completion::wait_for_child_document_completion(
+                        &mut page_vm, label,
                     )
                     .await;
                     let completion = page_vm
@@ -10043,17 +9740,12 @@ parent.__childReadyHostLoadEvents.push("child-script:" + (globalThis === self));
                     "NavigationCommit should start the child document load without dispatching load"
                 );
 
-                if !page_vm.page_resource_completion_queue().has_ready_completion() {
-                    let arrived = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        wait_for_typed_page_resource_completion(&mut page_vm),
-                    )
-                    .await
-                    .expect("child document completion should arrive before timeout");
-                    assert!(arrived, "child document completion sender should remain open");
-                }
+                child_document_completion::wait_for_child_document_completion(
+                    &mut page_vm, "child document completion",
+                ).await;
+
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
                 let host_load_pending_after_completion = page_vm
                     .has_ready_child_frame_semantic_turn_for_test(ChildFrameSemanticTurnKind::HostLoad);
@@ -10401,14 +10093,12 @@ async fn page_vm_message_port_event_commits_child_navigation_before_document_scr
             let mut message_port_turns = 0;
             let events_after_message = loop {
                 if page_vm
-                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::DedicatedWorkerClientEvent,
-                        &loader,
-                    )
+                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::DedicatedWorkerClientEvent)
                     .await?
                 {
                     completion_sources.push(RendererOwnerResourceActivitySource::Worker);
                 } else if page_vm
-                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::MessagePortDelivery, &loader)
+                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::MessagePortDelivery)
                     .await?
                 {
                     message_port_turns += 1;
@@ -10565,10 +10255,7 @@ sender.postMessage("go");
                 let mut completion_sources = Vec::new();
                 let events_after_broadcast = loop {
                     if page_vm
-                        .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::DomManipulation(PageDomManipulationTestFamily::BroadcastChannel),
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::DomManipulation(PageDomManipulationTestFamily::BroadcastChannel))
                         .await?
                     {
                         completion_sources
@@ -10580,9 +10267,7 @@ sender.postMessage("go");
                         continue;
                     }
                     if page_vm
-                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::DedicatedWorkerClientEvent,
-                            &loader,
-                        )
+                        .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::DedicatedWorkerClientEvent)
                         .await?
                     {
                         completion_sources.push(RendererOwnerResourceActivitySource::Worker);
@@ -10936,7 +10621,8 @@ parent.__childDynamicExternalEvents.push("current:" + document.currentScript.id)
                             "child dynamic external completion sender should remain open"
                         );
                     }
-                    let completion = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    let completion =
+                        run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                     let completion_source = completion.action.source();
                     let ready_source =
                         run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
@@ -11062,7 +10748,7 @@ async fn child_document_write_nested_external_classic_blocks_domcontentloaded() 
                             "written external completion sender should remain open"
                         );
                     }
-                    let _ = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    let _ = run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                     run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
                         &mut page_vm,
                         ChildFrameSemanticTurnKind::DocumentScriptReady,
@@ -11183,7 +10869,7 @@ async fn child_document_close_defers_while_written_external_classic_blocks_parse
                         "child close blocker completion sender should remain open"
                     );
                 }
-                let _ = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                let _ = run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
                     &mut page_vm,
                     ChildFrameSemanticTurnKind::DocumentScriptReady,
@@ -11365,17 +11051,11 @@ onload = () => {
                 ))?;
 
                 let bootstrap_source = page_vm.run_next_child_frame_task_source_for_semantic_test().await;
-                if !page_vm.page_resource_completion_queue().has_ready_completion() {
-                    let arrived = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        wait_for_typed_page_resource_completion(&mut page_vm),
-                    )
-                    .await
-                    .expect("child document completion should arrive before timeout");
-                    assert!(arrived, "child document completion sender should remain open");
-                }
+                child_document_completion::wait_for_child_document_completion(
+                    &mut page_vm, "child document before host load",
+                ).await;
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
                 let host_load_pending_after_completion = page_vm
                     .has_ready_child_frame_semantic_turn_for_test(ChildFrameSemanticTurnKind::HostLoad);
@@ -11573,7 +11253,7 @@ addEventListener("load", () => parent.__childLoadNavigationEvents.push("load-lis
         let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
         let document_url = Url::parse(&format!("{base_url}/page")).expect("page url");
         let page_vm = test_page_vm_with_loader_and_document_url(&loader, Vec::new(), document_url);
-        let loader_for_task = loader.clone();
+
         let local_executor = page_vm.local_executor.clone();
 
         let (
@@ -11611,17 +11291,11 @@ addEventListener("load", () => parent.__childLoadNavigationEvents.push("load-lis
                 ))?;
 
                 let bootstrap_source = page_vm.run_next_child_frame_task_source_for_semantic_test().await;
-                if !page_vm.page_resource_completion_queue().has_ready_completion() {
-                    let arrived = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        wait_for_typed_page_resource_completion(&mut page_vm),
-                    )
-                    .await
-                    .expect("child document completion should arrive before timeout");
-                    assert!(arrived, "child document completion sender should remain open");
-                }
+                child_document_completion::wait_for_child_document_completion(
+                    &mut page_vm, "child document before window load",
+                ).await;
                 let completion =
-                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                    run_next_resource_result_as_typed_page_turn(&mut page_vm).await?;
                 let completion_source = completion.action.source();
                 run_expected_pending_child_realm_materialization_turn(
                     &mut page_vm,
@@ -11672,7 +11346,7 @@ addEventListener("load", () => parent.__childLoadNavigationEvents.push("load-lis
                 let message_endpoints_after_navigation_script =
                     page_vm.vm().pending_window_message_endpoints_for_test();
                 let message_ready_after_navigation_script = page_vm
-                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::WindowMessage, &loader_for_task)
+                    .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::WindowMessage)
                     .await?;
                 let events_after_window_message = page_vm
                     .vm_mut()
@@ -11996,18 +11670,12 @@ async fn parser_inline_module_runs_from_parser_after_parsing_order() {
         );
 
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("parser after-parsing owner should release inline graph");
-        run_parser_module_completion_turns_for_test(
-            &mut page_vm,
-            &loader,
-            0,
-            "inline parser module after-parsing release",
-        )
+        run_parser_module_completion_turns_for_test(&mut page_vm,
+0,
+"inline parser module after-parsing release")
         .await;
 
         assert_eq!(
@@ -12048,18 +11716,12 @@ async fn parser_data_url_module_runs_from_parser_after_parsing_order() {
         );
 
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("parser after-parsing owner should release the data module graph");
-        run_parser_module_completion_turns_for_test(
-            &mut page_vm,
-            &loader,
-            0,
-            "data parser module after-parsing release",
-        )
+        run_parser_module_completion_turns_for_test(&mut page_vm,
+0,
+"data parser module after-parsing release")
         .await;
 
         assert_eq!(
@@ -12096,7 +11758,7 @@ async fn parser_pending_module_tree_fetch_completion_waits_for_after_parsing_rel
         );
 
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("module graph completion should run")
                 .is_some(),
             "module graph completion should be consumed"
@@ -12111,18 +11773,12 @@ async fn parser_pending_module_tree_fetch_completion_waits_for_after_parsing_rel
         );
 
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("parser after-parsing owner should release the pending tree");
-        run_parser_module_completion_turns_for_test(
-            &mut page_vm,
-            &loader,
-            0,
-            "completed parser module after-parsing release",
-        )
+        run_parser_module_completion_turns_for_test(&mut page_vm,
+0,
+"completed parser module after-parsing release")
         .await;
 
         assert_eq!(
@@ -12160,10 +11816,7 @@ async fn watched_loading_parser_pending_module_tree_runs_after_fetch_completion(
 
         let parser_module_work = install_parser_module_defer_work(&mut page_vm, script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("parser after-parsing owner should retain the loading pending tree");
         assert_eq!(
@@ -12182,7 +11835,7 @@ async fn watched_loading_parser_pending_module_tree_runs_after_fetch_completion(
             "globalThis.__pendingTreeLateExecuted = (globalThis.__pendingTreeLateExecuted ?? 0) + 1; export const value = 1;",
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("module graph completion should run")
                 .is_some(),
             "module graph completion should be consumed"
@@ -12191,18 +11844,12 @@ async fn watched_loading_parser_pending_module_tree_runs_after_fetch_completion(
             !page_vm.has_ready_parser_owned_document_script_action(),
             "after-parsing terminal must stay in its PendingScript instead of the broad ready queue"
         );
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "late parser module graph completion",
-        )
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"late parser module graph completion")
         .await;
-        run_parser_module_completion_turns_for_test(
-            &mut page_vm,
-            &loader,
-            0,
-            "late parser module graph completion",
-        )
+        run_parser_module_completion_turns_for_test(&mut page_vm,
+0,
+"late parser module graph completion")
         .await;
 
         assert_eq!(
@@ -12245,7 +11892,7 @@ async fn main_parser_module_tla_releases_lifecycle_at_evaluation_start() {
             "the accepted module PendingScript must own a lifecycle token before fetch starts"
         );
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(&loader, parser_module_work)
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("parser module owner should wait for its graph");
 
@@ -12261,15 +11908,12 @@ async fn main_parser_module_tla_releases_lifecycle_at_evaluation_start() {
         );
         assert!(
             run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+                .await
                 .expect("TLA module graph completion should apply")
                 .is_some()
         );
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "main parser TLA evaluation start",
-        )
-        .await;
+        run_ready_parser_deferred_body_for_test(&mut page_vm, "main parser TLA evaluation start")
+            .await;
 
         assert_eq!(
             page_vm
@@ -12304,13 +11948,8 @@ async fn main_parser_module_tla_releases_lifecycle_at_evaluation_start() {
             .vm_mut()
             .eval("globalThis.__resolveMainParserTla(); 'resolved'")
             .expect("resolve main parser TLA");
-        run_parser_module_completion_turns_for_test(
-            &mut page_vm,
-            &loader,
-            1,
-            "main parser TLA fulfillment",
-        )
-        .await;
+        run_parser_module_completion_turns_for_test(&mut page_vm, 1, "main parser TLA fulfillment")
+            .await;
         assert_eq!(
             page_vm
                 .vm_mut()
@@ -12356,10 +11995,7 @@ async fn main_parser_module_tla_rejection_reports_without_duplicate_completion()
         );
         let parser_module_work = install_parser_module_defer_work(&mut page_vm, script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("parser module owner should wait for its graph");
         enqueue_parser_owned_module_script_fetch_completion_for_test(
@@ -12373,15 +12009,12 @@ async fn main_parser_module_tla_rejection_reports_without_duplicate_completion()
             ),
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("TLA rejection graph completion should apply")
                 .is_some()
         );
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "main parser TLA rejection evaluation start",
-        )
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"main parser TLA rejection evaluation start")
         .await;
         assert!(
             !page_vm.has_pending_parser_owned_module_script(),
@@ -12392,12 +12025,9 @@ async fn main_parser_module_tla_rejection_reports_without_duplicate_completion()
             .vm_mut()
             .eval("globalThis.__rejectMainParserTla(new TypeError('main TLA rejected')); 'rejected'")
             .expect("reject main parser TLA");
-        run_parser_module_completion_turns_for_test(
-            &mut page_vm,
-            &loader,
-            1,
-            "main parser TLA rejection",
-        )
+        run_parser_module_completion_turns_for_test(&mut page_vm,
+1,
+"main parser TLA rejection")
         .await;
         let error = page_vm
             .vm_mut()
@@ -12438,19 +12068,15 @@ async fn main_runtime_module_tla_releases_lifecycle_at_evaluation_start() {
 
     async fn run_one_runtime_module_turn(
         page_vm: &mut PageVm,
-        loader: &crate::network::ResourceRequestClient,
     ) -> anyhow::Result<Option<RuntimeModuleTurn>> {
         if page_vm
-            .run_exact_selected_page_task_for_test(
-                PageSelectedTaskTestSelector::ModuleReaction,
-                loader,
-            )
+            .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ModuleReaction)
             .await?
         {
             return Ok(Some(RuntimeModuleTurn::ModuleReaction));
         }
         if let Some(outcome) = page_vm
-            .run_page_main_document_runtime_body_for_test(loader)
+            .run_page_main_document_runtime_body_for_test()
             .await?
         {
             let turn = match outcome.action.kind() {
@@ -12523,7 +12149,7 @@ async fn main_runtime_module_tla_releases_lifecycle_at_evaluation_start() {
         let mut reached_evaluation_start = false;
         let mut progress_actions = Vec::new();
         for _ in 0..32 {
-            let progressed = run_one_runtime_module_turn(&mut page_vm, &loader).await?;
+            let progressed = run_one_runtime_module_turn(&mut page_vm).await?;
             let started = page_vm
                 .vm_mut()
                 .eval("String(globalThis.__runtimeTlaStarted)")?;
@@ -12579,12 +12205,12 @@ async fn main_runtime_module_tla_releases_lifecycle_at_evaluation_start() {
             .eval("globalThis.__resolveRuntimeTla(); 'resolved'")?;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ModuleReaction, &loader)
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::ModuleReaction)
                 .await?,
             "runtime TLA fulfillment should enqueue one typed module reaction"
         );
         for _ in 0..32 {
-            let progressed = run_one_runtime_module_turn(&mut page_vm, &loader).await?;
+            let progressed = run_one_runtime_module_turn(&mut page_vm).await?;
             if page_vm
                 .vm_mut()
                 .eval("String(globalThis.__runtimeTlaFinished)")?
@@ -12695,7 +12321,8 @@ async fn main_parser_classic_defer_dispatches_load_before_releasing_next_pending
             "classic defer lifecycle ownership must not enter the runtime-owned module lane"
         );
 
-        run_ready_parser_deferred_body_for_test(&mut page_vm, &loader, "first classic defer")
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"first classic defer")
             .await;
         assert_eq!(
             page_vm
@@ -12710,7 +12337,8 @@ async fn main_parser_classic_defer_dispatches_load_before_releasing_next_pending
             "the second PendingScript must retain its own lifecycle token"
         );
 
-        run_ready_parser_deferred_body_for_test(&mut page_vm, &loader, "second classic defer")
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"second classic defer")
             .await;
         assert_eq!(
             page_vm
@@ -12778,11 +12406,8 @@ queueMicrotask(() => globalThis.__mainParserDeferCheckpointEvents.push('script-m
             .seal_main_parser_deferred_scripts(task_owner)
             .expect("defer queue should seal");
 
-        run_and_finish_ready_parser_deferred_task_for_test(
-            &mut page_vm,
-            &loader,
-            "classic defer checkpoint ordering",
-        )
+        run_and_finish_ready_parser_deferred_task_for_test(&mut page_vm,
+"classic defer checkpoint ordering")
         .await;
 
         assert_eq!(
@@ -12856,13 +12481,7 @@ async fn dcl_lifecycle_yields_parser_deferred_source_wait_to_page_vm_resource_qu
             } = &mut page_vm;
             vm.as_mut()
                 .expect("page vm must retain a ScriptVm")
-                .advance_post_parse_lifecycle(
-                    &loader,
-                    page_task_queue,
-                    report,
-                    lifecycle_driver,
-                    None,
-                )
+                .advance_post_parse_lifecycle(page_task_queue, report, lifecycle_driver, None)
                 .await
                 .expect("DCL driver should report its blocked state")
         };
@@ -12910,7 +12529,8 @@ async fn dcl_lifecycle_yields_parser_deferred_source_wait_to_page_vm_resource_qu
             "false",
             "waiting for DCL progress must not execute a generic timer task"
         );
-        let deferred_source = run_next_resource_completion_as_typed_page_turn(&mut page_vm)
+        let deferred_source = run_next_resource_result_as_typed_page_turn(&mut page_vm)
+            .await
             .expect("deferred source terminal should apply");
         assert_eq!(
             deferred_source.action.source,
@@ -12926,13 +12546,7 @@ async fn dcl_lifecycle_yields_parser_deferred_source_wait_to_page_vm_resource_qu
             } = &mut page_vm;
             vm.as_mut()
                 .expect("page vm must retain a ScriptVm")
-                .advance_post_parse_lifecycle(
-                    &loader,
-                    page_task_queue,
-                    report,
-                    lifecycle_driver,
-                    None,
-                )
+                .advance_post_parse_lifecycle(page_task_queue, report, lifecycle_driver, None)
                 .await
                 .expect("resource completion should resume the DCL driver")
         };
@@ -13011,11 +12625,8 @@ async fn main_parser_classic_defer_load_replacement_retires_old_pending_queue() 
             .seal_main_parser_deferred_scripts(task_owner)
             .expect("replacement defer queue should seal");
 
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "replacement classic defer",
-        )
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"replacement classic defer")
         .await;
         assert_ne!(
             page_vm.vm().current_main_document_task_owner(),
@@ -13098,11 +12709,8 @@ async fn main_parser_classic_defer_execution_can_replace_the_document() {
             .seal_main_parser_deferred_scripts(task_owner)
             .expect("replacement defer queue should seal");
 
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "replacement classic defer execution",
-        )
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"replacement classic defer execution")
         .await;
         assert_ne!(
             page_vm.vm().current_main_document_task_owner(),
@@ -13206,7 +12814,8 @@ async fn main_parser_classic_defer_source_failure_dispatches_typed_error_without
             "resource completion must only update PendingScript state"
         );
 
-        run_ready_parser_deferred_body_for_test(&mut page_vm, &loader, "failed classic defer")
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"failed classic defer")
             .await;
         assert_eq!(
             page_vm
@@ -13324,11 +12933,11 @@ async fn main_parser_after_parsing_queue_orders_module_before_ready_classic_defe
         );
         assert!(
             run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+                .await
                 .expect("module graph completion should run")
                 .is_some()
         );
-        run_ready_parser_deferred_body_for_test(&mut page_vm, &loader, "earlier module release")
-            .await;
+        run_ready_parser_deferred_body_for_test(&mut page_vm, "earlier module release").await;
         assert_eq!(
             page_vm
                 .vm_mut()
@@ -13345,8 +12954,7 @@ async fn main_parser_after_parsing_queue_orders_module_before_ready_classic_defe
             "one parser owner turn must release only the current document-order slot"
         );
 
-        run_ready_parser_deferred_body_for_test(&mut page_vm, &loader, "later classic release")
-            .await;
+        run_ready_parser_deferred_body_for_test(&mut page_vm, "later classic release").await;
         let classic_run = page_vm
             .report
             .runs
@@ -13417,10 +13025,7 @@ async fn parser_module_graph_failure_leaves_shared_sibling_fetch_for_joined_scri
         let first_parser_module_work =
             install_parser_module_defer_work(&mut page_vm, first_script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                first_parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(first_parser_module_work)
             .await
             .expect("first module defer page task should watch loading tree");
 
@@ -13435,7 +13040,7 @@ export const first = 1;
 "#,
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("first root completion should run")
                 .is_some(),
             "first root completion should be consumed"
@@ -13444,10 +13049,7 @@ export const first = 1;
         let second_parser_module_work =
             install_parser_module_defer_work(&mut page_vm, second_script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                second_parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(second_parser_module_work)
             .await
             .expect("second module defer page task should watch loading tree");
         enqueue_parser_owned_module_script_fetch_completion_for_test(
@@ -13460,7 +13062,7 @@ export const second = 2;
 "#,
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("second root completion should run")
                 .is_some(),
             "second root completion should be consumed"
@@ -13481,7 +13083,7 @@ export const second = 2;
             "bad dependency failed",
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("bad dependency completion should run")
                 .is_some(),
             "bad dependency failure should be consumed"
@@ -13508,11 +13110,8 @@ export const second = 2;
             !page_vm.has_ready_parser_owned_document_script_action(),
             "ordered graph failure must stay in the parser PendingScript instead of the broad ready lane"
         );
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "bad dependency failure",
-        )
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"bad dependency failure")
         .await;
         let first_failure = page_vm
             .report
@@ -13536,7 +13135,7 @@ export const second = 2;
             "export const shared = 1;",
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("shared dependency completion should run")
                 .is_some(),
             "shared dependency completion should be consumed"
@@ -13545,28 +13144,19 @@ export const second = 2;
             page_vm.vm_mut().has_ready_native_module_owner_actions(),
             "shared module-map terminal must publish its joined-client owner event"
         );
-        run_next_native_module_owner_event_for_test(
-            &mut page_vm,
-            &loader,
-            "shared parser module-map completion",
-        )
+        run_next_native_module_owner_event_for_test(&mut page_vm,
+"shared parser module-map completion")
         .await;
         assert!(
             !page_vm.has_pending_parser_owned_module_fetch(),
             "joined parser graph should resume through the native module owner turn"
         );
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "joined parser module graph completion",
-        )
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"joined parser module graph completion")
         .await;
-        run_parser_module_completion_turns_for_test(
-            &mut page_vm,
-            &loader,
-            0,
-            "joined parser module graph completion",
-        )
+        run_parser_module_completion_turns_for_test(&mut page_vm,
+0,
+"joined parser module graph completion")
         .await;
         assert!(
             !page_vm.has_pending_parser_owned_module_script(),
@@ -13624,7 +13214,7 @@ async fn modulepreload_fetch_failure_wakes_joined_parser_script_waiter() {
             prepared_external_module_for_page_vm_test_with_node(&page_vm, 9301, root_url.clone());
         let parser_module_work = install_parser_module_defer_work(&mut page_vm, root_script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(&loader, parser_module_work)
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("module defer page task should watch loading tree");
 
@@ -13639,6 +13229,7 @@ export const root = 1;
         );
         assert!(
             run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+                .await
                 .expect("root completion should run")
                 .is_some(),
             "root completion should be consumed"
@@ -13656,16 +13247,13 @@ export const root = 1;
         );
         assert!(
             run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+                .await
                 .expect("modulepreload completion should run")
                 .is_some(),
             "modulepreload completion should be consumed"
         );
-        run_next_native_module_owner_event_for_test(
-            &mut page_vm,
-            &loader,
-            "joined modulepreload failure",
-        )
-        .await;
+        run_next_native_module_owner_event_for_test(&mut page_vm, "joined modulepreload failure")
+            .await;
         let shared_entry = page_vm
             .vm()
             .document_runtime
@@ -13687,12 +13275,8 @@ export const root = 1;
             page_vm.has_pending_parser_owned_module_script(),
             "joined parser graph failure should wait for the document-owned ready dispatch"
         );
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "joined modulepreload graph failure",
-        )
-        .await;
+        run_ready_parser_deferred_body_for_test(&mut page_vm, "joined modulepreload graph failure")
+            .await;
         assert!(
             !page_vm.has_pending_parser_owned_module_script(),
             "joined parser graph failure should leave no pending parser-owned module script"
@@ -13754,6 +13338,7 @@ async fn parser_module_script_observes_prior_modulepreload_failure() {
         );
         assert!(
             run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+                .await
                 .expect("modulepreload completion should run")
                 .is_some(),
             "modulepreload completion should be consumed"
@@ -13763,7 +13348,7 @@ async fn parser_module_script_observes_prior_modulepreload_failure() {
             prepared_external_module_for_page_vm_test_with_node(&page_vm, 9401, module_url.clone());
         let parser_module_work = install_parser_module_defer_work(&mut page_vm, module_script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(&loader, parser_module_work)
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("module defer page task should watch failed tree");
         assert!(
@@ -13827,10 +13412,7 @@ async fn parser_module_script_joins_inflight_same_url_modulepreload_failure() {
             prepared_external_module_for_page_vm_test_with_node(&page_vm, 9501, module_url.clone());
         let parser_module_work = install_parser_module_defer_work(&mut page_vm, module_script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("module defer page task should watch joined modulepreload");
         assert!(
@@ -13845,16 +13427,13 @@ async fn parser_module_script_joins_inflight_same_url_modulepreload_failure() {
             "modulepreload integrity failed",
         );
         assert!(
-            run_next_main_module_fetch_terminal_for_test(&mut page_vm)
+            run_next_main_module_fetch_terminal_for_test(&mut page_vm).await
                 .expect("modulepreload completion should run")
                 .is_some(),
             "modulepreload completion should be consumed"
         );
-        run_next_native_module_owner_event_for_test(
-            &mut page_vm,
-            &loader,
-            "same-URL joined modulepreload failure",
-        )
+        run_next_native_module_owner_event_for_test(&mut page_vm,
+"same-URL joined modulepreload failure")
         .await;
         assert!(
             !page_vm.has_pending_parser_owned_module_fetch(),
@@ -13864,11 +13443,8 @@ async fn parser_module_script_joins_inflight_same_url_modulepreload_failure() {
             page_vm.has_pending_parser_owned_module_script(),
             "same-URL joined parser graph failure should wait for the document-owned ready dispatch"
         );
-        run_ready_parser_deferred_body_for_test(
-            &mut page_vm,
-            &loader,
-            "same-URL joined modulepreload failure",
-        )
+        run_ready_parser_deferred_body_for_test(&mut page_vm,
+"same-URL joined modulepreload failure")
         .await;
         assert!(
             !page_vm.has_pending_parser_owned_module_script(),
@@ -13908,10 +13484,7 @@ async fn document_replacement_drops_parser_pending_module_tree_owner() {
 
         let parser_module_work = install_parser_module_defer_work(&mut page_vm, module_script);
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                parser_module_work,
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(parser_module_work)
             .await
             .expect("module defer page task should watch loading pending tree");
         assert!(
@@ -13929,10 +13502,7 @@ async fn document_replacement_drops_parser_pending_module_tree_owner() {
             "document.open(); document.write('<!doctype html><p>replacement</p>'); document.close();",
         );
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                classic_defer_work(replacement_script),
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(classic_defer_work(replacement_script))
             .await
             .expect("replacement script task should run");
 
@@ -13945,7 +13515,6 @@ async fn document_replacement_drops_parser_pending_module_tree_owner() {
             "document replacement must drop parser pending module scripts"
         );
 
-        let replacement_document_url = page_vm.vm().document_runtime.document_url().clone();
         page_vm
             .vm()
             .resource_completion_sender_for_test()
@@ -13960,13 +13529,10 @@ async fn document_replacement_drops_parser_pending_module_tree_owner() {
                     ),
                 )),
                 None,
-                MainModuleFetchNetworkAttribution::new(
-                    replacement_document_url,
-                    module_url.clone(),
-                ),
+                module_url.clone(),
             ))
             .expect("stale exact parser terminal should still enter the stable Page source");
-        let outcome = run_next_resource_completion_as_typed_page_turn(&mut page_vm)
+        let outcome = run_next_resource_result_as_typed_page_turn(&mut page_vm).await
             .expect("old module graph completion should consume one typed turn");
         assert!(
             matches!(
@@ -14022,10 +13588,7 @@ async fn stale_main_parser_module_terminal_drops_after_pending_script_retirement
             "document.open(); document.write('<!doctype html><p>replacement</p>'); document.close();",
         );
         page_vm
-            .execute_post_parse_page_owned_task_on_named_owner_lane(
-                &loader,
-                classic_defer_work(replacement_script),
-            )
+            .execute_post_parse_page_owned_task_on_named_owner_lane(classic_defer_work(replacement_script))
             .await
             .expect("replacement script task should run");
         let stale_pending_script_id =
@@ -14093,7 +13656,7 @@ async fn stale_main_parser_module_terminal_drops_after_pending_script_retirement
         );
 
         assert!(
-            !run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm, &loader)
+            !run_one_parser_owned_main_document_runtime_turn_for_test(&mut page_vm)
                 .await
                 .expect("stale parser module ready lane should remain idle"),
             "retired PendingScript terminal must not reach owner-specific execution"
@@ -14979,9 +14542,9 @@ async fn drive_page_work_until_done_with_explicit_producer_admission(
             .await?
             .is_some()
         {}
-        let loader = page_vm.main_document_resource_loader();
+
         if page_vm
-            .run_one_oldest_ready_page_task_on_owner_lane_for_test(loader.request_client())
+            .run_one_oldest_ready_page_task_on_owner_lane_for_test()
             .await?
         {
             continue;
@@ -14993,15 +14556,11 @@ async fn drive_page_work_until_done_with_explicit_producer_admission(
         {
             continue;
         }
-        page_vm
-            .advance_timers_until_deadline_for_test(loader.request_client())
-            .await?;
+        page_vm.advance_timers_until_deadline_for_test().await?;
         if page_vm.vm_mut().eval(done_expression)? == "true" {
             return Ok(());
         }
-        page_vm
-            .advance_timers_until_deadline_for_test(loader.request_client())
-            .await?;
+        page_vm.advance_timers_until_deadline_for_test().await?;
         if page_vm.vm_mut().eval(done_expression)? == "true" {
             return Ok(());
         }
@@ -15017,10 +14576,7 @@ async fn drive_page_work_until_done_with_explicit_producer_admission(
                 .await?
                 .is_some()
             {}
-            let loader = page_vm.main_document_resource_loader();
-            page_vm
-                .advance_timers_until_deadline_for_test(loader.request_client())
-                .await?;
+            page_vm.advance_timers_until_deadline_for_test().await?;
             if page_vm.vm_mut().eval(done_expression)? == "true" {
                 return Ok(());
             }
@@ -15032,14 +14588,12 @@ async fn drive_page_work_until_done_with_explicit_producer_admission(
         .await?
         .is_some()
     {}
-    let loader = page_vm.main_document_resource_loader();
+
     while page_vm
-        .run_one_oldest_ready_page_task_on_owner_lane_for_test(loader.request_client())
+        .run_one_oldest_ready_page_task_on_owner_lane_for_test()
         .await?
     {}
-    page_vm
-        .advance_timers_until_deadline_for_test(loader.request_client())
-        .await?;
+    page_vm.advance_timers_until_deadline_for_test().await?;
     if page_vm.vm_mut().eval(done_expression)? != "true" {
         let events = page_vm
             .vm_mut()
@@ -15116,9 +14670,9 @@ pub(super) async fn drain_page_work_until_no_pending_subresources(
             .await?
             .is_some()
         {}
-        let loader = page_vm.main_document_resource_loader();
+
         while page_vm
-            .run_one_oldest_ready_page_task_on_owner_lane_for_test(loader.request_client())
+            .run_one_oldest_ready_page_task_on_owner_lane_for_test()
             .await?
         {}
         if page_vm.pending_subresource_request_count() == 0 {
@@ -15135,9 +14689,9 @@ pub(super) async fn drain_page_work_until_no_pending_subresources(
         .await?
         .is_some()
     {}
-    let loader = page_vm.main_document_resource_loader();
+
     while page_vm
-        .run_one_oldest_ready_page_task_on_owner_lane_for_test(loader.request_client())
+        .run_one_oldest_ready_page_task_on_owner_lane_for_test()
         .await?
     {}
     anyhow::bail!(

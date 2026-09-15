@@ -85,7 +85,10 @@ impl Drop for CompletedResourceFetch {
                         Err(ResourceResponseFailure::PartialBody { response, .. }) => {
                             Some(response.as_ref())
                         }
-                        Err(ResourceResponseFailure::Request(_)) => None,
+                        Err(
+                            ResourceResponseFailure::Request(_)
+                            | ResourceResponseFailure::Network { .. },
+                        ) => None,
                     };
                     let failure = self
                         .response
@@ -242,6 +245,7 @@ struct ManualCorsRedirectState {
     request: Request,
     preflight_request_headers: Vec<(String, String)>,
     redirect_chain: Vec<RedirectInfo>,
+    observations: moli_fetch::NetworkObservationJournal,
 }
 
 impl ManualCorsRedirectState {
@@ -250,6 +254,7 @@ impl ManualCorsRedirectState {
             request,
             preflight_request_headers,
             redirect_chain: Vec::new(),
+            observations: Default::default(),
         }
     }
 
@@ -341,6 +346,20 @@ impl ManualCorsRedirectState {
     fn into_redirect_chain(self) -> Vec<RedirectInfo> {
         self.redirect_chain
     }
+
+    fn failure(self, error: anyhow::Error) -> ResourceResponseFailure {
+        ResourceResponseFailure::Network {
+            message: format!("{error:#}"),
+            context: Arc::new(
+                moli_fetch::NetworkFetchFailureContext::with_redirect_history(
+                    error,
+                    &self.request,
+                    self.redirect_chain,
+                    self.observations,
+                ),
+            ),
+        }
+    }
 }
 
 async fn fetch_browser_subresource_with_manual_preflight_redirects(
@@ -387,25 +406,37 @@ async fn fetch_browser_subresource_raw_stream_with_manual_preflight_redirects(
     let mut redirects = ManualCorsRedirectState::new(request, preflight_request_headers);
 
     loop {
-        redirects
+        if let Err(error) = redirects
             .run_current_hop_preflight(loader, cancel_handle.clone(), preflight_observer)
-            .await?;
+            .await
+        {
+            return Err(redirects.failure(anyhow::Error::msg(error)));
+        }
 
-        let mut observed = loader
+        let mut observed = match loader
             .fetch_raw_stream_with_cancel_and_network_metadata(
                 redirects.hop_request(),
                 cancel_handle.clone().unwrap_or_default(),
             )
             .await
-            .map_err(format_network_error)?;
+        {
+            Ok(observed) => observed,
+            Err(error) => return Err(redirects.failure(error)),
+        };
+        redirects
+            .observations
+            .append(observed.observation_journal().clone());
         let network_extra_info_available = observed.request_observation().is_some();
         let head = observed.response().head();
         match redirects.advance(head, network_extra_info_available) {
             Ok(ManualCorsRedirectTransition::FinalResponse) => {
-                let redirect_chain = redirects.into_redirect_chain();
+                let redirect_chain = redirects.redirect_chain;
                 observed.response_mut().redirected = !redirect_chain.is_empty();
                 observed.response_mut().redirect_chain = redirect_chain;
-                return Ok(observed);
+                return Ok(NetworkFetchResult::with_observation_journal(
+                    observed.into_response(),
+                    redirects.observations,
+                ));
             }
             Ok(ManualCorsRedirectTransition::ManualResponse) => return Ok(observed),
             Ok(ManualCorsRedirectTransition::FollowedRedirect) => {}
@@ -420,11 +451,9 @@ async fn fetch_browser_subresource_raw_stream_with_manual_preflight_redirects(
         // Redirect bodies are not exposed to Fetch/XHR. Finish this hop before
         // reusing the logical request's cancel handle for the redirected hop;
         // the final non-redirect response remains headers-first and streaming.
-        observed
-            .response_mut()
-            .finish()
-            .await
-            .map_err(format_network_error)?;
+        if let Err(error) = observed.response_mut().finish().await {
+            return Err(redirects.failure(error));
+        }
     }
 }
 
@@ -513,8 +542,7 @@ pub(crate) async fn fetch_browser_subresource_raw_stream_with_preflight_headers_
     let redirect_mode = request.redirect_mode;
     let result = loader
         .fetch_raw_stream_with_cancel_and_network_metadata(request, cancel_handle)
-        .await
-        .map_err(format_network_error)?;
+        .await?;
     if let Err(message) =
         validate_redirect_mode_response_head(&result.response().head(), redirect_mode)
     {
@@ -960,6 +988,72 @@ mod tests {
                 return Ok(String::from_utf8(request)?);
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_redirect_preserves_history_with_transport_or_manual_following() -> Result<()> {
+        for manual in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let origin = format!("http://{}", listener.local_addr()?);
+            let server = tokio::spawn(async move {
+                let (mut first, _) = listener.accept().await.unwrap();
+                let headers = read_http_request_text(&mut first).await.unwrap();
+                assert!(headers.starts_with("POST /start HTTP/1.1"));
+                let mut body = [0; 3];
+                first.read_exact(&mut body).await.unwrap();
+                assert_eq!(body, [0, 128, 255]);
+                first.write_all(b"HTTP/1.1 303 See Other\r\nLocation: /final\r\nX-Redirect: physical\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                first.shutdown().await.unwrap();
+                let (mut final_request, _) = listener.accept().await.unwrap();
+                let headers = read_http_request_text(&mut final_request).await.unwrap();
+                assert!(headers.starts_with("GET /final HTTP/1.1"));
+                assert!(!headers.to_ascii_lowercase().contains("content-length:"));
+                final_request.shutdown().await.unwrap();
+            });
+            let owner = ResourceRequestClient::new(&FetchConfig::default())?;
+            let headers = if manual {
+                vec![("X-Probe".into(), "original".into())]
+            } else {
+                Vec::new()
+            };
+            let mut request =
+                Request::new("POST", &format!("{origin}/start"), None, headers.clone())?
+                    .with_initiator_url(&Url::parse(&format!("{origin}/page"))?)
+                    .with_browser_request_metadata(BrowserRequestMetadata::Fetch);
+            request.body = Some(vec![0, 128, 255]);
+            assert_eq!(
+                browser_request_needs_manual_preflight_redirects(&request, &headers),
+                manual
+            );
+            let failure = tokio::time::timeout(
+                Duration::from_secs(3),
+                fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer(
+                    &owner.handle(),
+                    request,
+                    None,
+                    headers,
+                    None,
+                ),
+            )
+            .await?
+            .expect_err("final transport closes without a response head");
+            let ResourceResponseFailure::Network { context, .. } = failure else {
+                panic!("failure must retain real wire history (manual={manual}): {failure:?}")
+            };
+            let request = context.request_context().expect("final request context");
+            assert_eq!(request.current_url().as_str(), format!("{origin}/final"));
+            assert_eq!(request.request_method(), "GET");
+            assert!(request.request_body().is_none());
+            assert_eq!(request.redirect_chain().len(), 1);
+            assert_eq!(request.redirect_chain()[0].status, 303);
+            let exchanges = context.observation_journal().exchanges();
+            assert_eq!(exchanges.len(), 2, "both physical hops, manual={manual}");
+            assert_eq!(exchanges[0].response().unwrap().status(), 303);
+            assert!(exchanges[1].response().is_none());
+            assert_eq!(context.network_error_text(), "net::ERR_EMPTY_RESPONSE");
+            server.await?;
+        }
+        Ok(())
     }
 
     #[test]

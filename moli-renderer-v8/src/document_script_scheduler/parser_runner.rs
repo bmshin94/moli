@@ -82,15 +82,16 @@ impl<Owner: Copy> ParserDeferredClassicSourceLoadRequest<Owner> {
 
     pub(crate) fn start(
         self,
-        loader: &crate::network::ResourceRequestClient,
-        task_runner: crate::network::RendererResourceTaskRunner,
+        loader: &crate::network::context::DocumentResourceLoader,
     ) -> ParserDeferredClassicSourceLoad<Owner> {
         let source_load = self.shared_load.unwrap_or_else(|| {
-            SharedScriptSourceLoad::spawn_with_request_resource_type(
+            SharedScriptSourceLoad::spawn(
                 self.script,
                 loader.clone(),
-                task_runner,
                 self.document_character_set,
+                None,
+                crate::types::SubresourceRequestInitiatorType::Parser,
+                None,
                 None,
             )
         });
@@ -98,10 +99,6 @@ impl<Owner: Copy> ParserDeferredClassicSourceLoadRequest<Owner> {
             pending_script_id: self.pending_script_id,
             source_load,
         }
-    }
-
-    pub(crate) fn network_attribution_urls(&self) -> (url::Url, url::Url) {
-        (self.script.initiator_url.clone(), self.script.url.clone())
     }
 
     #[cfg(test)]
@@ -192,10 +189,6 @@ impl<Owner: Copy> ParserDeferredClassicSourceLoadCompletion<Owner> {
 
     pub(crate) fn pending_script_id(&self) -> ParserPendingScriptId<Owner> {
         self.pending_script_id
-    }
-
-    pub(crate) fn network_result(&self) -> Option<&crate::types::SharedNavigationResponseResult> {
-        self.outcome.network_result.as_ref()
     }
 }
 

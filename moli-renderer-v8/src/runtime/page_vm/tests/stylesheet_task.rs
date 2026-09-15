@@ -43,19 +43,30 @@ fn take_next_link_element_event_task_for_test(
 }
 
 async fn wait_for_stylesheet_source(
+    page_vm: &mut PageVm,
     wake_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::page_task_queue::RendererOwnerWake>,
     expected: RendererOwnerWakeSource,
 ) {
     let mut observed = Vec::new();
     let arrival = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
+            if expected == RendererOwnerWakeSource::NetworkingTask {
+                run_ready_native_resource_turns(page_vm).expect("queued native receipt");
+                if page_vm.page_task_executor_sources_for_test().has_scheduler_task_for_executor_test(|descriptor| matches!(descriptor,
+                    crate::page_task_queue::RendererPageReadyDescriptor::Networking {
+                        owner: crate::page_task_queue::RendererPageNetworkingOwner::StylesheetCompletion(_)
+                            | crate::page_task_queue::RendererPageNetworkingOwner::StyleElementEvent(_), ..
+                    })) {
+                    break;
+                }
+            }
             let wake = wake_rx
                 .recv()
                 .await
                 .expect("stylesheet Page route must remain attached");
             let source = wake.source_for_test();
             observed.push(source);
-            if source == expected {
+            if source == expected && expected != RendererOwnerWakeSource::NetworkingTask {
                 break;
             }
         }
@@ -70,7 +81,6 @@ async fn wait_for_stylesheet_source(
 async fn complete_stylesheet_preload_for_cache_hit(
     page_vm: &mut PageVm,
     wake_rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::page_task_queue::RendererOwnerWake>,
-    loader: &crate::network::ResourceRequestClient,
     href: &str,
 ) -> anyhow::Result<()> {
     let href = serde_json::to_string(href)?;
@@ -87,23 +97,26 @@ document.head.append(cachedPreload);
     page_vm
         .vm_mut()
         .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-    wait_for_stylesheet_source(wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+    wait_for_stylesheet_source(page_vm, wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
     assert!(
         page_vm
             .run_exact_selected_page_task_for_test(
-                PageSelectedTaskTestSelector::StylesheetCompletion,
-                loader,
+                PageSelectedTaskTestSelector::StylesheetCompletion
             )
             .await?,
         "the preload physical terminal should consume one exact Networking turn"
     );
-    wait_for_stylesheet_source(wake_rx, RendererOwnerWakeSource::DomManipulationTask).await;
+    wait_for_stylesheet_source(
+        page_vm,
+        wake_rx,
+        RendererOwnerWakeSource::DomManipulationTask,
+    )
+    .await;
     let event = take_next_link_element_event_task_for_test(page_vm)
         .expect("the completed preload should publish one link event");
     page_vm
         .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
             crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-            loader,
         )
         .await?;
     Ok(())
@@ -177,7 +190,9 @@ async fn completed_data_preload_settles_new_stylesheet_client_synchronously() {
         let (mut page_vm, _resource_source, mut wake_rx) =
             page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
         let href = "data:text/css,.completed-cache-hit%7Bcolor%3Argb(1%2C%202%2C%203)%7D";
-        complete_stylesheet_preload_for_cache_hit(&mut page_vm, &mut wake_rx, &loader, href)
+        complete_stylesheet_preload_for_cache_hit(&mut page_vm,
+&mut wake_rx,
+href)
             .await?;
 
         let href = serde_json::to_string(href)?;
@@ -221,10 +236,7 @@ document.head.append(cachedStyle);
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the synchronously settled stylesheet should retain one link event");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-                &loader,
-            )
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event))
             .await?;
         assert_eq!(
             page_vm
@@ -252,7 +264,9 @@ async fn completed_data_import_graph_settles_late_stylesheet_client() {
             ".late-data-imported%257Bcolor%253Argb(21%252C%252022%252C%252023)%257D",
             "%22)%3B"
         );
-        complete_stylesheet_preload_for_cache_hit(&mut page_vm, &mut wake_rx, &loader, href)
+        complete_stylesheet_preload_for_cache_hit(&mut page_vm,
+&mut wake_rx,
+href)
             .await?;
 
         let href = serde_json::to_string(href)?;
@@ -283,12 +297,9 @@ document.head.append(first);
         let first_event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the first data import client should publish one load event");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     first_event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
 
         assert_eq!(
@@ -327,10 +338,7 @@ document.head.append(second);
             "the late client event must release its exact Document load-delay binding"
         );
         page_vm
-            .finish_selected_page_dom_manipulation_task(
-                PageDomManipulationTurnAction::ConnectedStyleEvent(body.action),
-                &loader,
-            )
+            .finish_selected_page_dom_manipulation_task(PageDomManipulationTurnAction::ConnectedStyleEvent(body.action))
             .await?;
         assert_eq!(
             page_vm
@@ -373,7 +381,9 @@ async fn completed_preload_settlement_starts_imports_before_publishing_link_load
         let (mut page_vm, _resource_source, mut wake_rx) =
             page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
         let href = format!("{base_url}/cached-root.css");
-        complete_stylesheet_preload_for_cache_hit(&mut page_vm, &mut wake_rx, &loader, &href)
+        complete_stylesheet_preload_for_cache_hit(&mut page_vm,
+&mut wake_rx,
+&href)
             .await?;
 
         let href = serde_json::to_string(&href)?;
@@ -411,13 +421,10 @@ document.head.append(cachedImport);
             "the cached link event must wait for its import graph"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the cache-hit import graph should complete as Networking work"
         );
@@ -439,15 +446,12 @@ document.head.append(cachedImport);
             "[object CSSStyleSheet]|1|rgb(7, 8, 9)|"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
             .await;
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the completed cache-hit import graph should publish one link event");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-                &loader,
-            )
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__cachedImportEvents.join('|')")?,
@@ -484,7 +488,9 @@ async fn separately_appended_cache_hit_links_share_import_fetch_but_install_both
         let (mut page_vm, _resource_source, mut wake_rx) =
             page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
         let href = format!("{base_url}/shared-root.css");
-        complete_stylesheet_preload_for_cache_hit(&mut page_vm, &mut wake_rx, &loader, &href)
+        complete_stylesheet_preload_for_cache_hit(&mut page_vm,
+&mut wake_rx,
+&href)
             .await?;
 
         let href = serde_json::to_string(&href)?;
@@ -518,13 +524,10 @@ document.head.append(second);
             "both owners must synchronously install their root sheet while the shared import remains pending"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the shared import graph must complete as one Networking turn"
         );
@@ -546,18 +549,15 @@ document.head.append(second);
             "the shared terminal must install the import graph into every owner sheet"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
             .await;
         for _ in 0..2 {
             let event = take_next_link_element_event_task_for_test(&mut page_vm)
                 .expect("each current link client must publish one load event");
             page_vm
-                .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                    crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+                .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                         event,
-                    ),
-                    &loader,
-                )
+                    ))
                 .await?;
         }
         assert_eq!(
@@ -603,12 +603,9 @@ document.head.append(late);
         let late_event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the late graph replay must publish its link event");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     late_event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__sharedImportEvents.sort().join(',')")?,
@@ -637,7 +634,9 @@ async fn failed_completed_preload_settles_empty_sheet_synchronously_before_link_
         let (mut page_vm, _resource_source, mut wake_rx) =
             page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
         let href = format!("{base_url}/cached-failure.css");
-        complete_stylesheet_preload_for_cache_hit(&mut page_vm, &mut wake_rx, &loader, &href)
+        complete_stylesheet_preload_for_cache_hit(&mut page_vm,
+&mut wake_rx,
+&href)
             .await?;
 
         let href = serde_json::to_string(&href)?;
@@ -673,12 +672,9 @@ document.head.append(failedCacheHit);
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the failed cache hit should publish one link error task");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__failedCacheHitEvents.join('|')")?,
@@ -707,7 +703,9 @@ async fn posted_cache_hit_events_follow_link_and_document_lifetimes() {
         let (mut page_vm, _resource_source, mut wake_rx) =
             page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
         let href = format!("{base_url}/checkpoint-cache-hit.css");
-        complete_stylesheet_preload_for_cache_hit(&mut page_vm, &mut wake_rx, &loader, &href)
+        complete_stylesheet_preload_for_cache_hit(&mut page_vm,
+&mut wake_rx,
+&href)
             .await?;
         let href = serde_json::to_string(&href)?;
 
@@ -733,12 +731,9 @@ Promise.resolve().then(() => __hrefInvalidatedCacheHit.removeAttribute("href"));
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the already-posted href-invalidated event should remain selectable");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__retiredCacheHitEvents.join(',')")?,
@@ -767,12 +762,9 @@ Promise.resolve().then(() => __disconnectedCacheHit.remove());
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the already-posted disconnected event should remain selectable");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__retiredCacheHitEvents.join(',')")?,
@@ -800,12 +792,9 @@ Promise.resolve().then(() => {{
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the old Document's already-posted event should remain selectable");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__retiredCacheHitEvents.join(',')")?,
@@ -847,7 +836,12 @@ document.head.append(physical);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
 
         page_vm
             .vm_mut()
@@ -861,10 +855,9 @@ document.head.append(physical);
             .expect("the physical stylesheet completion must remain in its Networking source");
         let outcome = page_vm.apply_selected_page_stylesheet_networking_turn(task)?;
         page_vm
-            .finish_selected_page_networking_task(
-                PageNetworkingTurnAction::StylesheetCompletion(outcome.action),
-                &loader,
-            )
+            .finish_selected_page_networking_task(PageNetworkingTurnAction::StylesheetCompletion(
+                outcome.action,
+            ))
             .await?;
         assert!(
             page_vm.has_ready_dom_manipulation_task_for_test(),
@@ -896,7 +889,7 @@ document.head.append(link);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
 
         queue_stylesheet_checkpoint_marker(&mut page_vm, "__stylesheetBodyCheckpoint")?;
         page_vm.vm_mut().enqueue_test_pending_runtime_source_load();
@@ -959,15 +952,19 @@ document.head.append(link);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
 
         queue_stylesheet_checkpoint_marker(&mut page_vm, "__selectedStylesheetCheckpoint")?;
         page_vm.vm_mut().enqueue_test_pending_runtime_source_load();
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?,
             "one exact StylesheetCompletion task must enter the production selected dispatcher",
@@ -1034,7 +1031,7 @@ document.head.append(retired);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         let claimed = page_vm
             .claim_exact_selected_page_task_for_test(
                 PageSelectedTaskTestSelector::StylesheetCompletion,
@@ -1053,7 +1050,7 @@ document.head.append(retired);
         page_vm.vm_mut().enqueue_test_pending_runtime_source_load();
 
         page_vm
-            .run_claimed_selected_page_task_for_test(claimed, &loader)
+            .run_claimed_selected_page_task_for_test(claimed)
             .await?;
         assert_eq!(
             stylesheet_checkpoint_marker(&mut page_vm, "__staleStylesheetCheckpoint")?,
@@ -1123,13 +1120,10 @@ document.head.append(retired);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the root stylesheet terminal should start its linked import graph"
         );
@@ -1143,7 +1137,7 @@ document.head.append(retired);
         );
         let _ = page_vm.vm_mut().take_network_output();
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         let stale_task = page_vm
             .take_stylesheet_networking_body_task_for_test()
             .expect("the delayed linked import terminal should remain selectable");
@@ -1218,10 +1212,7 @@ document.write('<!doctype html><html><head><link id="replacement-blocker" rel="s
             "a stale import terminal must not derive work in Document B"
         );
         page_vm
-            .finish_selected_page_networking_task(
-                PageNetworkingTurnAction::StylesheetCompletion(outcome.action),
-                &loader,
-            )
+            .finish_selected_page_networking_task(PageNetworkingTurnAction::StylesheetCompletion(outcome.action))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__replacementParserTail")?,
@@ -1284,10 +1275,9 @@ document.head.appendChild(style);
         );
 
         page_vm
-            .finish_selected_page_networking_task(
-                PageNetworkingTurnAction::StyleElementEvent(body.action),
-                &loader,
-            )
+            .finish_selected_page_networking_task(PageNetworkingTurnAction::StyleElementEvent(
+                body.action,
+            ))
             .await?;
         assert_eq!(
             page_vm
@@ -1335,10 +1325,7 @@ document.head.appendChild(style);
 
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StyleElementEvent,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StyleElementEvent)
                 .await?,
             "one exact connected-style event must enter the production selected dispatcher"
         );
@@ -1402,12 +1389,16 @@ async fn failed_inline_import_transitions_from_null_to_an_empty_child_stylesheet
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?,
             "the failed inline import must complete as Networking work",
@@ -1431,10 +1422,9 @@ async fn failed_inline_import_transitions_from_null_to_an_empty_child_stylesheet
             .expect("the failed inline graph must publish one style event");
         let body = page_vm.apply_selected_page_connected_style_event_turn(task)?;
         page_vm
-            .finish_selected_page_networking_task(
-                PageNetworkingTurnAction::StyleElementEvent(body.action),
-                &loader,
-            )
+            .finish_selected_page_networking_task(PageNetworkingTurnAction::StyleElementEvent(
+                body.action,
+            ))
             .await?;
         assert_eq!(
             page_vm
@@ -1501,13 +1491,10 @@ document.head.append(link);
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the root stylesheet response must complete as Networking work"
         );
@@ -1524,13 +1511,10 @@ document.head.append(link);
             "the link event must wait for the complete nested import graph"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the native import graph must complete as one exact Networking turn"
         );
@@ -1566,17 +1550,14 @@ document.head.append(link);
             "true|true|true|true|true|true|true|true|2|2|rgb(1, 2, 3)|rgb(4, 5, 6)|rgb(7, 8, 9)|"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
             .await;
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the completed native graph must publish one link event");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__nativeImportEvents.join('|')")?,
@@ -1636,23 +1617,17 @@ document.head.append(link);
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the same-origin root stylesheet must complete first"
         );
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the cross-origin import graph must complete separately"
         );
@@ -1688,17 +1663,14 @@ document.head.append(link);
             "2|true|true|true|SecurityError:true|rgb(1, 2, 3)|rgb(4, 5, 6)|"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
             .await;
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the cross-origin graph must publish one link event");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm
@@ -1776,12 +1748,16 @@ document.head.append(link);
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?
         );
@@ -1792,12 +1768,16 @@ document.head.append(link);
                 .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
             "the parser must remain blocked while the failing import is pending"
         );
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?
         );
@@ -1835,7 +1815,6 @@ document.head.append(link);
         page_vm
             .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
                 crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-                &loader,
             )
             .await?;
         assert_eq!(
@@ -1845,8 +1824,7 @@ document.head.append(link);
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::MainParserContinuation,
-                    &loader,
+                    PageSelectedTaskTestSelector::MainParserContinuation
                 )
                 .await?,
             "the parser continuation must remain independently selectable"
@@ -1905,26 +1883,20 @@ document.head.append(link);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?
         );
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
             .await;
         let initial_event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("initial link load event");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                     initial_event,
-                ),
-                &loader,
-            )
+                ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__dynamicImportEvents.join('|')")?,
@@ -1942,13 +1914,10 @@ document.head.append(link);
 }})()
 "#,
         ))?;
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(&mut page_vm, &mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the deleted edge's physical terminal remains observable Networking work"
         );
@@ -2023,10 +1992,9 @@ document.head.appendChild(style);
         assert_ne!(retired_owner, current_owner);
 
         page_vm
-            .finish_selected_page_networking_task(
-                PageNetworkingTurnAction::StyleElementEvent(body.action),
-                &loader,
-            )
+            .finish_selected_page_networking_task(PageNetworkingTurnAction::StyleElementEvent(
+                body.action,
+            ))
             .await?;
         assert_eq!(
             page_vm.vm_mut().eval(
@@ -2085,8 +2053,7 @@ details.open = true;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StyleElementEvent,
-                    &loader,
+                    PageSelectedTaskTestSelector::StyleElementEvent
                 )
                 .await?,
             "<style> should consume its Networking turn"
@@ -2102,8 +2069,7 @@ details.open = true;
                 .run_exact_selected_page_task_for_test(
                     PageSelectedTaskTestSelector::DomManipulation(
                         PageDomManipulationTestFamily::ElementToggle
-                    ),
-                    &loader,
+                    )
                 )
                 .await?,
             "element toggle should consume its DOM-manipulation turn"
@@ -2178,8 +2144,7 @@ document.head.appendChild(currentStyle);
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StyleElementEvent,
-                    &loader,
+                    PageSelectedTaskTestSelector::StyleElementEvent
                 )
                 .await?,
             "retired connected-style event must remain a concrete stale turn"
@@ -2195,8 +2160,7 @@ document.head.appendChild(currentStyle);
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StyleElementEvent,
-                    &loader,
+                    PageSelectedTaskTestSelector::StyleElementEvent
                 )
                 .await?,
             "replacement connected-style event must survive the stale head"
@@ -2264,12 +2228,16 @@ document.close();
             .expect("replacement main Document owner should exist");
         assert_ne!(retired_owner, current_owner);
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?,
             "retired stylesheet completion should consume one exact Networking turn",
@@ -2293,26 +2261,33 @@ document.head.append(current);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?,
             "replacement stylesheet completion should consume one exact Networking turn",
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
-            .await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::DomManipulationTask,
+        )
+        .await;
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("replacement stylesheet event should consume one DOM-manipulation turn");
         assert_eq!(event.owner().document_owner(), current_owner);
         page_vm
             .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
                 crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-                &loader,
             )
             .await?;
         assert_eq!(
@@ -2368,12 +2343,16 @@ for (const id of ["first", "second"]) {
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?,
             "shared stylesheet completion must enter the production selected dispatcher"
@@ -2395,7 +2374,6 @@ for (const id of ["first", "second"]) {
                     crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
                         event,
                     ),
-                    &loader,
                 )
                 .await?;
             assert_eq!(
@@ -2413,8 +2391,7 @@ for (const id of ["first", "second"]) {
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::MainParserContinuation,
-                    &loader,
+                    PageSelectedTaskTestSelector::MainParserContinuation
                 )
                 .await?,
             "the coalesced parser continuation must remain independently selectable"
@@ -2494,13 +2471,15 @@ document.head.append(blockingImport);
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the root stylesheet must complete as one Networking turn"
         );
@@ -2512,7 +2491,10 @@ document.head.append(blockingImport);
             "root settlement must not release the parser while its nested import graph is pending"
         );
         assert!(
-            !page_vm.has_ready_page_networking_task(),
+            !page_vm.page_task_executor_sources_for_test().has_scheduler_task_for_executor_test(|descriptor| matches!(descriptor,
+                crate::page_task_queue::RendererPageReadyDescriptor::Networking {
+                    owner: crate::page_task_queue::RendererPageNetworkingOwner::MainParserContinuation(_), ..
+                })),
             "a pending import graph must not publish an early parser continuation"
         );
         assert!(
@@ -2520,13 +2502,15 @@ document.head.append(blockingImport);
             "the link event must also wait for the complete import graph"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::StylesheetCompletion)
                 .await?,
             "the nested import graph must complete as one Networking turn"
         );
@@ -2543,17 +2527,11 @@ document.head.append(blockingImport);
         let event = take_next_link_element_event_task_for_test(&mut page_vm)
             .expect("the completed root link event must be independently selectable");
         page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-                &loader,
-            )
+            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event))
             .await?;
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::MainParserContinuation,
-                    &loader,
-                )
+                .run_exact_selected_page_task_for_test(PageSelectedTaskTestSelector::MainParserContinuation)
                 .await?,
             "the parser continuation must remain independently selectable"
         );
@@ -2635,6 +2613,7 @@ document.head.append(removedBlocking);
                 .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
             "disconnecting the owner must remove its exact parser blocker"
         );
+        run_ready_native_resource_turns(&mut page_vm)?;
         assert!(
             page_vm.has_ready_page_networking_task(),
             "removing the last blocker must wake the parser"
@@ -2646,8 +2625,7 @@ document.head.append(removedBlocking);
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::MainParserContinuation,
-                    &loader,
+                    PageSelectedTaskTestSelector::MainParserContinuation
                 )
                 .await?
         );
@@ -2693,12 +2671,16 @@ document.head.append(dynamicStyle);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        wait_for_stylesheet_source(
+            &mut page_vm,
+            &mut wake_rx,
+            RendererOwnerWakeSource::NetworkingTask,
+        )
+        .await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::StylesheetCompletion,
-                    &loader,
+                    PageSelectedTaskTestSelector::StylesheetCompletion
                 )
                 .await?
         );
@@ -2709,7 +2691,7 @@ document.head.append(dynamicStyle);
         assert!(page_vm.has_ready_dom_manipulation_task_for_test());
         assert!(
             page_vm
-                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test()
                 .await?
         );
         assert_eq!(

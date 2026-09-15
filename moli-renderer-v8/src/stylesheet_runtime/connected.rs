@@ -6,7 +6,9 @@ use crate::link_as::{LinkAsDestination, link_as_destination};
 use crate::module_runtime::{
     ModuleMapKey, NativeModuleSingleFetchRequest, NativeModulepreloadLinkClient,
 };
+use crate::network::context::{DocumentResourceLoader, ResourceResponseProvenance};
 use crate::planning::{ScriptFetchMetadata, module_script_credentials_mode};
+#[cfg(test)]
 use crate::service_worker_runtime::ServiceWorkerRequestDestination;
 use crate::stylesheet_blocking::{
     StylesheetFetchOptions, connected_preload_like_link_url,
@@ -1047,11 +1049,10 @@ impl DocumentRuntime {
                 .expect("live dom host must retain a document url")
                 .clone();
             let start_unix_millis = moli_time::unix_epoch_millis();
-            let resource_task_runner = resource_loader.task_runner();
+            let task_loader = resource_loader.clone();
             resource_loader.spawn_resource_task(async move {
                 let result = fetch_connected_link_readiness_with_service_worker(
-                    loader,
-                    resource_task_runner,
+                    task_loader,
                     document_url.clone(),
                     url.clone(),
                     fetch_options,
@@ -1068,7 +1069,6 @@ impl DocumentRuntime {
                         blocking_operation: None,
                         source_operation: None,
                         import_roots: Vec::new(),
-                        document_url,
                         request_url: url,
                         source_owners: vec![handle],
                         resource_type,
@@ -2094,59 +2094,41 @@ async fn fetch_connected_link_readiness(
 }
 
 async fn fetch_connected_link_readiness_with_service_worker(
-    loader: ResourceRequestClient,
-    resource_task_runner: crate::network::RendererResourceTaskRunner,
+    loader: DocumentResourceLoader,
     document_url: Url,
     url: Url,
     options: ConnectedLinkReadinessFetchOptions,
     service_worker_context: Option<ServiceWorkerConnectedLinkContext>,
 ) -> Result<ConnectedLinkReadinessFetchResponse, String> {
     let request = connected_link_readiness_request(&document_url, &url, &options);
-    if let (Some(context), Some(destination)) = (
-        service_worker_context,
-        ServiceWorkerRequestDestination::for_subresource_resource_type(options.resource_type),
-    ) {
-        match context
-            .browser_context_runtime
-            .fetch_service_worker_subresource_for_client_with_metadata(
-                context.client_id,
-                document_url.clone(),
-                &request,
-                &loader,
-                resource_task_runner.clone(),
-                destination,
-                options.resource_type,
-            )
-            .await
-        {
-            Ok(Some(response)) => {
-                let response_filter = response.response_filter;
-                let origin_clean =
-                    connected_link_origin_clean_from_service_worker_filter(response_filter);
-                let response = *response.response;
-                let load_event_successful =
-                    connected_link_load_event_successful(&response, response_filter);
-                return Ok(ConnectedLinkReadinessFetchResponse::new(
-                    response,
-                    origin_clean,
-                    load_event_successful,
-                ));
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(format!(
-                    "failed to fetch preload-like link `{url}` through service worker: {error}"
-                ));
-            }
-        }
+    let mut loader = loader;
+    if let Some(context) = service_worker_context {
+        loader.bind_service_worker(context.browser_context_runtime, context.client_id);
     }
-    fetch_connected_link_readiness_with_request(loader, url, options, request, resource_task_runner)
+    let (response, provenance) = loader
+        .fetch_resource(
+            request,
+            options.resource_type,
+            crate::types::SubresourceRequestInitiatorType::Parser,
+        )
         .await
-        .map(|response| {
-            let load_event_successful = connected_link_load_event_successful(&response, None);
-            let origin_clean = moli_url::same_origin(&document_url, &response.final_url);
-            ConnectedLinkReadinessFetchResponse::new(response, origin_clean, load_event_successful)
-        })
+        .map_err(|error| format!("failed to fetch preload-like link `{url}`: {error}"))?;
+    let (origin_clean, filter) = match provenance {
+        ResourceResponseProvenance::Network => (
+            moli_url::same_origin(&document_url, &response.final_url),
+            None,
+        ),
+        ResourceResponseProvenance::ServiceWorker { filter } => (
+            connected_link_origin_clean_from_service_worker_filter(filter),
+            filter,
+        ),
+    };
+    let successful = connected_link_load_event_successful(&response, filter);
+    Ok(ConnectedLinkReadinessFetchResponse::new(
+        response,
+        origin_clean,
+        successful,
+    ))
 }
 
 fn connected_link_readiness_request(
@@ -2232,6 +2214,7 @@ fn connected_link_load_event_successful(
     }
 }
 
+#[cfg(test)]
 async fn fetch_connected_link_readiness_with_request(
     loader: ResourceRequestClient,
     url: Url,
@@ -2239,15 +2222,14 @@ async fn fetch_connected_link_readiness_with_request(
     request: moli_fetch::Request,
     task_runner: crate::network::RendererResourceTaskRunner,
 ) -> Result<crate::protocol_types::NavigationResponse, String> {
-    let response = if options.resource_type == SubresourceResourceType::Script {
-        loader
-            .fetch_cacheable_script_text_stream(request, task_runner)
-            .await
-    } else {
-        loader.fetch_text_stream(request).await
-    };
-    response
-        .map(crate::protocol_types::NavigationResponse::from)
+    crate::network::context::DocumentResourceLoader::for_test(loader, task_runner, url.clone())
+        .fetch_resource(
+            request,
+            options.resource_type,
+            crate::types::SubresourceRequestInitiatorType::Parser,
+        )
+        .await
+        .map(|(response, _)| response)
         .map_err(|error| format!("failed to fetch preload-like link `{url}`: {error}"))
 }
 
@@ -3514,8 +3496,16 @@ mod tests {
         let loader = loader_owner.handle();
         let fetcher =
             crate::stylesheet_blocking::RendererStylesheetFetcher::for_speculative_preload(
-                loader,
-                crate::network::RendererResourceTaskRunner::from_current_tokio()?,
+                DocumentResourceLoader::new(
+                    loader,
+                    crate::network::RendererResourceTaskRunner::from_current_tokio()?,
+                    crate::network::context::DocumentFetchContext::new(
+                        crate::native_bridge::WindowDocumentOwner::for_test(1),
+                        document_url.clone(),
+                        document_url.clone(),
+                        moli_url::origin_ascii_serialization(&document_url),
+                    ),
+                ),
                 None,
                 RequestResourceType::CssStyleSheet,
                 true,
@@ -4817,12 +4807,12 @@ mod tests {
                 scheduler_priority: None,
             });
 
-        let script_response = loader
-            .fetch_cacheable_script_text_stream(
-                script_request,
-                crate::network::RendererResourceTaskRunner::for_test(),
-            )
-            .await?;
+        let document = crate::network::context::DocumentResourceLoader::for_test(
+            loader.clone(),
+            crate::network::RendererResourceTaskRunner::for_test(),
+            document_url.clone(),
+        );
+        let script_response = document.fetch_script_for_test(script_request).await?;
         server.await?;
 
         let link_response = fetch_connected_link_readiness(

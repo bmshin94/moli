@@ -6,6 +6,7 @@ pub(super) struct ParseTimeDriverState {
     pub(super) final_url: Url,
     pub(super) document_character_set: String,
     pub(super) parser_session: DocumentParserSession,
+    pub(super) initial_document: Option<crate::script_vm::MainDocumentBootstrap>,
     pub(super) scheduler: DocumentScriptScheduler,
     pub(super) pending_parsing_blocking_script: PendingParsingBlockingClassicScriptRunner,
     pub(super) buffered_document_preloads: Box<BufferedDocumentPreloadState>,
@@ -26,6 +27,7 @@ impl ParseTimeDriverState {
                 scripting_enabled,
             ),
             final_url,
+            initial_document: None,
             document_character_set: "UTF-8".to_owned(),
             scheduler: DocumentScriptScheduler::new(),
             pending_parsing_blocking_script: PendingParsingBlockingClassicScriptRunner::empty(),
@@ -39,6 +41,7 @@ impl ParseTimeDriverState {
         Self {
             parser_session: DocumentParserSession::start_main_xml_document(final_url.clone()),
             final_url,
+            initial_document: None,
             document_character_set: "UTF-8".to_owned(),
             scheduler: DocumentScriptScheduler::new(),
             pending_parsing_blocking_script: PendingParsingBlockingClassicScriptRunner::empty(),
@@ -46,6 +49,21 @@ impl ParseTimeDriverState {
             service_worker_preload_context: None,
             input_closed: false,
         }
+    }
+
+    pub(super) fn prepare_main_document(
+        &mut self,
+        page_id: PageId,
+        hooks: &mut PageVmRuntimeHooks,
+        loader: &ResourceRequestClient,
+    ) -> Result<()> {
+        let document = self
+            .parser_session
+            .with_initial_document(|dom| hooks.prepare_main_document(page_id, dom, loader))?;
+        self.buffered_document_preloads
+            .bind_resource_runtime(hooks.owner_wake(), document.resource_loader.clone());
+        self.initial_document = Some(document);
+        Ok(())
     }
 
     pub(super) fn close_input(&mut self) {
@@ -89,7 +107,6 @@ impl PendingParsingBlockingWait {
 }
 
 pub(in crate::runtime) struct ConcurrentParseTimeRuntime {
-    pub(super) loader: ResourceRequestClient,
     pub(super) stage: PageVmInitStage,
     pub(super) state: ParseTimeDriverState,
     pub(super) page_vm: PageVm,
@@ -221,14 +238,7 @@ impl ConcurrentParseTimeRuntime {
             .vm_mut()
             .document_runtime
             .activate_main_parser_continuation(parser_document_owner);
-        // Once the Document exists, parser preloads and document.write must
-        // share its loading context, not the pre-bootstrap transport client.
-        let loader = page_vm
-            .main_document_resource_loader()
-            .request_client()
-            .clone();
         Self {
-            loader,
             stage,
             state,
             page_vm,

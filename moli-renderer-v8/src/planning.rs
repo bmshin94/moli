@@ -9,11 +9,18 @@ use moli_web_mime::{
 };
 use parking_lot::Mutex;
 use tokio::sync::Notify;
-use url::Url;
 
 use crate::{
-    network::{RendererResourceTaskRunner, ResourceRequestClient},
-    types::{ScriptKind, ScriptMode, SharedNavigationResponseResult},
+    network::{
+        RendererResourceTaskRunner,
+        context::{DocumentResourceLoader, ResourceResponseProvenance},
+    },
+    runtime::RendererBrowserContextRuntime,
+    service_worker_runtime::ServiceWorkerClientId,
+    types::{
+        ScriptKind, ScriptMode, SharedNavigationResponseResult, SubresourceRequestInitiatorType,
+        SubresourceResourceType,
+    },
 };
 
 pub(crate) use moli_parser::{
@@ -69,40 +76,27 @@ impl SharedScriptSourceLoad {
             }),
         }
     }
-    pub(crate) fn spawn_with_request_resource_type(
+    pub(crate) fn spawn(
         script: PreparedScript,
-        loader: ResourceRequestClient,
-        task_runner: RendererResourceTaskRunner,
+        mut loader: DocumentResourceLoader,
         document_character_set: Option<String>,
         request_resource_type: Option<moli_fetch::RequestResourceType>,
-    ) -> Self {
-        Self::spawn_with_request_resource_type_and_owner_wake(
-            script,
-            loader,
-            task_runner,
-            document_character_set,
-            request_resource_type,
-            None,
-        )
-    }
-
-    pub(crate) fn spawn_with_request_resource_type_and_owner_wake(
-        script: PreparedScript,
-        loader: ResourceRequestClient,
-        task_runner: RendererResourceTaskRunner,
-        document_character_set: Option<String>,
-        request_resource_type: Option<moli_fetch::RequestResourceType>,
+        initiator: SubresourceRequestInitiatorType,
+        service_worker: Option<(RendererBrowserContextRuntime, ServiceWorkerClientId)>,
         owner_wake: Option<crate::page_task_queue::RendererOwnerWakeSender>,
     ) -> Self {
-        let fetch_task_runner = task_runner.clone();
+        if let Some((runtime, client_id)) = service_worker {
+            loader.bind_service_worker(runtime, client_id);
+        }
+        let task_runner = loader.task_runner();
         Self::spawn_outcome_with_owner_wake(
             async move {
-                load_prepared_script_source_outcome_with_document_character_set(
+                load_script_source(
                     &script,
                     &loader,
                     document_character_set.as_deref(),
                     request_resource_type,
-                    fetch_task_runner,
+                    initiator,
                 )
                 .await
             },
@@ -297,18 +291,12 @@ pub(crate) struct PreparedScriptSourceLoadOutcome {
     pub(crate) network_result: Option<SharedNavigationResponseResult>,
 }
 
-pub(crate) fn script_preload_network_result(
-    network_result: Option<SharedNavigationResponseResult>,
-) -> Option<SharedNavigationResponseResult> {
-    network_result
-}
-
-pub(crate) async fn load_prepared_script_source_outcome_with_document_character_set(
+pub(crate) async fn load_script_source(
     script: &PreparedScript,
-    loader: &ResourceRequestClient,
+    loader: &DocumentResourceLoader,
     document_character_set: Option<&str>,
     request_resource_type: Option<moli_fetch::RequestResourceType>,
-    task_runner: RendererResourceTaskRunner,
+    initiator: SubresourceRequestInitiatorType,
 ) -> PreparedScriptSourceLoadOutcome {
     match &script.source {
         ScriptSource::Inline(source) | ScriptSource::Loaded(source) => {
@@ -324,32 +312,34 @@ pub(crate) async fn load_prepared_script_source_outcome_with_document_character_
             network_result: None,
         },
         ScriptSource::External => {
-            if let Some(outcome) = local_or_unsupported_external_script_source_load_outcome(
+            if let Some(outcome) = immediate_external_script_source_load_outcome(
                 script,
+                loader,
                 document_character_set,
+                initiator,
             ) {
                 return outcome;
             }
             let request = external_script_request(script, request_resource_type);
-            // Box the streaming fetch future so parser/script planning does not
-            // inherit the chunk collector's larger state machine across awaits.
-            match Box::pin(loader.fetch_cacheable_script_text_stream(request, task_runner)).await {
-                Ok(response) => {
-                    let response = crate::protocol_types::NavigationResponse::from(response);
-                    external_script_source_load_outcome_from_response(
+            match Box::pin(loader.fetch_resource(
+                request,
+                SubresourceResourceType::Script,
+                initiator,
+            ))
+            .await
+            {
+                Ok((response, provenance)) => {
+                    external_script_source_load_outcome_from_response_inner(
                         script,
                         response,
                         document_character_set,
+                        matches!(provenance, ResourceResponseProvenance::ServiceWorker { .. }),
                     )
                 }
-                Err(error) => {
-                    let error = format!("failed to fetch script `{}`: {error}", script.url);
-                    PreparedScriptSourceLoadOutcome {
-                        source_result: Err(error.clone()),
-                        source_bytes: None,
-                        network_result: Some(Arc::new(Err(error))),
-                    }
-                }
+                Err(error) => failed_external_script_source_load_outcome(format!(
+                    "failed to fetch script `{}`: {error}",
+                    script.url,
+                )),
             }
         }
     }
@@ -378,102 +368,77 @@ pub(crate) fn external_script_request(
         .with_script_fetch_metadata(script_fetch_request_metadata(script))
 }
 
-pub(crate) async fn load_service_worker_aware_external_script_source_outcome(
+pub(crate) fn immediate_external_script_source_load_outcome(
     script: &PreparedScript,
-    loader: &ResourceRequestClient,
-    resource_task_runner: RendererResourceTaskRunner,
+    loader: &DocumentResourceLoader,
     document_character_set: Option<&str>,
-    request_resource_type: Option<moli_fetch::RequestResourceType>,
-    browser_context_runtime: crate::runtime::RendererBrowserContextRuntime,
-    service_worker_client_id: crate::service_worker_runtime::ServiceWorkerClientId,
-    document_url: Url,
-) -> PreparedScriptSourceLoadOutcome {
-    if let Some(outcome) =
-        local_or_unsupported_external_script_source_load_outcome(script, document_character_set)
-    {
-        return outcome;
-    }
-    let request = external_script_request(script, request_resource_type);
-    match browser_context_runtime
-        .fetch_service_worker_subresource_for_client(
-            service_worker_client_id,
-            document_url,
-            &request,
-            loader,
-            resource_task_runner.clone(),
-            crate::service_worker_runtime::ServiceWorkerRequestDestination::Script,
-            crate::types::SubresourceResourceType::Script,
-        )
-        .await
-    {
-        Ok(Some(response)) => external_script_source_load_outcome_from_response_inner(
-            script,
-            response,
-            document_character_set,
-            true,
-        ),
-        Ok(None) => {
-            load_prepared_script_source_outcome_with_document_character_set(
-                script,
-                loader,
-                document_character_set,
-                request_resource_type,
-                resource_task_runner,
-            )
-            .await
-        }
-        Err(error) => {
-            let message = format!("failed to fetch script `{}`: {error}", script.url);
-            PreparedScriptSourceLoadOutcome {
-                source_result: Err(message.clone()),
-                source_bytes: None,
-                network_result: Some(Arc::new(Err(message))),
-            }
-        }
-    }
-}
-
-fn local_or_unsupported_external_script_source_load_outcome(
-    script: &PreparedScript,
-    document_character_set: Option<&str>,
+    initiator: SubresourceRequestInitiatorType,
 ) -> Option<PreparedScriptSourceLoadOutcome> {
-    match script.url.scheme() {
-        "data" => Some(PreparedScriptSourceLoadOutcome {
-            source_result: decode_data_url_script_source(&script.url)
-                .map_err(|error| error.to_string()),
-            source_bytes: None,
-            network_result: None,
-        }),
-        "blob" => Some(match crate::network_host::local_url_response(&script.url) {
-            Some(response) => {
-                let response = crate::protocol_types::NavigationResponse::from(response);
+    if !matches!(script.source, ScriptSource::External)
+        || matches!(script.url.scheme(), "http" | "https")
+    {
+        return None;
+    }
+    if !matches!(script.url.scheme(), "data" | "blob") {
+        return Some(failed_external_script_source_load_outcome(format!(
+            "failed to fetch script `{}`: URL scheme `{}` is not allowed",
+            script.url,
+            script.url.scheme(),
+        )));
+    }
+    let request = external_script_request(script, None);
+    let Some((load, network, started)) =
+        loader.prepare_resource_request(&request, SubresourceResourceType::Script, initiator)
+    else {
+        return Some(failed_external_script_source_load_outcome(
+            "Document resource owner retired".into(),
+        ));
+    };
+    network.observe(started);
+    let outcome = match crate::network_host::local_url_response(&script.url) {
+        Some(response) => {
+            network.response_completed(&response);
+            if script.url.scheme() == "data" {
+                // Preserve the synchronous strict data-URL decoding contract.
+                PreparedScriptSourceLoadOutcome {
+                    source_result: decode_data_url_script_source(&script.url)
+                        .map_err(|error| error.to_string()),
+                    source_bytes: None,
+                    network_result: None,
+                }
+            } else {
                 external_script_source_load_outcome_from_response(
                     script,
-                    response,
+                    response.into(),
                     document_character_set,
                 )
             }
-            None => failed_external_script_source_load_outcome(format!(
-                "failed to fetch script `{}`: blob URL is unavailable",
-                script.url
-            )),
-        }),
-        "http" | "https" => None,
-        scheme => Some(failed_external_script_source_load_outcome(format!(
-            "failed to fetch script `{}`: URL scheme `{scheme}` is not allowed",
-            script.url
-        ))),
-    }
-}
-
-pub(crate) fn immediate_external_script_source_load_outcome(
-    script: &PreparedScript,
-    document_character_set: Option<&str>,
-) -> Option<PreparedScriptSourceLoadOutcome> {
-    if !matches!(script.source, ScriptSource::External) {
-        return None;
-    }
-    local_or_unsupported_external_script_source_load_outcome(script, document_character_set)
+        }
+        None => {
+            let message = if script.url.scheme() == "data" {
+                decode_data_url_script_source(&script.url)
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "failed to fetch script `{}`: data URL is unavailable",
+                            script.url
+                        )
+                    })
+            } else {
+                format!(
+                    "failed to fetch script `{}`: blob URL is unavailable",
+                    script.url
+                )
+            };
+            network.failed(&crate::network::ResourceResponseFailure::Request(
+                message.clone(),
+            ));
+            failed_external_script_source_load_outcome(message)
+        }
+    };
+    load.finish();
+    Some(outcome)
 }
 
 fn failed_external_script_source_load_outcome(message: String) -> PreparedScriptSourceLoadOutcome {
@@ -482,37 +447,6 @@ fn failed_external_script_source_load_outcome(message: String) -> PreparedScript
         source_bytes: None,
         network_result: Some(Arc::new(Err(message))),
     }
-}
-
-pub(crate) fn spawn_service_worker_aware_external_script_source_load(
-    script: PreparedScript,
-    loader: ResourceRequestClient,
-    task_runner: RendererResourceTaskRunner,
-    document_character_set: Option<String>,
-    request_resource_type: Option<moli_fetch::RequestResourceType>,
-    browser_context_runtime: crate::runtime::RendererBrowserContextRuntime,
-    service_worker_client_id: crate::service_worker_runtime::ServiceWorkerClientId,
-    document_url: Url,
-    owner_wake: Option<crate::page_task_queue::RendererOwnerWakeSender>,
-) -> SharedScriptSourceLoad {
-    let fetch_task_runner = task_runner.clone();
-    SharedScriptSourceLoad::spawn_outcome_with_owner_wake(
-        async move {
-            load_service_worker_aware_external_script_source_outcome(
-                &script,
-                &loader,
-                fetch_task_runner,
-                document_character_set.as_deref(),
-                request_resource_type,
-                browser_context_runtime,
-                service_worker_client_id,
-                document_url,
-            )
-            .await
-        },
-        task_runner,
-        owner_wake,
-    )
 }
 
 pub(crate) fn external_script_source_load_outcome_from_response(
@@ -935,8 +869,21 @@ mod tests {
             "data:text/javascript,globalThis.localSource%3Dtrue",
             ScriptKind::Classic,
         );
-        let data_outcome = immediate_external_script_source_load_outcome(&data, Some("utf-8"))
-            .expect("data URL source should be synchronously terminal");
+        let client =
+            crate::network::ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
+                .unwrap();
+        let loader = DocumentResourceLoader::for_test(
+            client.handle(),
+            RendererResourceTaskRunner::for_test(),
+            data.initiator_url.clone(),
+        );
+        let data_outcome = immediate_external_script_source_load_outcome(
+            &data,
+            &loader,
+            Some("utf-8"),
+            SubresourceRequestInitiatorType::Parser,
+        )
+        .expect("data URL source should be synchronously terminal");
         assert_eq!(
             data_outcome.source_result.expect("decoded data URL source"),
             "globalThis.localSource=true"
@@ -944,27 +891,45 @@ mod tests {
 
         let unsupported = prepared_external_script("custom:script", ScriptKind::Classic);
         assert!(
-            immediate_external_script_source_load_outcome(&unsupported, None)
-                .expect("unsupported scheme should be synchronously terminal")
-                .source_result
-                .is_err()
+            immediate_external_script_source_load_outcome(
+                &unsupported,
+                &loader,
+                None,
+                SubresourceRequestInitiatorType::Parser
+            )
+            .expect("unsupported scheme should be synchronously terminal")
+            .source_result
+            .is_err()
         );
 
         let network = prepared_external_script("https://example.test/app.js", ScriptKind::Classic);
-        assert!(immediate_external_script_source_load_outcome(&network, None).is_none());
+        assert!(
+            immediate_external_script_source_load_outcome(
+                &network,
+                &loader,
+                None,
+                SubresourceRequestInitiatorType::Parser
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]
     async fn unsupported_external_script_scheme_fails_before_network_fetch() -> anyhow::Result<()> {
-        let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())?;
+        let loader =
+            crate::network::ResourceRequestClient::new(&moli_fetch::FetchConfig::default())?;
         let script = prepared_external_script("unknown://example/", ScriptKind::Classic);
 
-        let outcome = load_prepared_script_source_outcome_with_document_character_set(
+        let outcome = load_script_source(
             &script,
-            &loader,
+            &DocumentResourceLoader::for_test(
+                loader.handle(),
+                RendererResourceTaskRunner::for_test(),
+                script.initiator_url.clone(),
+            ),
             Some("UTF-8"),
             None,
-            RendererResourceTaskRunner::for_test(),
+            crate::types::SubresourceRequestInitiatorType::Parser,
         )
         .await;
 
@@ -1037,7 +1002,8 @@ mod tests {
             );
         });
 
-        let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())?;
+        let loader =
+            crate::network::ResourceRequestClient::new(&moli_fetch::FetchConfig::default())?;
         let module_url = url::Url::parse(&format!("http://{addr}/cached-module.mjs"))?;
         let first_page = url::Url::parse(&format!("http://{addr}/first-page.html"))?;
         let second_page = url::Url::parse(&format!("http://{addr}/second-page.html"))?;
@@ -1049,20 +1015,28 @@ mod tests {
         let second_script =
             prepared_external_script_with_initiator(module_url, ScriptKind::Module, second_page);
 
-        let first = load_prepared_script_source_outcome_with_document_character_set(
+        let first = load_script_source(
             &first_script,
-            &loader,
+            &DocumentResourceLoader::for_test(
+                loader.handle(),
+                RendererResourceTaskRunner::for_test(),
+                first_script.initiator_url.clone(),
+            ),
             Some("UTF-8"),
             None,
-            RendererResourceTaskRunner::for_test(),
+            crate::types::SubresourceRequestInitiatorType::Parser,
         )
         .await;
-        let second = load_prepared_script_source_outcome_with_document_character_set(
+        let second = load_script_source(
             &second_script,
-            &loader,
+            &DocumentResourceLoader::for_test(
+                loader.handle(),
+                RendererResourceTaskRunner::for_test(),
+                second_script.initiator_url.clone(),
+            ),
             Some("UTF-8"),
             None,
-            RendererResourceTaskRunner::for_test(),
+            crate::types::SubresourceRequestInitiatorType::Parser,
         )
         .await;
 

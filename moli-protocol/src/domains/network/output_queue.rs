@@ -1263,6 +1263,17 @@ pub(crate) enum TargetSubresourcePlanOutput {
 }
 
 impl TargetSubresourcePlanOutput {
+    pub(crate) fn navigation_request_id(&self) -> Option<&str> {
+        match self {
+            Self::RequestStarted(request) | Self::RequestUpdated(request)
+                if request.resource_type() == SubresourceResourceType::Document =>
+            {
+                Some(request.loader_id())
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn index(&self) -> usize {
         match self {
             Self::Complete(output) => output.index(),
@@ -1396,7 +1407,10 @@ impl TargetSubresourceRequestStartedOutput {
         Self {
             delivery_order_index,
             index,
-            loader_id: loader_id.to_owned(),
+            loader_id: request
+                .navigation_loader_id()
+                .unwrap_or(loader_id)
+                .to_owned(),
             handle: request.handle(),
             frame_id: request.frame_id().map(str::to_owned),
             document_url: request.document_url().clone(),
@@ -1705,8 +1719,7 @@ pub(crate) struct TargetSubresourceBodyFinishedOutput {
     index: usize,
     request: Arc<TargetSubresourceRequestStartedOutput>,
     response: Option<Arc<TargetSubresourceResponseStartedOutput>>,
-    result: SubresourceBodyFinishedResult,
-    data_was_streamed: bool,
+    body: SubresourceBodyFinished,
 }
 
 impl TargetSubresourceBodyFinishedOutput {
@@ -1722,8 +1735,7 @@ impl TargetSubresourceBodyFinishedOutput {
             index,
             request,
             response,
-            result: body.result().clone(),
-            data_was_streamed: body.data_was_streamed(),
+            body: body.clone(),
         }
     }
 
@@ -1743,12 +1755,16 @@ impl TargetSubresourceBodyFinishedOutput {
         &self.request
     }
 
+    pub(crate) fn failure_context(&self) -> Option<&moli_fetch::NetworkFetchFailureContext> {
+        self.body.failure_context()
+    }
+
     pub(crate) fn result(&self) -> &SubresourceBodyFinishedResult {
-        &self.result
+        self.body.result()
     }
 
     pub(crate) fn data_was_streamed(&self) -> bool {
-        self.data_was_streamed
+        self.body.data_was_streamed()
     }
 }
 

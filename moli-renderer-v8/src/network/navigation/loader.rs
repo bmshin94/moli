@@ -158,6 +158,10 @@ impl NavigationResourceLoader {
         &self.request_client
     }
 
+    pub(crate) fn cancellation_handle(&self) -> FetchCancelHandle {
+        self.inner.cancel.clone()
+    }
+
     pub(crate) fn task_runner(&self) -> RendererResourceTaskRunner {
         self.task_runner.clone()
     }

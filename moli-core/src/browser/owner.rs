@@ -1968,15 +1968,46 @@ impl BrowserContextHandle {
         await_promise: bool,
     ) -> Result<serde_json::Value, String> {
         let expression = expression.to_owned();
-        self.run_local_test_operation(move |mut context| {
-            Box::pin(async move {
-                let result = context
-                    .evaluate_document_expression_for_test(document, &expression, await_promise)
-                    .await;
-                (context, result)
-            })
-        })
-        .await?
+        let id = self.id;
+        let completion = self.browser.execute(move |browser| {
+            let pending = browser
+                .context(id)?
+                .document(document)?
+                .page
+                .start_full_page_command(crate::renderer::RendererPageCommand::EvaluateExpression {
+                    expression,
+                    await_promise,
+                })
+                .map_err(|error| error.to_string())?;
+            let (send, receive) = oneshot::channel();
+            let owner = browser.local_sender.clone();
+            // Wait on the command in the owner runtime while the original
+            // Context stays registered for native callbacks.
+            tokio::task::spawn_local(async move {
+                let completed = pending.wait().await.map_err(|error| error.to_string());
+                let _ = owner.send(Box::new(move |browser| {
+                    let result = (|| {
+                        let reply = browser
+                            .context_mut(id)?
+                            .document_mut(document)?
+                            .page
+                            .finish_page_command(completed?);
+                        match reply {
+                            crate::renderer::RendererPageReply::RuntimeEvaluationResult(result) => {
+                                Ok(result.into_protocol_payload())
+                            }
+                            _ => Err("runtime evaluation returned an unexpected renderer reply"
+                                .to_owned()),
+                        }
+                    })();
+                    let _ = send.send(result);
+                }));
+            });
+            Ok::<_, String>(receive)
+        })??;
+        completion
+            .await
+            .map_err(|_| "Browser stopped during test evaluation".to_owned())?
     }
 
     #[cfg(any(test, feature = "test-support"))]

@@ -453,8 +453,7 @@ pub(super) fn bind_parser_owned_script_handle(page_vm: &mut PageVm, script: &mut
     script.host_script_handle = Some(handle);
 }
 
-pub(super) struct ParserDriver<'loader, 'state> {
-    pub(super) loader: &'loader ResourceRequestClient,
+pub(super) struct ParserDriver<'state> {
     pub(super) final_url: &'state Url,
     pub(super) parser_session: &'state mut DocumentParserSession,
     pub(super) scheduler: &'state mut DocumentScriptScheduler,
@@ -465,7 +464,7 @@ pub(super) struct ParserDriver<'loader, 'state> {
     pub(super) input_closed: &'state bool,
 }
 
-impl<'loader, 'state> ParserDriver<'loader, 'state> {
+impl<'state> ParserDriver<'state> {
     /// Bind parser-side speculative loads to the same executor and wake route
     /// as the `PageVm` that owns this parser turn.
     ///
@@ -478,7 +477,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
     fn bind_page_resource_runtime(&mut self, page_vm: &PageVm) {
         self.buffered_document_preloads.bind_resource_runtime(
             page_vm.runtime_hooks.owner_wake(),
-            page_vm.runtime_hooks.resource_task_runner(),
+            page_vm.main_document_resource_loader(),
         );
     }
 
@@ -499,7 +498,6 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                 .append_to_insertion_scan_with_service_worker_context(
                     self.final_url,
                     &html,
-                    self.loader,
                     self.service_worker_preload_context,
                 );
         }
@@ -619,11 +617,9 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                 .and_then(|applied| applied.network_result.as_deref())
                 && let Some(script) = prepared_script.as_ref()
             {
-                page_vm.vm_mut().record_script_subresource_network_result(
-                    script.initiator_url.clone(),
-                    script.url.clone(),
-                    network_result,
-                );
+                page_vm
+                    .vm_mut()
+                    .record_script_resource_timing(script.url.clone(), network_result);
             }
             if let (Some(script_handle), Some(prepared_script)) =
                 (parser_blocking_script_handle, prepared_script)
@@ -811,11 +807,10 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
             upcoming_html.push_str(tail);
         }
         self.buffered_document_preloads
-            .catch_up_main_document_scan_if_absent(final_url, &upcoming_html, self.loader);
+            .catch_up_main_document_scan_if_absent(final_url, &upcoming_html);
         super::super::script_preloads::admit_pending_preloads(
             page_vm,
             self.buffered_document_preloads,
-            self.loader,
             self.service_worker_preload_context,
         );
     }
@@ -940,7 +935,6 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     .claim_pending_script_preload_for_parser(&script);
                 let source_decision = prepare_main_parser_blocking_source_load(
                     page_vm,
-                    self.loader,
                     self.buffered_document_preloads,
                     &mut script,
                 );
@@ -1065,11 +1059,9 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     .await
                     && let Some(network_result) = applied.network_result.as_deref()
                 {
-                    page_vm.vm_mut().record_script_subresource_network_result(
-                        script.initiator_url.clone(),
-                        script.url.clone(),
-                        network_result,
-                    );
+                    page_vm
+                        .vm_mut()
+                        .record_script_resource_timing(script.url.clone(), network_result);
                 }
                 bind_parser_owned_script_handle(page_vm, &mut script);
                 let _ = page_vm
@@ -1097,17 +1089,14 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     .document_runtime
                     .document_character_set()
                     .to_owned();
-                let resource_task_runner = page_vm.resource_task_runner();
                 let accepted = claimed
                     || self
                         .scheduler
-                        .recover_parse_time_async_handoff_with_load_delay_binding(
-                            script,
-                            self.loader,
-                            resource_task_runner,
-                            shared_preload,
-                            Some(&document_character_set),
-                            |_| {
+                        .recover_parse_time_async_handoff_with_load_delay_binding(script,
+&page_vm.main_document_resource_loader(),
+shared_preload,
+Some(&document_character_set),
+|_| {
                                 page_vm
                                     .vm_mut()
                                     .accept_main_document_script_load_delay_binding(
@@ -1115,8 +1104,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                                         crate::frame_owner_model::MainDocumentScriptLoadDelayKind::Classic,
                                     )
                                     .expect("current parser async handoff must bind lifecycle ownership")
-                            },
-                        );
+                            });
                 if accepted {
                     let _ = self.scheduler.grant_parse_visible_reevaluation_credit();
                 }
@@ -1148,11 +1136,9 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                         .await
                     && let Some(network_result) = applied.network_result.as_deref()
                 {
-                    page_vm.vm_mut().record_script_subresource_network_result(
-                        script.initiator_url.clone(),
-                        script.url.clone(),
-                        network_result,
-                    );
+                    page_vm
+                        .vm_mut()
+                        .record_script_resource_timing(script.url.clone(), network_result);
                 }
                 bind_parser_owned_script_handle(page_vm, &mut script);
                 let _ = page_vm
@@ -1486,7 +1472,6 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
         super::super::script_preloads::admit_pending_preloads(
             page_vm,
             self.buffered_document_preloads,
-            self.loader,
             self.service_worker_preload_context,
         );
         page_vm
@@ -1505,14 +1490,11 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     .document_runtime
                     .document_character_set()
                     .to_owned();
-                let resource_task_runner = page_vm.resource_task_runner();
-                let _ = self.scheduler.accept_parser_discovered_async_candidate(
-                    script,
-                    self.loader,
-                    resource_task_runner,
-                    shared_preload,
-                    Some(&document_character_set),
-                    |script| {
+                let _ = self.scheduler.accept_parser_discovered_async_candidate(script,
+&page_vm.main_document_resource_loader(),
+shared_preload,
+Some(&document_character_set),
+|script| {
                         let binding = page_vm
                             .vm_mut()
                             .accept_main_document_script_load_delay_binding(
@@ -1528,8 +1510,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                             "accepted main parser async classic lifecycle binding before source work"
                         );
                         binding
-                    },
-                );
+                    });
             }
         }
         page_vm
