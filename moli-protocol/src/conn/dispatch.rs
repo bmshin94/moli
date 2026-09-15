@@ -667,10 +667,7 @@ impl CdpConnection {
                 return self
                     .complete_with_output_plan(
                         &mut command_context,
-                        CommandOutputPlan::error_without_session(
-                            error.response_code(),
-                            error.response_message(),
-                        ),
+                        CommandOutputPlan::error(error.response_code(), error.response_message()),
                         error.command_id(),
                         None,
                     )
@@ -1655,10 +1652,7 @@ impl CdpConnection {
             }
             Err(error) => self.complete_with_output_plan(
                 &mut command_context,
-                CommandOutputPlan::error_without_session(
-                    error.response_code(),
-                    error.response_message(),
-                ),
+                CommandOutputPlan::error(error.response_code(), error.response_message()),
                 error.command_id(),
                 None,
             ),

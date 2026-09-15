@@ -9156,19 +9156,34 @@ async fn websocket_cdp_parser_script_network_backlog_flushes_before_domcontentlo
         json!({ "url": page_url }),
     )
     .await;
-    messages.extend(
-        recv_until_match(&mut socket, |message| {
-            message["sessionId"] == json!(target.session_id)
-                && message["method"] == json!("Page.domContentEventFired")
-        })
-        .await,
-    );
+    let loader_id = messages
+        .iter()
+        .find(|message| message["id"] == 40)
+        .and_then(|message| message["result"]["loaderId"].as_str())
+        .expect("navigation loaderId")
+        .to_owned();
+    // The asynchronous initial about:blank load can also publish DCL. Select
+    // the requested Document, including when it finished before the reply.
+    let is_document_dcl = |message: &serde_json::Value| {
+        message["sessionId"] == target.session_id
+            && message["method"] == "Page.lifecycleEvent"
+            && message["params"]["loaderId"] == loader_id
+            && message["params"]["name"] == "DOMContentLoaded"
+    };
+    if !messages.iter().any(is_document_dcl) {
+        messages.extend(recv_until_match(&mut socket, is_document_dcl).await);
+    }
+    let dcl_timestamp = &messages
+        .iter()
+        .find(|message| is_document_dcl(message))
+        .unwrap()["params"]["timestamp"];
 
     let dcl_index = messages
         .iter()
         .position(|message| {
             message["sessionId"] == json!(target.session_id)
                 && message["method"] == json!("Page.domContentEventFired")
+                && &message["params"]["timestamp"] == dcl_timestamp
         })
         .expect("Page.domContentEventFired should be emitted");
     let script_request = messages
@@ -9192,7 +9207,9 @@ async fn websocket_cdp_parser_script_network_backlog_flushes_before_domcontentlo
                 && message["params"]["type"] == json!("Script")
                 && message["params"]["requestId"] == json!(script_request_id)
         })
-        .expect("parser script responseReceived should be emitted before DCL");
+        .unwrap_or_else(|| {
+            panic!("parser script responseReceived should be emitted before DCL: {messages:#?}")
+        });
     let script_finished = messages
         .iter()
         .position(|message| {
@@ -10186,4 +10203,71 @@ async fn websocket_cdp_playwright_auto_attach_child_frame_events_precede_main_lo
     let _ = socket.close(None).await;
     abort_test_cdp_server(protocol_server).await;
     fixture_server.abort();
+}
+
+#[tokio::test]
+async fn websocket_cdp_errors_preserve_the_request_frontend_and_session() {
+    let (addr, server) = spawn_test_protocol_server().await;
+    let endpoint = format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}");
+    let (mut socket, _) = connect_async(&endpoint).await.unwrap();
+    let context = cdp_create_browser_context(&mut socket, 1).await;
+    let target = cdp_create_attached_target(&mut socket, 2, &context).await;
+    let (mut peer, _) = connect_async(&endpoint).await.unwrap();
+
+    for (route, session) in [None, Some(target.session_id.as_str())]
+        .into_iter()
+        .enumerate()
+    {
+        for (method, params, codes) in [
+            (
+                "Target.attachToTarget",
+                json!({"flatten": true}),
+                [-32602, -32602],
+            ),
+            (
+                "Target.attachToTarget",
+                json!({"targetId": 42}),
+                [-32602, -32602],
+            ),
+            (
+                "Target.attachToTarget",
+                json!({"targetId": "missing"}),
+                [-31998, -31998],
+            ),
+            ("Target.setDiscoverTargets", json!({}), [-32602, -32602]),
+            ("Target.autoAttachRelated", json!({}), [-32602, -32000]),
+            (
+                "Target.createBrowserContext",
+                json!({"proxyServer": 42}),
+                [-32602, -32000],
+            ),
+            (
+                "Target.getTargetInfo",
+                json!({"targetId": 42}),
+                [-32602, -32602],
+            ),
+        ] {
+            send_cdp_command_without_wait(&mut socket, 10, method, session, params).await;
+            // These validation failures are synchronous. A subsequent reply
+            // proves the actor processed the command even if its error was lost.
+            let messages =
+                send_cdp_command(&mut socket, 11, "Browser.getVersion", None, json!({})).await;
+            let replies: Vec<_> = messages
+                .iter()
+                .filter(|message| message["id"] == 10)
+                .collect();
+            assert_eq!(replies.len(), 1, "{method} on {session:?}: {messages:?}");
+            assert_eq!(replies[0]["error"]["code"], codes[route], "{method}");
+            assert_eq!(replies[0]["sessionId"].as_str(), session, "{method}");
+
+            let peer_messages =
+                send_cdp_command(&mut peer, 10, "Browser.getVersion", None, json!({})).await;
+            let peer_reply = peer_messages.last().unwrap();
+            assert!(peer_reply["result"]["product"].is_string(), "{peer_reply}");
+            assert!(peer_reply.get("sessionId").is_none(), "{peer_reply}");
+        }
+    }
+    socket.close(None).await.unwrap();
+    peer.close(None).await.unwrap();
+    abort_test_cdp_server(server).await;
 }
