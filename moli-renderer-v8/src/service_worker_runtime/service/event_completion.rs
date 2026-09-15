@@ -41,6 +41,7 @@ impl ServiceWorkerRuntimeService {
                 ServiceWorkerFetchResultSender::Worker { sender, .. } => {
                     Arc::ptr_eq(&sender.response, response)
                 }
+                ServiceWorkerFetchResultSender::Body(body) => Arc::ptr_eq(&body.resource, response),
                 ServiceWorkerFetchResultSender::CspReport { .. }
                 | ServiceWorkerFetchResultSender::Direct(_) => false,
             },

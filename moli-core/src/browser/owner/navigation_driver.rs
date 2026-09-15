@@ -611,15 +611,10 @@ async fn navigate(
                             credentials,
                             response,
                         } => {
-                            let (_, challenge) = response
-                                .finish_body_stream_async()
-                                .await
-                                .map_err(|(_, error)| error)?;
-                            if let DocumentBodySource::StreamingRaw { mut response, .. } = challenge
-                            {
-                                while response.next_chunk().await.is_some() {}
-                                response.finish().await.map_err(|error| error.to_string())?;
-                            }
+                            // The decision claim was consumed by the Browser owner.
+                            // Drop cancels this exact challenge transport; a retry
+                            // must not wait for a server withholding the 401 body.
+                            drop(response);
                             auth = Some(credentials);
                             continue;
                         }

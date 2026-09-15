@@ -1340,6 +1340,17 @@ impl JsContextHost {
         self.note_subresource_activity();
     }
 
+    pub(crate) fn record_running_response(&mut self, pending: PendingSubresourceFetchState) {
+        self.begin_active_subresource_request();
+        self.record_running_subresource_fetch(RunningSubresourceFetchState {
+            request_url: pending.info.url.clone(),
+            request_method: pending.info.method.clone(),
+            request_headers: pending.info.request_headers.clone(),
+            request_body: pending.info.request_body.clone(),
+            pending,
+        });
+    }
+
     pub(crate) fn record_streaming_subresource_fetch(
         &mut self,
         state: StreamingSubresourceFetchState,
@@ -1551,23 +1562,6 @@ impl JsContextHost {
         }
     }
 
-    fn record_observable_abort_after_response(
-        &mut self,
-        pending: &PendingSubresourceResponseState,
-    ) {
-        let response = crate::network::ResourceBodyResponse::from(pending.response.clone());
-        pending.pending.network().failed_with(
-            &response.failure(
-                crate::network_host::ABORTED_ERROR_TEXT.to_owned(),
-                pending
-                    .response
-                    .network_request_headers()
-                    .map(<[_]>::to_vec),
-            ),
-            |observation| self.record_native_resource_observation(observation),
-        );
-    }
-
     fn record_observable_stream_abort(&mut self, streaming: StreamingSubresourceFetchState) {
         streaming.pending.network().failed_with(
             &streaming
@@ -1637,8 +1631,9 @@ impl JsContextHost {
         }
 
         if let Some(pending) = self.pending_subresource_auths.remove(&internal_id) {
-            self.record_observable_abort_before_response(&pending.pending);
             self.cancel_subresource_load(&pending.pending, None);
+            pending.response.discard();
+            self.record_observable_abort_before_response(&pending.pending);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
@@ -1646,8 +1641,9 @@ impl JsContextHost {
         }
 
         if let Some(pending) = self.pending_subresource_responses.remove(&internal_id) {
-            self.record_observable_abort_after_response(&pending);
             self.cancel_subresource_load(&pending.pending, None);
+            pending.response.discard();
+            self.record_observable_abort_before_response(&pending.pending);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
             );
@@ -1713,6 +1709,7 @@ impl JsContextHost {
                 detached_window_fetches += usize::from(pending.detach_keepalive_window_fetch());
             }
         });
+        self.release_detached_response_decisions();
 
         let mut aborted = 0;
         for internal_id in ordinary_ids.iter().copied() {
@@ -1796,6 +1793,7 @@ impl JsContextHost {
                 detached += usize::from(pending.detach_keepalive_window_fetch());
             }
         });
+        self.release_detached_response_decisions();
 
         let mut aborted = 0;
         for internal_id in abort_ids.iter().copied() {
@@ -1805,6 +1803,37 @@ impl JsContextHost {
         self.pending_subresource_fetch_infos
             .retain(|info| !abort_ids.contains(&info.internal_id));
         (aborted, detached)
+    }
+
+    fn release_detached_response_decisions(&mut self) {
+        let auth_ids = self
+            .pending_subresource_auths
+            .iter()
+            .filter(|(_, state)| state.pending.load.is_detached_keepalive())
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in auth_ids {
+            let state = self
+                .pending_subresource_auths
+                .remove(&id)
+                .expect("selected response");
+            self.record_running_response(state.pending);
+            drop(state.response);
+        }
+        let response_ids = self
+            .pending_subresource_responses
+            .iter()
+            .filter(|(_, state)| state.pending.load.is_detached_keepalive())
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in response_ids {
+            let state = self
+                .pending_subresource_responses
+                .remove(&id)
+                .expect("selected response");
+            self.record_running_response(state.pending);
+            drop(state.response);
+        }
     }
 
     pub(crate) fn retire_window_fetches_for_execution_context_owner(
@@ -2194,6 +2223,8 @@ impl JsContextHost {
         if let Some(auth) = self.pending_subresource_auths.remove(&internal_id) {
             let pending = auth.pending;
             self.cancel_subresource_load(&pending, reason_payload);
+            auth.response.discard();
+            self.record_observable_abort_before_response(&pending);
             reject_fetch_continuation(scope, pending.continuation, reason);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },
@@ -2204,6 +2235,8 @@ impl JsContextHost {
         if let Some(response) = self.pending_subresource_responses.remove(&internal_id) {
             let pending = response.pending;
             self.cancel_subresource_load(&pending, reason_payload);
+            response.response.discard();
+            self.record_observable_abort_before_response(&pending);
             reject_fetch_continuation(scope, pending.continuation, reason);
             self.record_pending_subresource_continue_event(
                 PendingSubresourceContinueEvent::Completed { internal_id },

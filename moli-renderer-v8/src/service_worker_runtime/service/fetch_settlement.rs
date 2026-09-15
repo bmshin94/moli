@@ -1,13 +1,11 @@
 use super::*;
-use crate::service_worker_runtime::state::ServiceWorkerFetchStreamConsumer;
 use crate::service_worker_runtime::{
     ServiceWorkerDirectFetchResponse, ServiceWorkerFetchRequest, ServiceWorkerFetchResultSender,
     ServiceWorkerRequestDestination, service_worker_fetch_request_metadata,
 };
-use crate::types::{
-    AsyncSubresourceFetchEvent, AsyncSubresourceFetchResponseFilter,
-    AsyncSubresourceStreamingChunk, AsyncSubresourceStreamingStarted,
-};
+#[cfg(test)]
+use crate::types::AsyncSubresourceFetchEvent;
+use crate::types::AsyncSubresourceFetchResponseFilter;
 
 const MAX_SERVICE_WORKER_SYNTHETIC_REDIRECTS: usize = 20;
 
@@ -300,6 +298,10 @@ impl ServiceWorkerRuntimeService {
             }
         };
         match job.result_tx {
+            ServiceWorkerFetchResultSender::Body(body) => body.complete(
+                Err("ServiceWorker fallback after response headers".into()),
+                None,
+            ),
             ServiceWorkerFetchResultSender::Worker { sender, request } => {
                 sender.fetch_network(
                     *request,
@@ -389,51 +391,87 @@ impl ServiceWorkerRuntimeService {
             }
             let forwarding = service_worker_fetch_can_forward_stream(job, &started.response_head);
             let head = service_worker_fetch_stream_response_head(job, &started.response_head);
-            // Followed redirect heads belong to the redirect chain. The final
-            // physical head is independent of whether JS can receive a stream.
-            let js_consumer = match (&mut job.result_tx, &forwarding) {
-                (
-                    ServiceWorkerFetchResultSender::Page {
-                        completion_tx,
-                        network,
-                    },
-                    Ok(true),
-                ) if !network.intercepts_response(&head) => Some(
-                    ServiceWorkerFetchStreamConsumer::Page(completion_tx.clone()),
-                ),
-                (ServiceWorkerFetchResultSender::Worker { sender, .. }, Ok(true))
-                    if job.request_mode != moli_fetch::RequestMode::NoCors
-                        && job.redirect_mode == moli_fetch::RequestRedirectMode::Follow
-                        && !sender.response.intercepts_response(&head) =>
-                {
-                    Some(ServiceWorkerFetchStreamConsumer::Worker(
-                        sender.stream_sender(started.body_source_id),
-                    ))
-                }
-                _ => None,
-            };
-            if !is_redirect_status(head.status) {
-                job.result_tx
-                    .response_started(crate::network::ResourceResponseHead {
-                        head: head.clone(),
-                        status_text: started.response_head.status_text.clone(),
-                        network_request_headers: None,
-                    });
-                job.body_stream = Some(ServiceWorkerFetchBodyStream {
-                    body_source_id: started.body_source_id,
-                    js_consumer: js_consumer.clone(),
-                });
-            }
-            // These queue writes stay under the job lock so cancellation cannot
-            // deliver a terminal ahead of an already granted head or chunk.
-            if let Some(sender) = js_consumer {
-                sender.started(AsyncSubresourceStreamingStarted {
-                    internal_id: job.internal_id,
-                    request_url: job.request_url.clone(),
-                    body_source_id: started.body_source_id,
+            // Only a final response enters the consumer. Followed redirects
+            // remain with this job until their replacement response arrives.
+            if !is_redirect_status(head.status)
+                || job.redirect_mode == moli_fetch::RequestRedirectMode::Manual
+            {
+                let resource = match &job.result_tx {
+                    ServiceWorkerFetchResultSender::Page { network, .. } => Some(network.clone()),
+                    ServiceWorkerFetchResultSender::Worker { sender, .. } => {
+                        Some(sender.response.clone())
+                    }
+                    _ => None,
+                };
+                let response_head = crate::network::ResourceResponseHead {
                     head,
-                });
+                    status_text: started.response_head.status_text.clone(),
+                    network_request_headers: None,
+                };
+                if forwarding.is_err() {
+                    job.result_tx.response_started(response_head);
+                } else if let Some(resource) = resource {
+                    let service = self.downgrade();
+                    let runner = job.resource_task_runner.clone();
+                    let event_id = started.event_id;
+                    let owner = started.owner.clone();
+                    let body = crate::network::ResourceResponseBody::controlled(
+                        resource.clone(),
+                        response_head,
+                        job.cancel_handle.clone(),
+                        move || {
+                            // Drop can run under the service lock. The original
+                            // event/run identifies only this physical response.
+                            runner.spawn(async move {
+                                if let Some(service) = service.upgrade() {
+                                    service.abort_fetch_matching(
+                                        |id, job| id == event_id && job.is_bound_to_owner(&owner),
+                                        None,
+                                    );
+                                }
+                            });
+                        },
+                    );
+                    let recipient = std::mem::replace(
+                        &mut job.result_tx,
+                        ServiceWorkerFetchResultSender::Body(body.clone()),
+                    );
+                    let stream_to_js = forwarding.as_ref().is_ok_and(|stream| *stream);
+                    match recipient {
+                        ServiceWorkerFetchResultSender::Page { completion_tx, .. } => {
+                            let mut receiver = crate::network_host::ResourceFetchReceiver::new(
+                                job.resource_task_runner.clone(),
+                                completion_tx,
+                                job.internal_id,
+                                job.request_url.clone(),
+                                resource,
+                            );
+                            receiver.response_status_text =
+                                started.response_head.status_text.clone();
+                            receiver.skip_fetch_security_validation = true;
+                            receiver.response_filter = service_worker_fetch_response_filter(
+                                &started.response_head.response_type,
+                                started.response_head.status,
+                            );
+                            receiver.receive_or_pause(body, stream_to_js);
+                        }
+                        ServiceWorkerFetchResultSender::Worker { sender, .. } => {
+                            sender.receive_or_pause(
+                                body,
+                                stream_to_js
+                                    && job.request_mode != moli_fetch::RequestMode::NoCors
+                                    && job.redirect_mode == moli_fetch::RequestRedirectMode::Follow,
+                            );
+                        }
+                        _ => unreachable!("admitted Page or Worker response"),
+                    }
+                } else {
+                    job.result_tx.response_started(response_head);
+                }
             }
+            job.body_stream = Some(ServiceWorkerFetchBodyStream {
+                body_source_id: started.body_source_id,
+            });
             forwarding.err()
         };
         if let Some(message) = rejection {
@@ -532,13 +570,7 @@ impl ServiceWorkerRuntimeService {
         if stream.body_source_id != chunk.body_source_id {
             return;
         }
-        job.result_tx.data_received(&chunk.bytes);
-        if let Some(consumer) = &stream.js_consumer {
-            consumer.chunk(AsyncSubresourceStreamingChunk {
-                body_source_id: chunk.body_source_id,
-                bytes: chunk.bytes,
-            });
-        }
+        job.result_tx.data_received(chunk.bytes);
     }
 
     pub(super) fn complete_fetch_with_service_worker_response(
@@ -635,7 +667,12 @@ impl ServiceWorkerRuntimeService {
             self.complete_fetch_with_failure(job, message);
             return;
         }
-        let response_filter = service_worker_fetch_response_filter(&response);
+        let response_filter =
+            service_worker_fetch_response_filter(&response.response_type, response.status);
+        if let ServiceWorkerFetchResultSender::Body(body) = &job.result_tx {
+            body.complete(Ok(()), None);
+            return;
+        }
         let response_status_text = response.status_text;
         let navigation_response = crate::protocol_types::NavigationResponse::from_head_and_body(
             moli_fetch::ResponseHead {
@@ -653,6 +690,9 @@ impl ServiceWorkerRuntimeService {
             response.body,
         );
         let network = match job.result_tx {
+            ServiceWorkerFetchResultSender::Body(_) => {
+                unreachable!("streaming response already completed");
+            }
             ServiceWorkerFetchResultSender::Worker { sender, .. } => {
                 let response = sender
                     .response
@@ -692,14 +732,7 @@ impl ServiceWorkerRuntimeService {
             network_request_headers: None,
             result: Ok(response),
         };
-        send_page_fetch_result(
-            &completion_tx,
-            network.clone(),
-            job.body_stream
-                .as_ref()
-                .and_then(ServiceWorkerFetchBodyStream::js_body_source_id),
-            completion,
-        );
+        crate::network_host::send_resource_completion(&completion_tx, network.clone(), completion);
     }
 
     pub(super) fn complete_fetch_with_failure(&self, job: ServiceWorkerFetchJob, message: String) {
@@ -726,6 +759,10 @@ impl ServiceWorkerRuntimeService {
             network_error_text = service_worker_fetch_failure_network_error_text(&message);
         }
         let network = match job.result_tx {
+            ServiceWorkerFetchResultSender::Body(body) => {
+                body.complete(Err(message), network_error_text);
+                return;
+            }
             ServiceWorkerFetchResultSender::Worker { sender, .. } => {
                 let failure = sender.response.failure(message);
                 sender.complete(Err(failure), None);
@@ -755,58 +792,7 @@ impl ServiceWorkerRuntimeService {
             network_request_headers: None,
             result: Err(failure),
         };
-        send_page_fetch_result(
-            &completion_tx,
-            network.clone(),
-            job.body_stream
-                .as_ref()
-                .and_then(ServiceWorkerFetchBodyStream::js_body_source_id),
-            completion,
-        );
-    }
-}
-
-impl ServiceWorkerFetchStreamConsumer {
-    fn started(&self, started: AsyncSubresourceStreamingStarted) {
-        match self {
-            Self::Page(sender) => {
-                let _ = sender.send_async_subresource_event(
-                    AsyncSubresourceFetchEvent::StreamingStarted(Box::new(started)),
-                );
-            }
-            Self::Worker(sender) => sender.streaming_started(started.head),
-        }
-    }
-
-    fn chunk(&self, chunk: AsyncSubresourceStreamingChunk) {
-        match self {
-            Self::Page(sender) => {
-                let _ = sender.send_async_subresource_event(
-                    AsyncSubresourceFetchEvent::StreamingChunk(chunk),
-                );
-            }
-            Self::Worker(sender) => sender.streaming_chunk(chunk.bytes),
-        }
-    }
-}
-
-fn send_page_fetch_result(
-    sender: &crate::page_task_queue::RendererResourceCompletionSender,
-    network: std::sync::Arc<crate::network::ResourceResponseStream>,
-    body_source_id: Option<crate::types::NetworkBodySourceId>,
-    completion: AsyncSubresourceFetchCompletion,
-) {
-    if let Some(body_source_id) = body_source_id {
-        let _ = sender.send_async_subresource_event(
-            AsyncSubresourceFetchEvent::TransportStreamingFinished {
-                body_source_id,
-                completion: Box::new(crate::network_host::CompletedResourceFetch::new(
-                    network, completion,
-                )),
-            },
-        );
-    } else {
-        crate::network_host::send_resource_completion(sender, network, completion);
+        crate::network_host::send_resource_completion(&completion_tx, network.clone(), completion);
     }
 }
 
@@ -980,12 +966,13 @@ fn service_worker_fetch_response_rejection(
 }
 
 fn service_worker_fetch_response_filter(
-    response: &ServiceWorkerFetchResponse,
+    response_type: &str,
+    status: u16,
 ) -> Option<AsyncSubresourceFetchResponseFilter> {
-    match response.response_type.as_str() {
+    match response_type {
         "opaque" => Some(AsyncSubresourceFetchResponseFilter::Opaque),
         "opaqueredirect" => Some(AsyncSubresourceFetchResponseFilter::OpaqueRedirect),
-        _ if is_redirect_status(response.status) => {
+        _ if is_redirect_status(status) => {
             Some(AsyncSubresourceFetchResponseFilter::OpaqueRedirect)
         }
         _ => None,
@@ -1415,16 +1402,16 @@ mod tests {
             },
         });
 
-        match pop_async_subresource_event(&mut completion_queue) {
+        let delivered_body_source_id = match pop_async_subresource_event(&mut completion_queue) {
             AsyncSubresourceFetchEvent::StreamingStarted(started) => {
                 assert_eq!(started.internal_id, 301);
                 assert_eq!(started.request_url, request_url);
-                assert_eq!(started.body_source_id, body_source_id);
                 assert_eq!(started.head.final_url, final_url);
                 assert_eq!(started.head.status, 202);
+                started.body_source_id
             }
             other => panic!("expected streaming start, got {other:?}"),
-        }
+        };
 
         service.finish_fetch_stream_chunk(ServiceWorkerFetchStreamChunk {
             event_id,
@@ -1434,7 +1421,7 @@ mod tests {
 
         match pop_async_subresource_event(&mut completion_queue) {
             AsyncSubresourceFetchEvent::StreamingChunk(chunk) => {
-                assert_eq!(chunk.body_source_id, body_source_id);
+                assert_eq!(chunk.body_source_id, delivered_body_source_id);
                 assert_eq!(chunk.bytes, b"AB".to_vec());
             }
             other => panic!("expected streaming chunk, got {other:?}"),
@@ -1461,7 +1448,7 @@ mod tests {
             } => {
                 let finished = completion.complete_for_test();
                 assert_eq!(finished.internal_id, 301);
-                assert_eq!(finished_id, body_source_id);
+                assert_eq!(finished_id, delivered_body_source_id);
                 assert_eq!(
                     finished.result.unwrap().body.diagnostic_bytes().as_ref(),
                     b"AB"
@@ -1471,8 +1458,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn csp_stream_preserves_native_phases_and_paused_partial_bodies() {
+    #[tokio::test]
+    async fn csp_stream_preserves_native_phases_and_paused_partial_bodies() {
         use crate::network::{ResourceResponseStream, ResourceTransfer};
         use crate::runtime::{RendererNetworkOutputItem, RendererNetworkRequest};
         use crate::types::{ScriptNetworkOutputItem, SubresourceRequestStarted};
@@ -1522,7 +1509,7 @@ mod tests {
                 network.observe(started);
                 let response = ResourceResponseStream::new(network.clone());
                 response.configure_interception(intercepted, false);
-                {
+                let cancel = {
                     let mut state = service.inner.state.lock();
                     let job = state.pending_fetch_jobs.get_mut(&event_id).unwrap();
                     job.network_context.resource_type =
@@ -1532,7 +1519,8 @@ mod tests {
                         completion_tx: queue.sender(),
                         network: response.clone(),
                     };
-                }
+                    job.cancel_handle.clone()
+                };
                 service.finish_fetch_stream_started(ServiceWorkerFetchStreamStarted {
                     event_id,
                     owner: owner.clone(),
@@ -1551,6 +1539,19 @@ mod tests {
                     if intercepted { 1 } else { 2 },
                     "only a pending response decision can hold the head"
                 );
+                let paused = if intercepted {
+                    let Some(AsyncSubresourceFetchEvent::ResponsePaused {
+                        internal_id,
+                        response,
+                    }) = queue.pop_next_async_subresource_event()
+                    else {
+                        panic!("the controlled response must pause before body input")
+                    };
+                    assert_eq!(internal_id, 301);
+                    Some(response)
+                } else {
+                    None
+                };
                 service.finish_fetch_stream_chunk(ServiceWorkerFetchStreamChunk {
                     event_id,
                     body_source_id: 77,
@@ -1565,6 +1566,12 @@ mod tests {
                     queue.pop_next_async_subresource_event().is_none(),
                     "a CSP report has no JS body consumer"
                 );
+                if let Some(paused) = &paused {
+                    assert_eq!(
+                        paused.body.read(0, 2).await.unwrap(),
+                        (b"bo".to_vec(), false)
+                    );
+                }
                 let result = if partial {
                     ServiceWorkerFetchResult::Failure("truncated".into())
                 } else {
@@ -1583,6 +1590,25 @@ mod tests {
                     owner,
                     result,
                 });
+                if let Some(paused) = paused {
+                    if partial {
+                        paused.resume(None, None);
+                    } else {
+                        // A retiring Document cancels even after physical EOF,
+                        // while the response decision still owns its bytes.
+                        assert_eq!(
+                            paused
+                                .body
+                                .body_source()
+                                .materialize_bytes_limited(2)
+                                .await
+                                .unwrap(),
+                            b"bo"
+                        );
+                        cancel.cancel();
+                        drop(paused);
+                    }
+                }
                 let Some(AsyncSubresourceFetchEvent::TransportCompletion(completion)) =
                     queue.pop_next_async_subresource_event()
                 else {
@@ -1592,25 +1618,25 @@ mod tests {
                     .claim(&network)
                     .expect("the original response owns completion");
                 match &completion.result {
-                    Ok(body) if !partial => assert_eq!(body.body.clone_body_bytes(), b"bo"),
+                    Ok(body) if !partial && !intercepted => {
+                        assert_eq!(body.body.clone_body_bytes(), b"bo")
+                    }
                     Err(crate::network::ResourceResponseFailure::PartialBody {
                         response,
                         body,
                         message,
-                    }) if partial => {
+                    }) if partial || intercepted => {
                         assert_eq!(response.head.status, 202);
                         assert_eq!(body.clone_body_bytes(), b"bo");
-                        assert!(message.contains("truncated"));
+                        assert!(message.contains(if partial {
+                            "truncated"
+                        } else {
+                            "ERR_ABORTED"
+                        }));
                     }
                     result => panic!("retain the physical response: {result:?}"),
                 }
-                if intercepted && !partial {
-                    // The Document retires after EOF while its response
-                    // decision is pending. The physical response still survives.
-                    drop(completion);
-                } else {
-                    completion.publish_with(&network, |observation| network.observe(observation));
-                }
+                completion.publish_with(&network, |observation| network.observe(observation));
                 drop(response);
                 let events = events.lock();
                 assert_eq!(
@@ -1730,13 +1756,13 @@ mod tests {
                 headers: vec![("content-type".to_owned(), "text/plain".to_owned())],
             },
         });
-        match pop_async_subresource_event(&mut completion_queue) {
+        let delivered_body_source_id = match pop_async_subresource_event(&mut completion_queue) {
             AsyncSubresourceFetchEvent::StreamingStarted(started) => {
                 assert_eq!(started.internal_id, 302);
-                assert_eq!(started.body_source_id, body_source_id);
+                started.body_source_id
             }
             other => panic!("expected streaming start, got {other:?}"),
-        }
+        };
 
         service.finish_fetch_stream_chunk(ServiceWorkerFetchStreamChunk {
             event_id,
@@ -1745,7 +1771,7 @@ mod tests {
         });
         match pop_async_subresource_event(&mut completion_queue) {
             AsyncSubresourceFetchEvent::StreamingChunk(chunk) => {
-                assert_eq!(chunk.body_source_id, body_source_id);
+                assert_eq!(chunk.body_source_id, delivered_body_source_id);
                 assert_eq!(chunk.bytes, b"partial".to_vec());
             }
             other => panic!("expected streaming chunk, got {other:?}"),
@@ -1766,7 +1792,7 @@ mod tests {
             } => {
                 let finished = completion.complete_for_test();
                 assert_eq!(finished.internal_id, 302);
-                assert_eq!(finished_id, body_source_id);
+                assert_eq!(finished_id, delivered_body_source_id);
                 let crate::network::ResourceResponseFailure::PartialBody { message, body, .. } =
                     finished.result.unwrap_err()
                 else {

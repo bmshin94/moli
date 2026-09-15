@@ -477,33 +477,49 @@ fn register_pending_window_fetch_for_test(
                     state
                 });
             }
-            PendingWindowFetchTestStage::Auth => {
-                host.record_pending_subresource_auth(crate::types::PendingSubresourceAuthState {
-                    pending,
-                    request_url: url.clone(),
-                    request_method: "GET".to_owned(),
-                    request_headers: Vec::new(),
-                    request_body: None,
-                    response: crate::types::NavigationResponse::from_text_body(
-                        url.clone(),
-                        401,
-                        Vec::new(),
-                        "auth required".to_owned(),
-                    ),
-                });
-            }
-            PendingWindowFetchTestStage::Response => {
-                host.record_pending_subresource_response(
-                    crate::types::PendingSubresourceResponseState {
-                        pending,
-                        response: crate::types::NavigationResponse::from_text_body(
-                            url.clone(),
-                            200,
-                            Vec::new(),
-                            "pending response".to_owned(),
-                        ),
-                    },
+            PendingWindowFetchTestStage::Auth | PendingWindowFetchTestStage::Response => {
+                let auth = matches!(stage, PendingWindowFetchTestStage::Auth);
+                let resource = pending.response_stream().clone();
+                let receiver = crate::network_host::ResourceFetchReceiver::new(
+                    pending.load.task_runner(),
+                    host.resource_completion_sender(),
+                    internal_id,
+                    url.clone(),
+                    resource.clone(),
                 );
+                let body = crate::network::ResourceResponseBody::completed(
+                    resource,
+                    crate::types::NavigationResponse::from_text_body(
+                        url.clone(),
+                        if auth { 401 } else { 200 },
+                        Vec::new(),
+                        if auth {
+                            "auth required"
+                        } else {
+                            "pending response"
+                        }
+                        .to_owned(),
+                    )
+                    .into(),
+                    None,
+                );
+                let response = receiver.pause(body, false);
+                if auth {
+                    host.record_pending_subresource_auth(
+                        crate::types::PendingSubresourceAuthState {
+                            pending,
+                            request_url: url.clone(),
+                            request_method: "GET".to_owned(),
+                            request_headers: Vec::new(),
+                            request_body: None,
+                            response,
+                        },
+                    );
+                } else {
+                    host.record_pending_subresource_response(
+                        crate::types::PendingSubresourceResponseState { pending, response },
+                    );
+                }
             }
         }
     }
@@ -2717,8 +2733,8 @@ fn window_fetch_request_start_records_keepalive_disposition() {
     );
 }
 
-#[test]
-fn cancel_pending_window_fetch_auth_preserves_401_for_response_stage() {
+#[tokio::test]
+async fn cancel_pending_window_fetch_auth_preserves_401_for_response_stage() {
     let mut vm = new_storage_test_vm("https://fetch-auth-cancel.test/");
     let internal_id = vm
         .with_default_context_scope_and_checkpoint_for_test(|scope, host_ptr| {
@@ -2755,7 +2771,11 @@ fn cancel_pending_window_fetch_auth_preserves_401_for_response_stage() {
     assert_eq!(info.internal_id, internal_id);
     assert_eq!(info.response_status, 401);
     assert_eq!(
-        info.response_body.try_bytes().unwrap().as_ref(),
+        info.response_body
+            .materialize_bytes_limited(64 * 1024 * 1024)
+            .await
+            .unwrap()
+            .as_slice(),
         b"auth required"
     );
 
@@ -2764,8 +2784,17 @@ fn cancel_pending_window_fetch_auth_preserves_401_for_response_stage() {
         .borrow_mut()
         .take_pending_subresource_response(internal_id)
         .expect("challenged response should remain pending for Fetch.continueResponse");
-    assert_eq!(pending.response.status, 401);
-    assert_eq!(pending.response.body_text(), "auth required");
+    assert_eq!(pending.response.body.head().status, 401);
+    assert_eq!(
+        pending
+            .response
+            .body
+            .body_source()
+            .materialize_bytes_limited(64 * 1024 * 1024)
+            .await
+            .unwrap(),
+        b"auth required"
+    );
 }
 
 #[test]

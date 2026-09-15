@@ -65,9 +65,7 @@ use crate::context_bootstrap::{
     simple_object_event_set_ordered_handler,
 };
 use crate::network::loads::{ResourceLoadDisposition, ResourceLoadKind, ResourceLoadLease};
-use crate::network::{
-    ResourceResponseFailure, ResourceResponseHead, ResourceResponseStream, ResourceTransfer,
-};
+use crate::network::{ResourceResponseFailure, ResourceResponseStream, ResourceTransfer};
 use crate::network_host::{
     ABORTED_ERROR_TEXT, BLOCKED_BY_CLIENT_ERROR_TEXT, FAILED_ERROR_TEXT,
     FetchResponseSecurityViolation, HeadersGuard, PreparedXhrSendBody, XHR_ABORTED_SLOT,
@@ -1100,14 +1098,17 @@ pub(super) struct PendingWorkerFetch {
     pub(super) request_body: Option<Vec<u8>>,
     pub(super) response: Arc<ResourceResponseStream>,
     pub(super) request_override: Option<WorkerRequestOverride>,
-    pub(super) paused_response: Option<fetch::WorkerFetchPausedResponse>,
+    pub(super) paused_response: Option<crate::network::PausedResourceResponse>,
     pub(super) streaming_body_source_id: Option<NetworkBodySourceId>,
 }
 
 pub(super) enum WorkerFetchEvent {
     Completion(Box<WorkerRequestCompletion>),
     TransportCompletion(WorkerRequestDelivery),
-    AuthRequired(Box<fetch::WorkerFetchAuthResponse>),
+    ResponsePaused {
+        fetch_id: u32,
+        response: Box<crate::network::PausedResourceResponse>,
+    },
     StreamingStarted(Box<WorkerFetchStreamingStarted>),
     StreamingChunk(WorkerFetchStreamingChunk),
     StreamingFinished(WorkerFetchStreamingFinished),
@@ -1196,7 +1197,7 @@ pub(super) struct PendingWorkerXhr {
     pub(super) request_body: Option<Vec<u8>>,
     pub(super) response: Arc<ResourceResponseStream>,
     pub(super) request_override: Option<WorkerRequestOverride>,
-    pub(super) paused_response: Option<ResourceBodyResponse>,
+    pub(super) paused_response: Option<crate::network::PausedResourceResponse>,
 }
 
 pub(super) struct WorkerCspReport {
@@ -1214,6 +1215,10 @@ pub(super) struct WorkerCspReport {
 pub(super) enum WorkerXhrCompletion {
     Completion(Box<WorkerRequestCompletion>),
     TransportCompletion(WorkerRequestDelivery),
+    ResponsePaused {
+        xhr_id: u32,
+        response: Box<crate::network::PausedResourceResponse>,
+    },
 }
 
 impl WorkerXhrCompletion {

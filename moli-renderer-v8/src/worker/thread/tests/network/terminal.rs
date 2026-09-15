@@ -591,11 +591,15 @@ async fn intercepted_failure(resource_type: SubresourceResourceType) {
     ensure_v8();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (release_failure, failed_body) = tokio::sync::oneshot::channel();
+    let mut release_failure = Some(release_failure);
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let request = read_http_request_head(&mut stream).await.unwrap();
         assert!(request.starts_with("GET /partial "));
-        stream.write_all(b"HTTP/1.1 200 OK\r\nX-Physical: retained\r\nContent-Length: 6\r\nConnection: close\r\n\r\npre").await.unwrap();
+        stream.write_all(b"HTTP/1.1 200 OK\r\nX-Physical: retained\r\nContent-Length: 6\r\nConnection: close\r\n\r\n").await.unwrap();
+        failed_body.await.unwrap();
+        stream.write_all(b"pre").await.unwrap();
     });
     let script = match resource_type {
         SubresourceResourceType::Fetch => {
@@ -624,16 +628,21 @@ async fn intercepted_failure(resource_type: SubresourceResourceType) {
                     };
                     items.push(item.clone());
                 }
-                WorkerToParentMessage::FetchInterception(pause) => {
-                    assert!(
-                        matches!(
-                            pause.stage(),
-                            crate::runtime::RendererWorkerFetchStage::Request(_)
-                        ),
-                        "a failed transport cannot enter a response decision"
-                    );
-                    continue_worker_request(&pause, true, false).await;
-                }
+                WorkerToParentMessage::FetchInterception(pause) => match pause.stage() {
+                    crate::runtime::RendererWorkerFetchStage::Request(_) => {
+                        continue_worker_request(&pause, true, false).await;
+                    }
+                    crate::runtime::RendererWorkerFetchStage::Response(info) => {
+                        assert_eq!(info.response_status, 200);
+                        continue_worker_response(&pause, None, None).await;
+                        release_failure
+                            .take()
+                            .expect("one response decision")
+                            .send(())
+                            .unwrap();
+                    }
+                    _ => panic!("unexpected response decision"),
+                },
                 WorkerToParentMessage::Post(payload) => posts.push(stringify_payload(&payload)),
                 other => panic!("unexpected Worker output: {other:?}"),
             }
@@ -646,8 +655,8 @@ async fn intercepted_failure(resource_type: SubresourceResourceType) {
     assert_eq!(posts, ["\"rejected\""]);
     assert_eq!(
         items.len(),
-        3,
-        "admission, physical head and one failed terminal: {items:?}"
+        4,
+        "admission, physical head, actual prefix and one failed terminal: {items:?}"
     );
     let ScriptNetworkOutputItem::SubresourceRequestStarted(start) = items[0].as_ref() else {
         panic!("request admission first")
@@ -662,7 +671,12 @@ async fn intercepted_failure(resource_type: SubresourceResourceType) {
             .iter()
             .any(|(name, value)| name == "x-physical" && value == "retained")
     );
-    let ScriptNetworkOutputItem::SubresourceBodyFinished(terminal) = items[2].as_ref() else {
+    let ScriptNetworkOutputItem::SubresourceDataReceived(data) = items[2].as_ref() else {
+        panic!("the accepted response reports its actual prefix before failure")
+    };
+    assert_eq!(data.handle(), start.handle());
+    assert_eq!(data.data_length(), 3);
+    let ScriptNetworkOutputItem::SubresourceBodyFinished(terminal) = items[3].as_ref() else {
         panic!("one terminal last")
     };
     assert_eq!(terminal.handle(), start.handle());

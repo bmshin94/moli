@@ -1,4 +1,6 @@
 mod async_fetch;
+mod response_receiver;
+pub(crate) use response_receiver::ResourceFetchReceiver;
 mod beacon;
 mod bindings;
 mod body;
@@ -286,8 +288,7 @@ use super::{
     native_bridge::JsContextHost,
     types::{
         AsyncSubresourceFetchCompletion, AsyncSubresourceFetchEvent,
-        AsyncSubresourceNetworkContext, AsyncSubresourceStreamingChunk,
-        AsyncSubresourceStreamingStarted, PendingSubresourceFetchInfo, SubresourceNetworkRecord,
+        AsyncSubresourceNetworkContext, PendingSubresourceFetchInfo, SubresourceNetworkRecord,
         SubresourceResourceType,
     },
     util::{

@@ -1514,7 +1514,7 @@ mod protocol_neutral_tests {
     use url::Url;
 
     use crate::conn::{
-        CapturedBody, Cmd, PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
+        Cmd, PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
         PendingSubresourceFetchRequestStage, PendingSubresourceFetchRequestStageChain,
         PendingSubresourceFetchResponseRequest, PendingSubresourceFetchResponseStage,
         PendingSubresourceFetchResponseStageChain,
@@ -1827,7 +1827,10 @@ mod protocol_neutral_tests {
             response_headers: vec![("content-type".to_owned(), "application/json".to_owned())],
             response_head_overridden: false,
             response_body_taken_as_stream: false,
-            response_body: CapturedBody::from_bytes(br#"{"ok":true}"#.to_vec()),
+            response_body: moli_page_types::SubresourceResponseBody::from_bytes(
+                br#"{"ok":true}"#.to_vec(),
+            )
+            .into(),
             response_stage_chain: Some(Box::new(PendingSubresourceFetchResponseStageChain {
                 remaining_sessions: vec![PendingSubresourceFetchResponseStage {
                     session_id: Some("SID-attached".to_owned()),

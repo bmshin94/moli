@@ -740,13 +740,14 @@ pub(crate) enum ServiceWorkerFetchResultSender {
         network: std::sync::Arc<crate::network::ResourceResponseStream>,
     },
     Worker {
-        sender: Box<crate::worker::WorkerFetchCompletionSender>,
+        sender: Box<crate::worker::WorkerResponseSender>,
         request: Box<Request>,
     },
     CspReport {
         resource: std::sync::Arc<crate::network_host::KeepaliveResource>,
         request: Box<Request>,
     },
+    Body(std::sync::Arc<crate::network::ResourceResponseBody>),
     Direct(tokio::sync::oneshot::Sender<ServiceWorkerDirectFetchResult>),
 }
 
@@ -756,15 +757,17 @@ impl ServiceWorkerFetchResultSender {
             Self::Page { network, .. } => network.response_started(head),
             Self::Worker { sender, .. } => sender.response.response_started(head),
             Self::CspReport { resource, .. } => resource.response_started(head),
+            Self::Body(_) => unreachable!("controlled body already owns its response head"),
             Self::Direct(_) => {}
         }
     }
 
-    pub(super) fn data_received(&self, bytes: &[u8]) {
+    pub(super) fn data_received(&self, bytes: Vec<u8>) {
         match self {
-            Self::Page { network, .. } => network.data_received(bytes),
-            Self::Worker { sender, .. } => sender.response.data_received(bytes),
-            Self::CspReport { resource, .. } => resource.data_received(bytes),
+            Self::Page { network, .. } => network.data_received(&bytes),
+            Self::Worker { sender, .. } => sender.response.data_received(&bytes),
+            Self::CspReport { resource, .. } => resource.data_received(&bytes),
+            Self::Body(body) => body.data_received(bytes),
             Self::Direct(_) => {}
         }
     }

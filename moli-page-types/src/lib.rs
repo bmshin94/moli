@@ -10,6 +10,9 @@ mod layout;
 mod navigation_history;
 mod navigator_overrides;
 mod renderer_transport_memory;
+mod response_body_source;
+
+pub use response_body_source::{SubresourceResponseBodyRead, SubresourceResponseBodySource};
 
 use std::{
     borrow::Cow,
@@ -1558,6 +1561,14 @@ impl Default for SubresourceResponseBodyWriter {
 }
 
 impl SubresourceResponseBodyWriter {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn new(memory_limit: usize) -> Self {
         Self {
             memory_limit,
@@ -1602,6 +1613,25 @@ impl SubresourceResponseBodyWriter {
         self.abandon_file_to_memory();
         self.memory.extend_from_slice(bytes);
         self.len = self.len.saturating_add(bytes.len());
+    }
+
+    /// Read received bytes without sealing the writer or materializing its
+    /// spool file. A paused response can keep using this same body after reads.
+    pub fn read_range(&mut self, offset: usize, size: usize) -> io::Result<Vec<u8>> {
+        let end = offset.saturating_add(size).min(self.len);
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        if let Some(file) = &mut self.file {
+            file.seek(io::SeekFrom::Start(offset as u64))?;
+            let mut bytes = vec![0; end - offset];
+            let result = file.read_exact(&mut bytes);
+            file.seek(io::SeekFrom::End(0))?;
+            result?;
+            Ok(bytes)
+        } else {
+            Ok(self.memory[offset..end].to_vec())
+        }
     }
 
     pub fn finish(mut self) -> SubresourceResponseBody {
@@ -2442,9 +2472,8 @@ pub struct PendingSubresourceResponseInfo {
     pub network_request_headers: Option<Vec<(String, String)>>,
     pub response_status: u16,
     pub response_headers: Vec<(String, String)>,
-    /// Exact response bytes plus the lossy compatibility text view needed while
-    /// a response-stage Fetch pause is held.
-    pub response_body: SubresourceResponseBody,
+    /// Read access to the actual body, which may still be arriving while paused.
+    pub response_body: SubresourceResponseBodySource,
     pub from_cache: bool,
 }
 

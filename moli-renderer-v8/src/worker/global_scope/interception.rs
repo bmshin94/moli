@@ -330,7 +330,16 @@ fn cancel_worker_auth(
             pending
                 .response
                 .configure_interception(intercept_response, false);
-            response.resume(&state.fetch_completion_tx, fetch_id, None, None);
+            if intercept_response {
+                let _ = state
+                    .fetch_completion_tx
+                    .send(WorkerFetchEvent::ResponsePaused {
+                        fetch_id,
+                        response: Box::new(response),
+                    });
+            } else {
+                response.resume(None, None);
+            }
         }
         WorkerFetchTarget::Xhr(xhr_id) => {
             let pending = state
@@ -341,9 +350,16 @@ fn cancel_worker_auth(
             pending
                 .response
                 .configure_interception(intercept_response, false);
-            let _ = state
-                .xhr_completion_tx
-                .send(WorkerXhrCompletion::decision(xhr_id, Ok(response)));
+            if intercept_response {
+                let _ = state
+                    .xhr_completion_tx
+                    .send(WorkerXhrCompletion::ResponsePaused {
+                        xhr_id,
+                        response: Box::new(response),
+                    });
+            } else {
+                response.resume(None, None);
+            }
         }
         WorkerFetchTarget::CspReport(_) => {
             return Err("CSP report has no authentication pause".into());

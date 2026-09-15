@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::WorkerFetchTarget;
 use crate::service_worker_runtime::{
     ServiceWorkerClientId, ServiceWorkerFetchDispatch, ServiceWorkerFetchRequest,
     ServiceWorkerFetchRequestMetadata, ServiceWorkerFetchResultSender,
@@ -8,8 +9,8 @@ use crate::types::AsyncSubresourceNetworkContext;
 use moli_page_types::{SubresourceRequestInitiatorType, SubresourceRequestStarted};
 
 mod response;
-pub(in crate::worker) use response::{WorkerFetchAuthResponse, WorkerFetchPausedResponse};
-pub(crate) use response::{WorkerFetchCompletionSender, WorkerFetchStreamSender};
+use crate::network::{PausedResourceResponse, ResourceResponseBody};
+pub(crate) use response::WorkerResponseSender;
 
 #[cfg(test)]
 mod tests;
@@ -139,30 +140,6 @@ fn worker_network_result_parts<R>(
     )
 }
 
-async fn collect_worker_resource_response(
-    observed: moli_fetch::NetworkFetchResult<moli_fetch::StreamingRawResponse>,
-    resource: &ResourceResponseStream,
-    error_prefix: &str,
-) -> (
-    Result<ResourceBodyResponse, ResourceResponseFailure>,
-    Option<Vec<(String, String)>>,
-) {
-    let (mut response, network_request_headers) = worker_network_result_parts(observed);
-    resource.response_started(ResourceResponseHead {
-        status_text: None,
-        head: response.head(),
-        network_request_headers: network_request_headers.clone(),
-    });
-    while let Some(chunk) = response.next_chunk().await {
-        resource.data_received(&chunk);
-    }
-    let result = match response.finish().await {
-        Ok(()) => Ok(resource.finish_response().expect("received response")),
-        Err(error) => Err(resource.failure(format!("{error_prefix}: {error}"))),
-    };
-    (result, network_request_headers)
-}
-
 fn worker_fetch_network_request(
     state: &WorkerGlobalState,
     pending: &PendingWorkerFetch,
@@ -211,7 +188,7 @@ fn start_worker_fetch(
 ) {
     let state = state.borrow();
     let pending = &state.pending_fetches[&fetch_id];
-    let sender = WorkerFetchCompletionSender::new(&state, pending, fetch_id);
+    let sender = WorkerResponseSender::new(&state, pending, fetch_id);
     let request =
         match worker_fetch_network_request(&state, pending, auth, suppress_default_content_type) {
             Ok(request) => request,
@@ -313,66 +290,19 @@ pub(in crate::worker) fn spawn_worker_xhr_network(
     load: ResourceLoadLease,
     resource: Arc<ResourceResponseStream>,
     observer: crate::worker::WorkerNetworkObserver,
-    deliver: impl FnOnce(WorkerRequestDelivery) + Send + 'static,
+    deliver: impl Fn(WorkerXhrCompletion) + Send + Sync + 'static,
     xhr_id: u32,
     cancel_handle: FetchCancelHandle,
     request: Result<Request, String>,
 ) {
-    let preflight_network = resource.network.request();
-    load.task_runner().spawn(async move {
-        let loader = load.request_client();
-        let preflight_observer = observer.clone();
-        let preflight = crate::network_host::CorsPreflightNetworkObserver {
-            request: preflight_network,
-            observer: std::sync::Arc::new(move |event| preflight_observer.publish(event)),
-            frame_id: None,
-            resource_type: SubresourceResourceType::Xhr,
-            keepalive: false,
-        };
-        let cors_preflight_request_headers = request
-            .as_ref()
-            .map(|request| request.request_headers.clone())
-            .unwrap_or_default();
-
-        let (result, network_request_headers) = match request {
-            Ok(request) => {
-                // Ordinary worker XHR can keep the network/cache path streaming
-                // and spool large bodies until the XHR DONE boundary.
-                match fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer(
-                    &loader,
-                    request,
-                    Some(cancel_handle),
-                    cors_preflight_request_headers,
-                    Some(&preflight),
-                )
-                .await
-                {
-                    Ok(observed) => {
-                        collect_worker_resource_response(observed, &resource, "xhr").await
-                    }
-                    Err(error) => {
-                        let message = format!("xhr: {error}");
-                        (Err(error.with_message(message)), None)
-                    }
-                }
-            }
-            Err(error) => (Err(ResourceResponseFailure::from(error)), None),
-        };
-        if !result
-            .as_ref()
-            .is_ok_and(|response| resource.intercepts_response(&response.head))
-        {
-            load.finish();
+    let producer = WorkerResponseSender::xhr(load, resource, observer, xhr_id, deliver);
+    match request {
+        Ok(request) => {
+            let headers = request.request_headers.clone();
+            producer.fetch_network(request, cancel_handle, headers, Vec::new());
         }
-        deliver(WorkerRequestDelivery::new(
-            resource,
-            WorkerRequestCompletion {
-                id: xhr_id,
-                network_request_headers,
-                result,
-            },
-        ));
-    });
+        Err(error) => producer.complete(Err(error.into()), None),
+    }
 }
 
 pub(in crate::worker) fn continue_pending_worker_fetch(
@@ -506,22 +436,17 @@ pub(in crate::worker) fn continue_pending_worker_fetch_response(
     response_code: Option<u16>,
     response_headers: Option<Vec<(String, String)>>,
 ) {
-    let fetch_id = request.fetch_id;
-    let completion = {
+    let response = {
         let mut state = state.borrow_mut();
-        let completion_tx = state.fetch_completion_tx.clone();
-        let Some(pending) = state.pending_fetches.get_mut(&fetch_id) else {
+        let Some(pending) = state.pending_fetches.get_mut(&request.fetch_id) else {
             return;
         };
         pending.response.configure_interception(false, false);
-        let Some(response) = pending.paused_response.take() else {
-            return;
-        };
-        (completion_tx, response, fetch_id)
+        pending.paused_response.take()
     };
-    completion
-        .1
-        .resume(&completion.0, completion.2, response_code, response_headers);
+    if let Some(response) = response {
+        response.resume(response_code, response_headers);
+    }
 }
 
 pub(in crate::worker) fn fail_pending_worker_fetch_response(
@@ -596,6 +521,9 @@ pub(in crate::worker) fn continue_pending_worker_xhr(
         let Some(pending) = state.pending_xhrs.get_mut(&request.xhr_id) else {
             return;
         };
+        if let Some(response) = pending.paused_response.take() {
+            response.discard();
+        }
         let cancel_handle = FetchCancelHandle::new();
         pending.load.attach_cancel_handle(cancel_handle.clone());
         pending
@@ -633,8 +561,8 @@ pub(in crate::worker) fn continue_pending_worker_xhr(
         load,
         resource,
         observer,
-        move |delivery| {
-            let _ = completion_tx.send(WorkerXhrCompletion::TransportCompletion(delivery));
+        move |completion| {
+            let _ = completion_tx.send(completion);
         },
         xhr_id,
         cancel_handle,
@@ -687,7 +615,9 @@ pub(in crate::worker) fn fail_pending_worker_xhr_auth(
         let completion_tx = state.xhr_completion_tx.clone();
         if let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) {
             pending.response.configure_interception(false, false);
-            pending.paused_response = None;
+            if let Some(response) = pending.paused_response.take() {
+                response.discard();
+            }
         }
         completion_tx
     };
@@ -737,29 +667,17 @@ pub(in crate::worker) fn continue_pending_worker_xhr_response(
     response_code: Option<u16>,
     response_headers: Option<Vec<(String, String)>>,
 ) {
-    let xhr_id = request.xhr_id;
-    let completion = {
+    let response = {
         let mut state = state.borrow_mut();
-        let completion_tx = state.xhr_completion_tx.clone();
-        let Some(pending) = state.pending_xhrs.get_mut(&xhr_id) else {
+        let Some(pending) = state.pending_xhrs.get_mut(&request.xhr_id) else {
             return;
         };
         pending.response.configure_interception(false, false);
-        let Some(mut response) = pending.paused_response.take() else {
-            return;
-        };
-        if let Some(response_code) = response_code {
-            response.head.status = response_code;
-        }
-        if let Some(response_headers) = response_headers {
-            response.head.headers = response_headers;
-        }
-        (completion_tx, response, xhr_id)
+        pending.paused_response.take()
     };
-    let _ = completion.0.send(WorkerXhrCompletion::decision(
-        completion.2,
-        Ok(completion.1),
-    ));
+    if let Some(response) = response {
+        response.resume(response_code, response_headers);
+    }
 }
 
 pub(in crate::worker) fn fail_pending_worker_xhr_response(
@@ -775,7 +693,9 @@ pub(in crate::worker) fn fail_pending_worker_xhr_response(
             return;
         };
         pending.response.configure_interception(false, false);
-        pending.paused_response = None;
+        if let Some(response) = pending.paused_response.take() {
+            response.discard();
+        }
         completion_tx
     };
     let _ = completion_tx.send(WorkerXhrCompletion::decision(
@@ -799,13 +719,14 @@ pub(in crate::worker) fn fulfill_pending_worker_xhr_response(
             return;
         };
         pending.response.configure_interception(false, false);
-        let Some(mut paused) = pending.paused_response.take() else {
+        let Some(paused) = pending.paused_response.take() else {
             return;
         };
-        paused.head.status = response_code;
-        paused.head.headers = response_headers;
-        paused.head.cookie_set_reports.clear();
-        let response = response_body.into_fetch_response(paused.head);
+        let mut head = paused.discard();
+        head.status = response_code;
+        head.headers = response_headers;
+        head.cookie_set_reports.clear();
+        let response = response_body.into_fetch_response(head);
         (completion_tx, response, xhr_id)
     };
     let _ = completion.0.send(WorkerXhrCompletion::decision(
@@ -2014,7 +1935,9 @@ pub(in crate::worker) fn drain_worker_fetch_completion(
                 drain_worker_fetch_completion_result(scope, state, completion);
             }
         }
-        WorkerFetchEvent::AuthRequired(response) => response.pause(scope, state),
+        WorkerFetchEvent::ResponsePaused { fetch_id, response } => {
+            response::pause_worker_fetch_response(scope, state, fetch_id, *response)
+        }
         WorkerFetchEvent::Completion(completion) => {
             drain_worker_fetch_completion_result(scope, state, *completion)
         }
@@ -2036,8 +1959,12 @@ pub(in crate::worker) fn start_worker_streaming_fetch(
     started: WorkerFetchStreamingStarted,
 ) {
     let mut reject = None;
-    let csp_failure =
-        worker_fetch_response_csp_error(scope, state, started.fetch_id, &started.head);
+    let csp_failure = worker_response_csp_error(
+        scope,
+        state,
+        WorkerFetchTarget::Fetch(started.fetch_id),
+        &started.head,
+    );
     let response_input = if let Some(message) = csp_failure {
         let resolver = {
             let mut state_ref = state.borrow_mut();
@@ -2050,6 +1977,20 @@ pub(in crate::worker) fn start_worker_streaming_fetch(
         reject = Some((resolver, message));
         None
     } else {
+        let (document_url, request_url) = {
+            let state_ref = state.borrow();
+            let Some(pending) = state_ref.pending_fetches.get(&started.fetch_id) else {
+                return;
+            };
+            (pending.document_url.clone(), pending.request_url.clone())
+        };
+        report_worker_connect_response_redirect(
+            scope,
+            state,
+            &document_url,
+            &request_url,
+            &started.head,
+        );
         let mut state_ref = state.borrow_mut();
         let Some(pending) = state_ref.pending_fetches.get_mut(&started.fetch_id) else {
             return;
@@ -2179,48 +2120,79 @@ pub(super) fn publish_worker_request_failure(
     resource.network.failed(&error);
 }
 
-fn worker_fetch_response_csp_error(
+pub(super) fn worker_response_csp_error(
     scope: &mut v8::PinScope<'_, '_>,
     state: &Rc<RefCell<WorkerGlobalState>>,
-    fetch_id: u32,
+    target: WorkerFetchTarget,
     head: &ResponseHead,
 ) -> Option<String> {
     use crate::content_security_policy::ContentSecurityPolicyRedirectStatus;
-    let (document_url, request_url) = {
+    let (document_url, request_url, kind) = {
         let state = state.borrow();
-        let pending = state.pending_fetches.get(&fetch_id)?;
-        (pending.document_url.clone(), pending.request_url.clone())
+        match target {
+            WorkerFetchTarget::Fetch(id) => {
+                let pending = state.pending_fetches.get(&id)?;
+                (
+                    pending.document_url.clone(),
+                    pending.request_url.clone(),
+                    "fetch",
+                )
+            }
+            WorkerFetchTarget::Xhr(id) => {
+                let pending = state.pending_xhrs.get(&id)?;
+                (
+                    pending.document_url.clone(),
+                    pending.request_url.clone(),
+                    "xhr",
+                )
+            }
+            WorkerFetchTarget::CspReport(_) => {
+                unreachable!("CSP reports do not check connect-src on their response")
+            }
+        }
     };
-    let redirect_status = if head.redirect_chain.is_empty() {
-        ContentSecurityPolicyRedirectStatus::NoRedirect
-    } else {
-        ContentSecurityPolicyRedirectStatus::FollowedRedirect
-    };
-    if redirect_status == ContentSecurityPolicyRedirectStatus::FollowedRedirect {
-        dispatch_worker_content_security_policy_report_only_violation_for_checked_url_with_redirect_status_for_state(
-            scope, state, &document_url, &head.final_url, &request_url,
-            crate::content_security_policy::ContentSecurityPolicyResourceKind::WorkerConnect, redirect_status,
-        );
-    }
     let violation = worker_content_security_policy_violation_for_checked_url_with_redirect_status(
         &state.borrow(),
         &document_url,
         &head.final_url,
         &request_url,
         crate::content_security_policy::ContentSecurityPolicyResourceKind::WorkerConnect,
-        redirect_status,
+        if head.redirect_chain.is_empty() {
+            ContentSecurityPolicyRedirectStatus::NoRedirect
+        } else {
+            ContentSecurityPolicyRedirectStatus::FollowedRedirect
+        },
     )?;
+    // A blocked response terminates here. Allowed responses report once when
+    // accepted, so a response/auth pause cannot duplicate report-only events.
+    report_worker_connect_response_redirect(scope, state, &document_url, &request_url, head);
     dispatch_worker_content_security_policy_violation_event_for_state(scope, state, &violation);
     Some(worker_content_security_policy_error_message(
-        &violation, "fetch",
+        &violation, kind,
     ))
+}
+
+pub(super) fn report_worker_connect_response_redirect(
+    scope: &mut v8::PinScope<'_, '_>,
+    state: &Rc<RefCell<WorkerGlobalState>>,
+    document_url: &Url,
+    request_url: &Url,
+    head: &ResponseHead,
+) {
+    if !head.redirect_chain.is_empty() {
+        dispatch_worker_content_security_policy_report_only_violation_for_checked_url_with_redirect_status_for_state(
+            scope, state, document_url, &head.final_url, request_url,
+            crate::content_security_policy::ContentSecurityPolicyResourceKind::WorkerConnect,
+            crate::content_security_policy::ContentSecurityPolicyRedirectStatus::FollowedRedirect,
+        );
+    }
 }
 
 fn pause_worker_fetch_auth(
     state: &Rc<RefCell<WorkerGlobalState>>,
     fetch_id: u32,
     head: &ResponseHead,
-    response: WorkerFetchPausedResponse,
+    response: PausedResourceResponse,
     challenge: crate::protocol_types::SubresourceAuthChallenge,
 ) {
     let mut state = state.borrow_mut();
@@ -2261,8 +2233,12 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
     let _ = global;
     if let Ok(response) = &completion.result {
         let response_head = response.head();
-        let csp_failure =
-            worker_fetch_response_csp_error(scope, state, completion.id, &response_head);
+        let csp_failure = worker_response_csp_error(
+            scope,
+            state,
+            WorkerFetchTarget::Fetch(completion.id),
+            &response_head,
+        );
         if let Some(message) = csp_failure {
             let Some(pending) = state.borrow_mut().pending_fetches.remove(&completion.id) else {
                 return;
@@ -2280,69 +2256,26 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
             }
             return;
         }
-        let auth_challenge = {
+        let paused = {
             let state = state.borrow();
             let Some(pending) = state.pending_fetches.get(&completion.id) else {
                 return;
             };
-            (pending.response.handle_auth_requests() && matches!(response_head.status, 401 | 407))
-                .then(|| extract_subresource_auth_challenge(&response_head.headers))
-                .flatten()
+            pending
+                .response
+                .intercepts_response(&response_head)
+                .then(|| {
+                    let producer = WorkerResponseSender::new(&state, pending, completion.id);
+                    let body = ResourceResponseBody::completed(
+                        pending.response.clone(),
+                        response.clone(),
+                        None,
+                    );
+                    producer.pause(body, false)
+                })
         };
-        if let Some(challenge) = auth_challenge {
-            pause_worker_fetch_auth(
-                state,
-                completion.id,
-                &response_head,
-                WorkerFetchPausedResponse::Complete(Box::new(response.clone())),
-                challenge,
-            );
-            return;
-        }
-        let response_paused = {
-            let mut state = state.borrow_mut();
-            let Some(pending) = state.pending_fetches.get_mut(&completion.id) else {
-                return;
-            };
-            match pending.request_override.as_ref() {
-                Some(record) if pending.response.intercept_response() => {
-                    let response_body = response.subresource_response_body();
-                    let info = PendingSubresourceResponseInfo {
-                        internal_id: pending.response.network.handle().get(),
-                        url: record.url.clone(),
-                        final_url: response_head.final_url.clone(),
-                        method: record.method.clone(),
-                        request_headers: record.request_headers.clone(),
-                        request_body: request_body_text(&record.request_body),
-                        resource_type: SubresourceResourceType::Fetch,
-                        request_cookie_report: response_head.request_cookie_report.clone(),
-                        network_request_headers: pending.response.record_request_headers(None),
-                        response_status: response_head.status,
-                        response_headers: response_head.headers.clone(),
-                        response_body: response_body.clone(),
-                        from_cache: response_head.from_cache,
-                    };
-                    pending.paused_response = Some(WorkerFetchPausedResponse::Complete(Box::new(
-                        ResourceBodyResponse {
-                            head: response_head,
-                            body: response_body,
-                        },
-                    )));
-                    Some(info)
-                }
-                _ => None,
-            }
-        };
-        if let Some(info) = response_paused {
-            let state = state.borrow();
-            let pending = &state.pending_fetches[&completion.id];
-            publish_worker_fetch_pause(
-                &state,
-                crate::runtime::WorkerFetchTarget::Fetch(completion.id),
-                pending.response.network.handle(),
-                pending.load.clone(),
-                crate::runtime::RendererWorkerFetchStage::Response(Box::new(info)),
-            );
+        if let Some(paused) = paused {
+            response::pause_worker_fetch_response(scope, state, completion.id, paused);
             return;
         }
     }
@@ -2354,6 +2287,13 @@ pub(in crate::worker) fn drain_worker_fetch_completion_result(
     match completion.result {
         Ok(response) => {
             let response_head = response.head();
+            report_worker_connect_response_redirect(
+                scope,
+                state,
+                &pending.document_url,
+                &pending.request_url,
+                &response_head,
+            );
             let security_validation = response
                 .body
                 .try_bytes()

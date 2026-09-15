@@ -206,7 +206,7 @@ impl AdmittedNavigationLoad {
                 body,
                 request_headers,
                 auth,
-                self.request_cancellation.clone(),
+                self.request_cancellation.child(),
             )
             .await
     }

@@ -118,10 +118,6 @@ impl ResourceBodyResponse {
         self.head.clone()
     }
 
-    pub(crate) fn subresource_response_body(&self) -> SubresourceResponseBody {
-        self.body.clone()
-    }
-
     pub(crate) fn publish(
         &self,
         network: &ResourceTransfer,
@@ -237,6 +233,7 @@ enum ResourceStreamBody {
         moli_page_types::SubresourceResponseBodyWriter,
     ),
     Received(Arc<ResourceResponseHead>, SubresourceResponseBody),
+    PausedComplete(Arc<ResourceResponseHead>, SubresourceResponseBody),
 }
 
 impl ResourceResponseStream {
@@ -357,8 +354,79 @@ impl ResourceResponseStream {
                 self.network.data_received(bytes.len());
             }
             ResourceStreamBody::Paused(_, body) => body.append(bytes),
-            ResourceStreamBody::Pending | ResourceStreamBody::Received(..) => {}
+            ResourceStreamBody::Pending
+            | ResourceStreamBody::Received(..)
+            | ResourceStreamBody::PausedComplete(..) => {}
         }
+    }
+
+    pub(crate) fn head(&self) -> Arc<ResourceResponseHead> {
+        match &self.response.lock().body {
+            ResourceStreamBody::Reading(head, _)
+            | ResourceStreamBody::Paused(head, _)
+            | ResourceStreamBody::Received(head, _)
+            | ResourceStreamBody::PausedComplete(head, _) => head.clone(),
+            ResourceStreamBody::Pending => panic!("response head has not arrived"),
+        }
+    }
+
+    pub(crate) fn pause_completed_response(
+        &self,
+        response: ResourceBodyResponse,
+        status_text: Option<String>,
+    ) {
+        let mut state = self.response.lock();
+        let head = Arc::new(ResourceResponseHead {
+            head: response.head,
+            status_text,
+            network_request_headers: state.network_request_headers.clone(),
+        });
+        state.body = ResourceStreamBody::PausedComplete(head, response.body);
+    }
+
+    pub(crate) fn read_received(&self, offset: usize, size: usize) -> Result<Vec<u8>, String> {
+        match &mut self.response.lock().body {
+            ResourceStreamBody::Reading(_, body) | ResourceStreamBody::Paused(_, body) => {
+                body.read_range(offset, size)
+            }
+            ResourceStreamBody::Received(_, body) | ResourceStreamBody::PausedComplete(_, body) => {
+                body.read_chunk(offset, size)
+            }
+            ResourceStreamBody::Pending => return Ok(Vec::new()),
+        }
+        .map_err(|error| format!("failed to read response body: {error}"))
+    }
+
+    /// Accept the held head without replacing its original body writer. Bytes
+    /// consumed through a debugger body command remain available to script.
+    pub(crate) fn accept_response(
+        &self,
+        status: Option<u16>,
+        headers: Option<Vec<(String, String)>>,
+    ) {
+        let mut state = self.response.lock();
+        state.intercept_response = false;
+        state.handle_auth_requests = false;
+        let body = std::mem::take(&mut state.body);
+        state.body = match body {
+            ResourceStreamBody::Paused(mut head, body) => {
+                update_response_head(&mut head, status, headers);
+                self.network.response_started(head.clone());
+                if !body.is_empty() {
+                    self.network.data_received(body.len());
+                }
+                ResourceStreamBody::Reading(head, body)
+            }
+            ResourceStreamBody::PausedComplete(mut head, body) => {
+                update_response_head(&mut head, status, headers);
+                self.network.response_started(head.clone());
+                if !body.is_empty() {
+                    self.network.data_received(body.len());
+                }
+                ResourceStreamBody::Received(head, body)
+            }
+            body => body,
+        };
     }
 
     pub(crate) fn finish_response(&self) -> Option<ResourceBodyResponse> {
@@ -367,15 +435,19 @@ impl ResourceResponseStream {
             state.body,
             ResourceStreamBody::Reading(..) | ResourceStreamBody::Paused(..)
         ) {
-            let (ResourceStreamBody::Reading(head, body) | ResourceStreamBody::Paused(head, body)) =
-                std::mem::replace(&mut state.body, ResourceStreamBody::Pending)
-            else {
-                unreachable!()
+            state.body = match std::mem::take(&mut state.body) {
+                ResourceStreamBody::Reading(head, body) => {
+                    ResourceStreamBody::Received(head, body.finish())
+                }
+                ResourceStreamBody::Paused(head, body) => {
+                    ResourceStreamBody::PausedComplete(head, body.finish())
+                }
+                _ => unreachable!(),
             };
-            state.body = ResourceStreamBody::Received(head, body.finish());
         }
         match &state.body {
-            ResourceStreamBody::Received(head, body) => Some(ResourceBodyResponse {
+            ResourceStreamBody::Received(head, body)
+            | ResourceStreamBody::PausedComplete(head, body) => Some(ResourceBodyResponse {
                 head: head.head.clone(),
                 body: body.clone(),
             }),
@@ -387,14 +459,31 @@ impl ResourceResponseStream {
     pub(crate) fn failure(&self, message: String) -> ResourceResponseFailure {
         self.finish_response();
         match &self.response.lock().body {
-            ResourceStreamBody::Received(response, body) => ResourceResponseFailure::PartialBody {
-                message,
-                response: response.clone(),
-                body: body.clone(),
-            },
+            ResourceStreamBody::Received(response, body)
+            | ResourceStreamBody::PausedComplete(response, body) => {
+                ResourceResponseFailure::PartialBody {
+                    message,
+                    response: response.clone(),
+                    body: body.clone(),
+                }
+            }
             ResourceStreamBody::Pending => ResourceResponseFailure::Request(message),
             ResourceStreamBody::Reading(..) | ResourceStreamBody::Paused(..) => unreachable!(),
         }
+    }
+}
+
+fn update_response_head(
+    head: &mut Arc<ResourceResponseHead>,
+    status: Option<u16>,
+    headers: Option<Vec<(String, String)>>,
+) {
+    let head = Arc::make_mut(head);
+    if let Some(status) = status {
+        head.head.status = status;
+    }
+    if let Some(headers) = headers {
+        head.head.headers = headers;
     }
 }
 

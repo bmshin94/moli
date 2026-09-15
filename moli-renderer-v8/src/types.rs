@@ -525,7 +525,7 @@ impl PendingSubresourceFetchState {
 
 pub(super) struct PendingSubresourceResponseState {
     pub(super) pending: PendingSubresourceFetchState,
-    pub(super) response: NavigationResponse,
+    pub(super) response: crate::network::PausedResourceResponse,
 }
 
 pub(super) struct PendingSubresourceAuthState {
@@ -534,7 +534,7 @@ pub(super) struct PendingSubresourceAuthState {
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
     pub(super) request_body: Option<String>,
-    pub(super) response: NavigationResponse,
+    pub(super) response: crate::network::PausedResourceResponse,
 }
 
 pub(super) struct RunningSubresourceFetchState {
@@ -681,6 +681,10 @@ pub(super) enum AsyncSubresourceFetchEvent {
     #[cfg(test)]
     Completion(Box<AsyncSubresourceFetchCompletion>),
     TransportCompletion(Box<crate::network_host::CompletedResourceFetch>),
+    ResponsePaused {
+        internal_id: u64,
+        response: Box<crate::network::PausedResourceResponse>,
+    },
     NativeNetwork(crate::runtime::RendererNetworkObservation),
     StreamingStarted(Box<AsyncSubresourceStreamingStarted>),
     StreamingChunk(AsyncSubresourceStreamingChunk),
@@ -702,6 +706,11 @@ impl AsyncSubresourceFetchEvent {
             Self::TransportCompletion(completion) => AsyncSubresourceFetchEventTarget::Completion {
                 internal_id: completion.internal_id(),
             },
+            Self::ResponsePaused { internal_id, .. } => {
+                AsyncSubresourceFetchEventTarget::Completion {
+                    internal_id: *internal_id,
+                }
+            }
             Self::NativeNetwork(_) => AsyncSubresourceFetchEventTarget::NativeNetwork,
             Self::StreamingStarted(started) => AsyncSubresourceFetchEventTarget::StreamingStart {
                 internal_id: started.internal_id,

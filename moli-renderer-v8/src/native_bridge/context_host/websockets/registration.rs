@@ -301,7 +301,7 @@ impl JsContextHost {
                 network_request_headers: None,
                 response_status,
                 response_headers,
-                response_body: SubresourceResponseBody::from_bytes(Vec::new()),
+                response_body: SubresourceResponseBody::from_bytes(Vec::new()).into(),
                 from_cache: false,
             }),
         );

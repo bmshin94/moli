@@ -1,26 +1,27 @@
 use super::*;
+use crate::network::{PausedResourceResponse, ResourceResponseBody, ResourceResponseConsumer};
+#[cfg(test)]
 use moli_fetch::StreamingRawResponse;
 
 /// A resource result returns to the Worker that admitted it. The response and
 /// load outlive the VM when its completion queue closes during transport.
-pub(crate) struct WorkerFetchCompletionSender {
+pub(crate) struct WorkerResponseSender {
     pub(crate) response: Arc<ResourceResponseStream>,
     load: ResourceLoadLease,
     fetch_id: u32,
-    sender: Option<mpsc::UnboundedSender<WorkerFetchEvent>>,
+    sender: Option<WorkerResponseDestination>,
     body_source_id: Option<NetworkBodySourceId>,
+    stream_to_script: bool,
     preflight: crate::network_host::CorsPreflightNetworkObserver,
 }
 
-/// A granted stream can enqueue body messages without retaining completion authority.
 #[derive(Clone)]
-pub(crate) struct WorkerFetchStreamSender {
-    fetch_id: u32,
-    sender: mpsc::UnboundedSender<WorkerFetchEvent>,
-    body_source_id: NetworkBodySourceId,
+enum WorkerResponseDestination {
+    Fetch(mpsc::UnboundedSender<WorkerFetchEvent>),
+    Xhr(Arc<dyn Fn(WorkerXhrCompletion) + Send + Sync>),
 }
 
-impl WorkerFetchCompletionSender {
+impl WorkerResponseSender {
     pub(super) fn new(
         state: &WorkerGlobalState,
         pending: &PendingWorkerFetch,
@@ -31,8 +32,11 @@ impl WorkerFetchCompletionSender {
             response: pending.response.clone(),
             load: pending.load.clone(),
             fetch_id,
-            sender: Some(state.fetch_completion_tx.clone()),
+            sender: Some(WorkerResponseDestination::Fetch(
+                state.fetch_completion_tx.clone(),
+            )),
             body_source_id: None,
+            stream_to_script: false,
             preflight: crate::network_host::CorsPreflightNetworkObserver {
                 request: pending.response.network.request(),
                 observer: Arc::new(move |event| observer.publish(event)),
@@ -43,19 +47,28 @@ impl WorkerFetchCompletionSender {
         }
     }
 
-    pub(crate) fn stream_sender(
-        &mut self,
-        body_source_id: NetworkBodySourceId,
-    ) -> WorkerFetchStreamSender {
-        self.body_source_id = Some(body_source_id);
-        WorkerFetchStreamSender {
-            fetch_id: self.fetch_id,
-            sender: self
-                .sender
-                .as_ref()
-                .expect("active Worker response producer")
-                .clone(),
-            body_source_id,
+    pub(in crate::worker) fn xhr(
+        load: ResourceLoadLease,
+        response: Arc<ResourceResponseStream>,
+        observer: crate::worker::WorkerNetworkObserver,
+        fetch_id: u32,
+        deliver: impl Fn(WorkerXhrCompletion) + Send + Sync + 'static,
+    ) -> Self {
+        let preflight = crate::network_host::CorsPreflightNetworkObserver {
+            request: response.network.request(),
+            observer: Arc::new(move |event| observer.publish(event)),
+            frame_id: None,
+            resource_type: SubresourceResourceType::Xhr,
+            keepalive: false,
+        };
+        Self {
+            load,
+            response,
+            fetch_id,
+            sender: Some(WorkerResponseDestination::Xhr(Arc::new(deliver))),
+            body_source_id: None,
+            stream_to_script: false,
+            preflight,
         }
     }
 
@@ -89,6 +102,13 @@ impl WorkerFetchCompletionSender {
                 result,
             },
         );
+        let WorkerResponseDestination::Fetch(sender) = sender else {
+            let WorkerResponseDestination::Xhr(deliver) = sender else {
+                unreachable!()
+            };
+            deliver(WorkerXhrCompletion::TransportCompletion(delivery));
+            return;
+        };
         let event = match self.body_source_id {
             Some(body_source_id) => {
                 WorkerFetchEvent::StreamingFinished(WorkerFetchStreamingFinished {
@@ -114,19 +134,26 @@ impl WorkerFetchCompletionSender {
             request.apply_redirect_status(redirect.status);
             request.url = redirect.to_url.clone();
         }
+        let kind = if matches!(self.sender, Some(WorkerResponseDestination::Xhr(_))) {
+            "xhr"
+        } else {
+            "fetch"
+        };
         self.load.task_runner().spawn(async move {
             let result = if matches!(request.url.scheme(), "data" | "blob") {
                 local_url_response(&request.url)
                     .map(ResourceBodyResponse::from)
                     .ok_or_else(|| {
                         ResourceResponseFailure::Request(format!(
-                            "fetch: local url `{}` is unavailable",
+                            "{kind}: local url `{}` is unavailable",
                             request.url
                         ))
                     })
             } else {
                 let stream_to_script =
-                    request.request_mode != RequestMode::NoCors && request.follow_redirects;
+                    matches!(self.sender, Some(WorkerResponseDestination::Fetch(_)))
+                        && request.request_mode != RequestMode::NoCors
+                        && request.follow_redirects;
                 let loader = self.load.request_client();
                 match fetch_browser_subresource_raw_stream_with_preflight_headers_and_observer(
                     &loader,
@@ -146,28 +173,13 @@ impl WorkerFetchCompletionSender {
                             response.redirect_chain = chain;
                             response.redirected = true;
                         }
-                        if self.response.handle_auth_requests()
-                            && matches!(response.status, 401 | 407)
-                            && extract_subresource_auth_challenge(&response.headers).is_some()
-                        {
-                            self.response.response_started(ResourceResponseHead {
-                                status_text: None,
-                                head: response.head(),
-                                network_request_headers: None,
-                            });
-                            let sender = self.sender.as_ref().expect("active producer").clone();
-                            let _ = sender.send(WorkerFetchEvent::AuthRequired(Box::new(
-                                WorkerFetchAuthResponse {
-                                    transfer: Some((self, response, stream_to_script)),
-                                },
-                            )));
-                        } else {
-                            self.receive_response(response, stream_to_script).await;
-                        }
+                        let body =
+                            ResourceResponseBody::streaming(self.response.clone(), response, None);
+                        self.receive_or_pause(body, stream_to_script);
                         return;
                     }
                     Err(error) => {
-                        let message = format!("fetch: {error}");
+                        let message = format!("{kind}: {error}");
                         Err(error.with_message(message))
                     }
                 }
@@ -176,198 +188,167 @@ impl WorkerFetchCompletionSender {
         });
     }
 
-    async fn receive_response(
+    pub(crate) fn receive_or_pause(
         mut self,
-        mut response: StreamingRawResponse,
+        body: Arc<ResourceResponseBody>,
         stream_to_script: bool,
     ) {
-        let head = response.head();
-        self.response.response_started(ResourceResponseHead {
-            status_text: None,
-            head: head.clone(),
-            network_request_headers: None,
-        });
-        let stream = if stream_to_script && !self.response.intercepts_response(&head) {
-            let stream = self.stream_sender(crate::network_host::new_network_body_source_id());
-            stream.streaming_started(head);
-            Some(stream)
+        self.stream_to_script = stream_to_script;
+        if self.response.intercepts_response(&body.head()) {
+            let fetch_id = self.fetch_id;
+            let sender = self.sender.as_ref().expect("active producer").clone();
+            let response = self.pause(body, stream_to_script);
+            match sender {
+                WorkerResponseDestination::Fetch(sender) => {
+                    let _ = sender.send(WorkerFetchEvent::ResponsePaused {
+                        fetch_id,
+                        response: Box::new(response),
+                    });
+                }
+                WorkerResponseDestination::Xhr(deliver) => {
+                    deliver(WorkerXhrCompletion::ResponsePaused {
+                        xhr_id: fetch_id,
+                        response: Box::new(response),
+                    })
+                }
+            }
         } else {
-            None
-        };
-        while let Some(bytes) = response.next_chunk().await {
-            self.response.data_received(&bytes);
-            if let Some(stream) = &stream {
-                stream.streaming_chunk(bytes);
-            }
-        }
-        let result = match response.finish().await {
-            Ok(()) => Ok(self.response.finish_response().expect("received response")),
-            Err(error) => Err(self.response.failure(format!("fetch: {error}"))),
-        };
-        self.complete(result, None);
-    }
-
-    fn discard_response(&self, response: &mut StreamingRawResponse) {
-        response.cancellation_handle().cancel();
-        while let Some(bytes) = response.try_next_chunk() {
-            self.response.data_received(&bytes);
-        }
-    }
-}
-
-/// Authentication retains the actual response and its original completion
-/// authority. A retry discards that transport before starting the next one.
-pub(in crate::worker) struct WorkerFetchAuthResponse {
-    transfer: Option<(WorkerFetchCompletionSender, StreamingRawResponse, bool)>,
-}
-
-pub(in crate::worker) enum WorkerFetchPausedResponse {
-    Complete(Box<ResourceBodyResponse>),
-    Auth(Box<WorkerFetchAuthResponse>),
-}
-
-impl WorkerFetchPausedResponse {
-    pub(in crate::worker) fn discard(self) -> ResponseHead {
-        match self {
-            Self::Complete(response) => response.head,
-            Self::Auth(mut response) => {
-                let (mut producer, mut response, _) =
-                    response.transfer.take().expect("held response");
-                producer.discard_response(&mut response);
-                producer.sender.take();
-                response.head()
-            }
+            let runner = self.load.task_runner();
+            body.resume(Box::new(self));
+            body.start(&runner);
         }
     }
 
-    pub(in crate::worker) fn resume(
-        self,
-        sender: &mpsc::UnboundedSender<WorkerFetchEvent>,
-        fetch_id: u32,
-        response_code: Option<u16>,
-        response_headers: Option<Vec<(String, String)>>,
-    ) {
-        match self {
-            Self::Complete(mut response) => {
-                if let Some(status) = response_code {
-                    response.head.status = status;
-                }
-                if let Some(headers) = response_headers {
-                    response.head.headers = headers;
-                }
-                let _ = sender.send(WorkerFetchEvent::Completion(Box::new(
-                    WorkerRequestCompletion {
-                        id: fetch_id,
-                        network_request_headers: None,
-                        result: Ok(*response),
-                    },
-                )));
-            }
-            Self::Auth(mut response) => {
-                let (producer, mut response, stream) =
-                    response.transfer.take().expect("held response");
-                if let Some(status) = response_code {
-                    response.status = status;
-                }
-                if let Some(headers) = response_headers {
-                    response.headers = headers;
-                }
-                producer
-                    .load
-                    .task_runner()
-                    .spawn(producer.receive_response(response, stream));
-            }
-        }
+    pub(in crate::worker) fn pause(
+        mut self,
+        body: Arc<ResourceResponseBody>,
+        stream_to_script: bool,
+    ) -> PausedResourceResponse {
+        self.stream_to_script = stream_to_script;
+        PausedResourceResponse::new(body, Box::new(self))
     }
 }
 
-impl WorkerFetchAuthResponse {
-    pub(super) fn pause(
-        self: Box<Self>,
-        scope: &mut v8::PinScope<'_, '_>,
-        state: &Rc<RefCell<WorkerGlobalState>>,
-    ) {
-        let (producer, response, _) = self.transfer.as_ref().expect("held response");
-        let fetch_id = producer.fetch_id;
-        if !state
-            .borrow()
-            .pending_fetches
-            .get(&fetch_id)
-            .is_some_and(|pending| {
-                Arc::ptr_eq(&pending.response, &producer.response) && !pending.load.is_cancelled()
-            })
+impl ResourceResponseConsumer for WorkerResponseSender {
+    fn task_runner(&self) -> crate::network::RendererResourceTaskRunner {
+        self.load.task_runner()
+    }
+    fn is_cancelled(&self) -> bool {
+        self.load.is_cancelled()
+    }
+    fn detach(&mut self) {
+        self.stream_to_script = false;
+    }
+    fn response_started(&mut self, head: ResponseHead) {
+        if self.stream_to_script
+            && let Some(WorkerResponseDestination::Fetch(sender)) = &self.sender
         {
-            return;
-        }
-        let head = response.head();
-        if let Some(message) = worker_fetch_response_csp_error(scope, state, fetch_id, &head) {
-            let mut response = self;
-            let (producer, mut response, _) = response.transfer.take().expect("held response");
-            producer.discard_response(&mut response);
-            drop(response);
-            let failure = producer.response.failure(message);
-            producer.complete(Err(failure), None);
-            return;
-        }
-        let challenge =
-            extract_subresource_auth_challenge(&head.headers).expect("authentication challenge");
-        pause_worker_fetch_auth(
-            state,
-            fetch_id,
-            &head,
-            WorkerFetchPausedResponse::Auth(self),
-            challenge,
-        );
-    }
-}
-
-impl Drop for WorkerFetchAuthResponse {
-    fn drop(&mut self) {
-        if let Some((producer, mut response, _)) = self.transfer.take() {
-            if producer.load.is_cancelled() {
-                producer.discard_response(&mut response);
-                let failure = producer.response.failure(ABORTED_ERROR_TEXT.into());
-                producer.complete(Err(failure), None);
-                return;
-            }
-            // Lost observers release the decision. The existing load lease has
-            // already cancelled ordinary retired requests; detached keepalive
-            // responses finish without retaining or re-entering the Worker VM.
-            producer.response.configure_interception(false, false);
-            producer
-                .load
-                .task_runner()
-                .spawn(producer.receive_response(response, false));
-        }
-    }
-}
-
-impl WorkerFetchStreamSender {
-    pub(crate) fn streaming_started(&self, head: ResponseHead) {
-        let body_source_id = self.body_source_id;
-        let _ = self
-            .sender
-            .send(WorkerFetchEvent::StreamingStarted(Box::new(
+            let body_source_id = crate::network_host::new_network_body_source_id();
+            self.body_source_id = Some(body_source_id);
+            let _ = sender.send(WorkerFetchEvent::StreamingStarted(Box::new(
                 WorkerFetchStreamingStarted {
                     fetch_id: self.fetch_id,
                     body_source_id,
                     head,
                 },
             )));
+        }
     }
-
-    pub(crate) fn streaming_chunk(&self, bytes: Vec<u8>) {
-        let body_source_id = self.body_source_id;
-        let _ = self.sender.send(WorkerFetchEvent::StreamingChunk(
-            WorkerFetchStreamingChunk {
-                body_source_id,
-                bytes,
-            },
-        ));
+    fn data_received(&mut self, bytes: Vec<u8>) {
+        if let Some(body_source_id) = self.body_source_id
+            && let Some(WorkerResponseDestination::Fetch(sender)) = &self.sender
+        {
+            let _ = sender.send(WorkerFetchEvent::StreamingChunk(
+                WorkerFetchStreamingChunk {
+                    body_source_id,
+                    bytes,
+                },
+            ));
+        }
+    }
+    fn complete(
+        mut self: Box<Self>,
+        result: Result<ResourceBodyResponse, ResourceResponseFailure>,
+        _network_error_text: Option<String>,
+    ) {
+        self.send_completion(result, None);
+    }
+    fn discard(mut self: Box<Self>) {
+        self.sender.take();
     }
 }
 
-impl Drop for WorkerFetchCompletionSender {
+pub(super) fn pause_worker_fetch_response(
+    scope: &mut v8::PinScope<'_, '_>,
+    state: &Rc<RefCell<WorkerGlobalState>>,
+    fetch_id: u32,
+    response: PausedResourceResponse,
+) {
+    if !state
+        .borrow()
+        .pending_fetches
+        .get(&fetch_id)
+        .is_some_and(|pending| {
+            Arc::ptr_eq(&pending.response, &response.body.resource) && !pending.load.is_cancelled()
+        })
+    {
+        return;
+    }
+    let head = response.body.head();
+    if let Some(message) =
+        worker_response_csp_error(scope, state, WorkerFetchTarget::Fetch(fetch_id), &head)
+    {
+        let resource = response.body.resource.clone();
+        response.discard();
+        let completion = WorkerRequestCompletion {
+            id: fetch_id,
+            network_request_headers: None,
+            result: Err(resource.failure(message)),
+        };
+        drain_worker_fetch_completion_result(scope, state, completion);
+        return;
+    }
+    if response.body.resource.handle_auth_requests()
+        && matches!(head.status, 401 | 407)
+        && let Some(challenge) = extract_subresource_auth_challenge(&head.headers)
+    {
+        pause_worker_fetch_auth(state, fetch_id, &head, response, challenge);
+        return;
+    }
+    let mut state = state.borrow_mut();
+    let pending = state
+        .pending_fetches
+        .get_mut(&fetch_id)
+        .expect("originating fetch");
+    let (url, method, headers, body) = worker_fetch_request_metadata(pending);
+    let info = PendingSubresourceResponseInfo {
+        internal_id: pending.response.network.handle().get(),
+        url: url.clone(),
+        final_url: head.final_url,
+        method: method.to_owned(),
+        request_headers: headers.to_vec(),
+        request_body: request_body_text(body),
+        resource_type: SubresourceResourceType::Fetch,
+        request_cookie_report: head.request_cookie_report,
+        network_request_headers: pending.response.record_request_headers(None),
+        response_status: head.status,
+        response_headers: head.headers,
+        response_body: response.body.body_source(),
+        from_cache: head.from_cache,
+    };
+    pending.paused_response = Some(response);
+    let handle = pending.response.network.handle();
+    let load = pending.load.clone();
+    publish_worker_fetch_pause(
+        &state,
+        crate::runtime::WorkerFetchTarget::Fetch(fetch_id),
+        handle,
+        load,
+        crate::runtime::RendererWorkerFetchStage::Response(Box::new(info)),
+    );
+}
+
+impl Drop for WorkerResponseSender {
     fn drop(&mut self) {
         if self.sender.is_some() {
             self.load.cancel();
@@ -389,8 +370,9 @@ mod tests {
             let cancel = FetchCancelHandle::new();
             let (mut producer, mut receive) = producer_for_test(cancel.clone());
             let response = producer.response.clone();
-            let stream = streamed
-                .then(|| producer.stream_sender(crate::network_host::new_network_body_source_id()));
+            let body_source_id = streamed.then(crate::network_host::new_network_body_source_id);
+            producer.body_source_id = body_source_id;
+            let retained_sender = producer.sender.clone();
             drop(producer);
             assert!(
                 cancel.is_cancelled(),
@@ -399,10 +381,7 @@ mod tests {
             let delivery = match receive.recv().await.unwrap() {
                 WorkerFetchEvent::TransportCompletion(delivery) if !streamed => delivery,
                 WorkerFetchEvent::StreamingFinished(finished) if streamed => {
-                    assert_eq!(
-                        finished.body_source_id,
-                        stream.as_ref().unwrap().body_source_id
-                    );
+                    assert_eq!(finished.body_source_id, body_source_id.unwrap());
                     finished.delivery
                 }
                 _ => panic!("the original response route must receive its failure"),
@@ -414,9 +393,9 @@ mod tests {
             assert!(
                 matches!(completion.result, Err(ResourceResponseFailure::Request(message)) if message == "Worker response producer closed")
             );
-            // A view of the JS stream may outlive the producer but cannot retain
-            // its load or prevent delivery of the terminal result.
-            drop(stream);
+            // Retaining a queue endpoint cannot retain the load or delay its
+            // terminal delivery when the producer disappears.
+            drop(retained_sender);
             assert!(
                 receive.recv().await.is_none(),
                 "only one completion is sent"
@@ -427,7 +406,7 @@ mod tests {
     fn producer_for_test(
         cancel: FetchCancelHandle,
     ) -> (
-        WorkerFetchCompletionSender,
+        WorkerResponseSender,
         mpsc::UnboundedReceiver<WorkerFetchEvent>,
     ) {
         let client =
@@ -439,12 +418,13 @@ mod tests {
         );
         let response = ResourceResponseStream::unobserved_for_test();
         let (send, receive) = mpsc::unbounded_channel();
-        let producer = WorkerFetchCompletionSender {
+        let producer = WorkerResponseSender {
             response: response.clone(),
             load,
             fetch_id: 42,
-            sender: Some(send),
+            sender: Some(WorkerResponseDestination::Fetch(send)),
             body_source_id: None,
+            stream_to_script: false,
             preflight: crate::network_host::CorsPreflightNetworkObserver {
                 request: response.network.request(),
                 observer: Arc::new(|_| {}),
@@ -454,6 +434,123 @@ mod tests {
             },
         };
         (producer, receive)
+    }
+
+    #[tokio::test]
+    async fn controlled_worker_response_pauses_at_head_and_completes_on_its_original_queue() {
+        for authentication in [false, true] {
+            for retire in [false, true] {
+                let cancel = FetchCancelHandle::new();
+                let (producer, mut receive) = producer_for_test(cancel.clone());
+                let resource = producer.response.clone();
+                let load = producer.load.clone();
+                resource.configure_interception(!authentication, authentication);
+                let mut head =
+                    crate::network_host::local_url_response(&Url::parse("data:,held").unwrap())
+                        .unwrap()
+                        .head();
+                if authentication {
+                    head.status = 401;
+                    head.headers = vec![("www-authenticate".into(), "Basic realm=held".into())];
+                }
+                let released = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let release = released.clone();
+                let body = ResourceResponseBody::controlled(
+                    resource.clone(),
+                    crate::network::ResourceResponseHead {
+                        head,
+                        status_text: None,
+                        network_request_headers: None,
+                    },
+                    cancel,
+                    move || {
+                        release.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    },
+                );
+                producer.receive_or_pause(body.clone(), true);
+                let WorkerFetchEvent::ResponsePaused { fetch_id, response } =
+                    receive.try_recv().unwrap()
+                else {
+                    panic!(
+                        "the controlled head must reach the original decision queue before body input"
+                    )
+                };
+                assert_eq!(fetch_id, 42);
+                assert_eq!(
+                    response.body.head().status,
+                    if authentication { 401 } else { 200 }
+                );
+                body.data_received(vec![0, 128]);
+                assert_eq!(
+                    response.body.read(0, 4).await.unwrap(),
+                    (vec![0, 128], false)
+                );
+                assert!(
+                    receive.try_recv().is_err(),
+                    "no JS stream before the decision"
+                );
+                let delivery = if retire {
+                    load.cancel();
+                    drop(response);
+                    let WorkerFetchEvent::TransportCompletion(delivery) =
+                        receive.try_recv().unwrap()
+                    else {
+                        panic!("retirement must synchronously queue the failed response")
+                    };
+                    delivery
+                } else {
+                    response.resume(Some(206), None);
+                    let WorkerFetchEvent::StreamingStarted(started) = receive.try_recv().unwrap()
+                    else {
+                        panic!("accepted head first")
+                    };
+                    assert_eq!(started.head.status, 206);
+                    let WorkerFetchEvent::StreamingChunk(prefix) = receive.try_recv().unwrap()
+                    else {
+                        panic!("replay the held prefix")
+                    };
+                    assert_eq!(prefix.body_source_id, started.body_source_id);
+                    assert_eq!(prefix.bytes, [0, 128]);
+                    body.data_received(vec![255, 65]);
+                    let WorkerFetchEvent::StreamingChunk(tail) = receive.try_recv().unwrap() else {
+                        panic!("actual tail before completion")
+                    };
+                    assert_eq!(tail.body_source_id, started.body_source_id);
+                    assert_eq!(tail.bytes, [255, 65]);
+                    body.complete(Ok(()), None);
+                    let WorkerFetchEvent::StreamingFinished(finished) = receive.try_recv().unwrap()
+                    else {
+                        panic!("completion cannot be deferred past Worker close")
+                    };
+                    assert_eq!(finished.body_source_id, started.body_source_id);
+                    finished.delivery
+                };
+                body.data_received(b"late".to_vec());
+                body.complete(Err("late".into()), None);
+                assert_eq!(
+                    released.load(std::sync::atomic::Ordering::SeqCst),
+                    usize::from(retire)
+                );
+                let completion = delivery
+                    .claim(&resource)
+                    .expect("original response owns completion");
+                assert_eq!(completion.id, 42);
+                match completion.result {
+                    Ok(response) if !retire => {
+                        assert_eq!(response.body.clone_body_bytes(), [0, 128, 255, 65])
+                    }
+                    Err(ResourceResponseFailure::PartialBody { message, body, .. }) if retire => {
+                        assert!(message.contains("ERR_ABORTED"));
+                        assert_eq!(body.clone_body_bytes(), [0, 128]);
+                    }
+                    result => panic!("retain the first terminal result: {result:?}"),
+                }
+                assert!(
+                    receive.try_recv().is_err(),
+                    "one terminal despite late callbacks"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -468,20 +565,14 @@ mod tests {
         head.status = 401;
         head.headers = vec![("www-authenticate".into(), "Basic realm=held".into())];
         resource.configure_interception(false, true);
-        resource.response_started(ResourceResponseHead {
-            status_text: None,
-            head: head.clone(),
-            network_request_headers: None,
-        });
         let (chunks, receiver) = mpsc::unbounded_channel();
         chunks.send(vec![0, 128]).unwrap();
         chunks.send(vec![255, 65]).unwrap();
         let (_finished, completion) = tokio::sync::oneshot::channel();
         let response =
             StreamingRawResponse::new_with_head(head, receiver, cancel.clone(), completion);
-        let paused = WorkerFetchPausedResponse::Auth(Box::new(WorkerFetchAuthResponse {
-            transfer: Some((producer, response, true)),
-        }));
+        let body = ResourceResponseBody::streaming(resource.clone(), response, None);
+        let paused = producer.pause(body, true);
         assert_eq!(paused.discard().status, 401);
         assert!(cancel.is_cancelled());
         assert!(

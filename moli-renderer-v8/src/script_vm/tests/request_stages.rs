@@ -83,7 +83,15 @@ async fn request_stages(resource: Resource, authenticate: bool, finish: Finish) 
             attempts += 1;
             if authenticate && attempts == 1 {
                 first_body = Some(body);
-                stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"stage\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"stage\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.unwrap();
+                // Retry must become possible at the challenge head and close
+                // this transport while its nonempty body remains withheld.
+                let mut byte = [0];
+                match stream.read(&mut byte).await {
+                    Ok(0) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                    other => panic!("authentication retry must close its challenge: {other:?}"),
+                }
                 continue;
             }
             if authenticate {

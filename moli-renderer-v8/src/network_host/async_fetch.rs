@@ -645,6 +645,13 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
     preflight_observer: CorsPreflightNetworkObserver,
     request_url: url::Url,
 ) {
+    let receiver = super::ResourceFetchReceiver::new(
+        task_runner.clone(),
+        completion_tx,
+        internal_id,
+        request_url,
+        resource,
+    );
     task_runner.spawn(async move {
         // JS can expose selected responses as streams; every physical response
         // publishes stages and retains its body independently of that consumer.
@@ -657,16 +664,27 @@ pub(crate) fn spawn_async_subresource_fetch_with_redirect_chain(
             Some(&preflight_observer),
         )
         .await;
-        receive_async_subresource_response(
-            completion_tx,
-            internal_id,
-            resource,
-            request_url,
-            observed,
-            stream_to_js,
-            initial_redirect_chain,
-        )
-        .await;
+        match observed {
+            Ok(observed) => {
+                let (mut response, observation) = observed.into_parts();
+                receiver.resource.record_request_headers(
+                    observation.map(|observation| observation.into_headers()),
+                );
+                if !initial_redirect_chain.is_empty() {
+                    let mut redirects = initial_redirect_chain;
+                    redirects.append(&mut response.redirect_chain);
+                    response.redirect_chain = redirects;
+                    response.redirected = true;
+                }
+                let body = crate::network::ResourceResponseBody::streaming(
+                    receiver.resource.clone(),
+                    response,
+                    None,
+                );
+                receiver.receive_or_pause(body, stream_to_js);
+            }
+            Err(error) => receiver.complete(None, Err(error)),
+        }
     });
 }
 
@@ -683,94 +701,6 @@ fn can_stream_subresource_response(request: &Request) -> bool {
         )
     ) && request.follow_redirects
         && request.request_mode != RequestMode::NoCors
-}
-
-async fn receive_async_subresource_response(
-    completion_tx: RendererResourceCompletionSender,
-    internal_id: u64,
-    resource: Arc<ResourceResponseStream>,
-    request_url: url::Url,
-    observed: Result<NetworkFetchResult<StreamingRawResponse>, ResourceResponseFailure>,
-    stream_to_js: bool,
-    initial_redirect_chain: Vec<RedirectInfo>,
-) {
-    let mut body_source_id = None;
-    let mut network_request_headers = None;
-    let result = match observed {
-        Err(error) => Err(error),
-        Ok(observed) => {
-            let (mut response, request_observation) = observed.into_parts();
-            network_request_headers =
-                request_observation.map(|observation| observation.into_headers());
-            let mut head = response.head();
-            if !initial_redirect_chain.is_empty() {
-                let mut redirects = initial_redirect_chain;
-                redirects.append(&mut head.redirect_chain);
-                head.redirect_chain = redirects;
-                head.redirected = true;
-            }
-            resource.response_started(ResourceResponseHead {
-                status_text: None,
-                head: head.clone(),
-                network_request_headers: network_request_headers.clone(),
-            });
-            if stream_to_js && !resource.intercepts_response(&head) {
-                let id = new_network_body_source_id();
-                body_source_id = Some(id);
-                let _ = completion_tx.send_async_subresource_event(
-                    AsyncSubresourceFetchEvent::StreamingStarted(Box::new(
-                        AsyncSubresourceStreamingStarted {
-                            internal_id,
-                            request_url: request_url.clone(),
-                            body_source_id: id,
-                            head: head.clone(),
-                        },
-                    )),
-                );
-            }
-            while let Some(bytes) = response.next_chunk().await {
-                resource.data_received(&bytes);
-                if let Some(body_source_id) = body_source_id {
-                    let _ = completion_tx.send_async_subresource_event(
-                        AsyncSubresourceFetchEvent::StreamingChunk(
-                            AsyncSubresourceStreamingChunk {
-                                body_source_id,
-                                bytes,
-                            },
-                        ),
-                    );
-                }
-            }
-            match response.finish().await {
-                Ok(()) => Ok(resource
-                    .finish_response()
-                    .expect("physical response head precedes completion")),
-                Err(error) => Err(resource.failure(format_network_error(error))),
-            }
-        }
-    };
-    let completion = AsyncSubresourceFetchCompletion {
-        internal_id,
-        response_status_text: None,
-        skip_fetch_security_validation: false,
-        response_filter: None,
-        network_error_text: None,
-        network_request_headers,
-        result,
-    };
-    if let Some(body_source_id) = body_source_id {
-        let _ = completion_tx.send_async_subresource_event(
-            AsyncSubresourceFetchEvent::TransportStreamingFinished {
-                body_source_id,
-                completion: Box::new(super::CompletedResourceFetch::new(
-                    resource.clone(),
-                    completion,
-                )),
-            },
-        );
-    } else {
-        super::send_resource_completion(&completion_tx, resource.clone(), completion);
-    }
 }
 
 async fn fetch_once_with_network_metadata(
