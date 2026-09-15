@@ -648,7 +648,42 @@ impl ResourceRequestClient {
             .client()
             .fetch_raw_stream_with_cancel_and_network_metadata(request.clone(), cancel_handle)
             .await?;
-        let (response, observation_journal) = observed.into_parts_with_observation_journal();
+        let (mut response, observation_journal) = observed.into_parts_with_observation_journal();
+        let redirect_count = response.redirect_chain.len();
+        for (index, redirect) in response.redirect_chain.iter_mut().enumerate() {
+            if redirect.from_cache {
+                continue;
+            }
+            let Some(exchange) = observation_journal
+                .redirect_exchange_group(redirect_count, index)
+                .and_then(|group| group.last())
+            else {
+                continue;
+            };
+            let Some(observed) = exchange
+                .response()
+                .filter(|head| head.status() == redirect.status)
+            else {
+                continue;
+            };
+            // Preserve the physical hop before consumers keep only the final
+            // response. Cookie lookup alone cannot prove an HTTP exchange.
+            redirect.response_extra_info = Some(moli_fetch::NetworkResponseExtraInfo {
+                request_extra_info: moli_fetch::NetworkRequestExtraInfo {
+                    headers: exchange.request().headers().to_vec(),
+                    cookie_report: exchange
+                        .request()
+                        .cookie_report()
+                        .cloned()
+                        .unwrap_or_default(),
+                },
+                status: observed.status(),
+                headers: observed.headers().to_vec(),
+                cookie_set_reports: redirect.cookie_set_reports.clone(),
+            });
+            redirect.network_extra_info_available = true;
+            redirect.redirect_has_extra_info = true;
+        }
         let response = response.with_lifetime_lease(self.resource_runtime.clone());
         let response = if let Some(cache_key) = cache_key {
             self.tee_raw_subresource_response_for_memory_cache(request, cache_key, response)
@@ -967,6 +1002,9 @@ fn streaming_raw_response_from_cached_subresource(
     for redirect in &mut head.redirect_chain {
         redirect.from_cache = true;
         redirect.network_extra_info_available = false;
+        redirect.request_extra_info = None;
+        redirect.response_extra_info = None;
+        redirect.redirect_has_extra_info = false;
     }
     streaming_raw_response_from_head_and_body(head, response.clone_body_bytes())
 }
@@ -986,6 +1024,9 @@ fn response_with_memory_cache_hit(mut response: Response) -> Response {
     for redirect in &mut response.redirect_chain {
         redirect.from_cache = true;
         redirect.network_extra_info_available = false;
+        redirect.request_extra_info = None;
+        redirect.response_extra_info = None;
+        redirect.redirect_has_extra_info = false;
     }
     response
 }

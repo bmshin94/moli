@@ -9,7 +9,7 @@ use crate::domains::network::{NetworkBacklogPreferredRequestId, NetworkPreparedO
 
 use super::events::{
     emit_body_finished, emit_data_received, emit_event_source_message_received,
-    emit_loading_failed, emit_loading_finished, emit_redirect_response_received_extra_info,
+    emit_loading_failed, emit_loading_finished, emit_redirect_extra_info,
     emit_request_will_be_sent, emit_request_will_be_sent_extra_info, emit_response_received,
     emit_response_received_extra_info, emit_websocket_closed, emit_websocket_created,
     emit_websocket_frame, emit_websocket_frame_error, emit_websocket_handshake_response_received,
@@ -20,9 +20,9 @@ use super::output_queue::{
     TargetNetworkBacklogPreparedDelivery, TargetSubresourceBodyNetworkDeliveryOutput,
     TargetSubresourceCompleteNetworkDeliveryOutput, TargetSubresourceDataNetworkDeliveryOutput,
     TargetSubresourceEventSourceMessageNetworkDeliveryOutput, TargetSubresourceMetadataOutcome,
-    TargetSubresourceNetworkDeliveryOutput, TargetSubresourceRequestExtraInfoNetworkDeliveryOutput,
-    TargetSubresourceRequestNetworkDeliveryOutput, TargetSubresourceResponseNetworkDeliveryOutput,
-    TargetWebSocketDeliveryRecord, TargetWebSocketLifecycleDeliveryKind,
+    TargetSubresourceNetworkDeliveryOutput, TargetSubresourceRequestNetworkDeliveryOutput,
+    TargetSubresourceResponseNetworkDeliveryOutput, TargetWebSocketDeliveryRecord,
+    TargetWebSocketLifecycleDeliveryKind,
 };
 
 pub(crate) struct NetworkBacklogProjectionContext<'a> {
@@ -123,14 +123,6 @@ fn emit_subresource_network_delivery_record(
                 );
             }
             false
-        }
-        TargetSubresourceNetworkDeliveryOutput::RequestExtraInfo(output) => {
-            emit_staged_subresource_request_extra_info(
-                out,
-                output,
-                event_session_ids,
-                base_timestamp,
-            )
         }
         TargetSubresourceNetworkDeliveryOutput::ResponseStarted(output) => {
             emit_staged_subresource_response_started(
@@ -269,25 +261,8 @@ fn emit_complete_subresource_network_delivery_record(
                 output.request_initiator_type(),
                 None,
                 false,
-                output
-                    .network_request_headers()
-                    .is_none()
-                    .then(|| output.request_cookie_report())
-                    .flatten(),
+                output.request_cookie_report(),
                 &[],
-            );
-        }
-    }
-    if let Some(network_request_headers) = output.network_request_headers() {
-        let request_cookie_report = output.request_cookie_report().cloned().unwrap_or_default();
-        for event_session_id in event_session_ids {
-            emit_request_will_be_sent_extra_info(
-                out,
-                event_session_id.as_deref(),
-                request_id,
-                network_request_headers,
-                &request_cookie_report,
-                timestamp,
             );
         }
     }
@@ -302,6 +277,13 @@ fn emit_complete_subresource_network_delivery_record(
         } => {
             for redirect in redirect_chain {
                 for event_session_id in event_session_ids {
+                    emit_redirect_extra_info(
+                        out,
+                        event_session_id.as_deref(),
+                        request_id,
+                        redirect,
+                        timestamp,
+                    );
                     emit_request_will_be_sent(
                         out,
                         event_session_id.as_deref(),
@@ -323,17 +305,23 @@ fn emit_complete_subresource_network_delivery_record(
                             redirect.from_cache,
                             redirect.negotiated_http_version,
                         )),
-                        !redirect.cookie_set_reports.is_empty(),
+                        redirect.redirect_has_extra_info,
                         redirect.request_cookie_report.as_ref(),
                         &[],
                     );
-                    emit_redirect_response_received_extra_info(
+                }
+            }
+            if let Some(network_request_headers) = output.network_request_headers() {
+                let request_cookie_report =
+                    output.request_cookie_report().cloned().unwrap_or_default();
+                for event_session_id in event_session_ids {
+                    emit_request_will_be_sent_extra_info(
                         out,
                         event_session_id.as_deref(),
                         request_id,
-                        &redirect.headers,
-                        redirect.status,
-                        &redirect.cookie_set_reports,
+                        network_request_headers,
+                        &request_cookie_report,
+                        timestamp,
                     );
                 }
             }
@@ -389,6 +377,20 @@ fn emit_complete_subresource_network_delivery_record(
             }
         }
         TargetSubresourceMetadataOutcome::Failure { error_text } => {
+            if let Some(network_request_headers) = output.network_request_headers() {
+                let request_cookie_report =
+                    output.request_cookie_report().cloned().unwrap_or_default();
+                for event_session_id in event_session_ids {
+                    emit_request_will_be_sent_extra_info(
+                        out,
+                        event_session_id.as_deref(),
+                        request_id,
+                        network_request_headers,
+                        &request_cookie_report,
+                        timestamp,
+                    );
+                }
+            }
             if output.resource_type() != moli_core::page::SubresourceResourceType::WebSocket {
                 record_subresource_failed_response_body(
                     conn,
@@ -473,29 +475,6 @@ fn emit_staged_subresource_request_started(
     out.len() > initial_output_len
 }
 
-fn emit_staged_subresource_request_extra_info(
-    out: &mut Vec<BackgroundProtocolEvent>,
-    delivery_output: &TargetSubresourceRequestExtraInfoNetworkDeliveryOutput,
-    event_session_ids: &[Option<String>],
-    base_timestamp: f64,
-) -> bool {
-    let initial_output_len = out.len();
-    let request_id = delivery_output.request_id();
-    let output = delivery_output.output();
-    let timestamp = base_timestamp + ((output.index() + 1) as f64 * 0.000_001);
-    for event_session_id in event_session_ids {
-        emit_request_will_be_sent_extra_info(
-            out,
-            event_session_id.as_deref(),
-            request_id,
-            output.request_headers(),
-            output.request_cookie_report(),
-            timestamp,
-        );
-    }
-    out.len() > initial_output_len
-}
-
 fn emit_staged_subresource_response_started(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
@@ -518,6 +497,13 @@ fn emit_staged_subresource_response_started(
     let resource_type = request.resource_type().into();
     for redirect in output.redirect_chain() {
         for event_session_id in event_session_ids {
+            emit_redirect_extra_info(
+                out,
+                event_session_id.as_deref(),
+                request_id,
+                redirect,
+                timestamp,
+            );
             emit_request_will_be_sent(
                 out,
                 event_session_id.as_deref(),
@@ -539,17 +525,22 @@ fn emit_staged_subresource_response_started(
                     redirect.from_cache,
                     redirect.negotiated_http_version,
                 )),
-                !redirect.cookie_set_reports.is_empty(),
+                redirect.redirect_has_extra_info,
                 redirect.request_cookie_report.as_ref(),
                 &[],
             );
-            emit_redirect_response_received_extra_info(
+        }
+    }
+    if let Some(headers) = output.network_request_headers() {
+        let empty = moli_cookie_jar::StoredCookieQueryReport::default();
+        for session in event_session_ids {
+            emit_request_will_be_sent_extra_info(
                 out,
-                event_session_id.as_deref(),
+                session.as_deref(),
                 request_id,
-                &redirect.headers,
-                redirect.status,
-                &redirect.cookie_set_reports,
+                headers,
+                output.request_cookie_report().unwrap_or(&empty),
+                timestamp,
             );
         }
     }
@@ -823,10 +814,7 @@ fn emit_failed_subresource_request_progress(
                 }
             }
         }
-        // Initial cookie metadata may already have emitted this event at admission.
-        if (hop > 0 || request.request_cookie_report().is_none())
-            && let Some(exchange) = exchange
-        {
+        if let Some(exchange) = exchange {
             let observed = exchange.request();
             let empty = moli_cookie_jar::StoredCookieQueryReport::default();
             for session in event_session_ids {
@@ -1227,7 +1215,9 @@ mod tests {
         }
     }
 
-    fn emitted_terminal_for(items: Vec<ScriptNetworkOutputItem>) -> crate::BackgroundProtocolEvent {
+    fn emitted_events_for(
+        items: Vec<ScriptNetworkOutputItem>,
+    ) -> Vec<crate::BackgroundProtocolEvent> {
         let mut queue = TargetNetworkOutputQueue::default();
         for item in items {
             queue.append_renderer_output_item_for_loader(&item, "LOADER-1");
@@ -1247,13 +1237,13 @@ mod tests {
         let owner = crate::conn::CommandOwnerScope::capture(&conn, None);
         emit_network_delivery_snapshot(&mut conn, &mut events, &owner, "FRAME-1", 1.0, snapshot);
         events
-            .into_iter()
-            .find(|event| event.protocol_method() == Some("Network.loadingFinished"))
-            .expect("successful XHR should emit loadingFinished")
     }
 
     fn assert_xhr_terminal_retains_internal_resource_type(items: Vec<ScriptNetworkOutputItem>) {
-        let terminal = emitted_terminal_for(items);
+        let terminal = emitted_events_for(items)
+            .into_iter()
+            .find(|event| event.protocol_method() == Some("Network.loadingFinished"))
+            .expect("successful XHR should emit loadingFinished");
         assert_eq!(
             terminal
                 .trace_network_summary()
@@ -1359,5 +1349,87 @@ mod tests {
             ScriptNetworkOutputItem::SubresourceResponseStarted(std::sync::Arc::new(response)),
             ScriptNetworkOutputItem::SubresourceBodyFinished(std::sync::Arc::new(body)),
         ]);
+    }
+
+    #[test]
+    fn response_transport_headers_are_published_once_independently_of_admission_cookies() {
+        for admission_has_cookies in [false, true] {
+            for transported in [false, true] {
+                let handle = SubresourceNetworkRequestHandle::new(41);
+                let url = Url::parse("https://example.test/held").unwrap();
+                let request = SubresourceRequestStarted::new(
+                    handle,
+                    None,
+                    url.clone(),
+                    url.clone(),
+                    "GET".into(),
+                    vec![("x-request".into(), "before-continue".into())],
+                    None,
+                    SubresourceResourceType::Fetch,
+                    SubresourceRequestInitiatorType::Script,
+                    admission_has_cookies.then(moli_cookie_jar::StoredCookieQueryReport::default),
+                );
+                let headers = vec![
+                    ("host".into(), "example.test".into()),
+                    ("x-request".into(), "physical".into()),
+                ];
+                let response = std::sync::Arc::new(
+                    SubresourceResponseStarted::new(
+                        handle,
+                        Vec::new(),
+                        url,
+                        200,
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .with_network_request_headers(transported.then(|| headers.clone())),
+                );
+                let events = emitted_events_for(vec![
+                    ScriptNetworkOutputItem::SubresourceRequestStarted(std::sync::Arc::new(
+                        request,
+                    )),
+                    ScriptNetworkOutputItem::SubresourceResponseStarted(response.clone()),
+                    // Snapshot recovery must not republish the same physical head.
+                    ScriptNetworkOutputItem::SubresourceResponseStarted(response),
+                ])
+                .into_iter()
+                .map(|event| event.into_parts().0)
+                .collect::<Vec<_>>();
+                let extras = events
+                    .iter()
+                    .filter(|event| event["method"] == "Network.requestWillBeSentExtraInfo")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    extras.len(),
+                    usize::from(transported),
+                    "admission cookies: {admission_has_cookies}"
+                );
+                let response_index = events
+                    .iter()
+                    .position(|event| event["method"] == "Network.responseReceived")
+                    .expect("the response is published before a body terminal exists");
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event["method"] == "Network.responseReceived")
+                        .count(),
+                    1
+                );
+                if transported {
+                    assert!(
+                        events
+                            .iter()
+                            .position(
+                                |event| event["method"] == "Network.requestWillBeSentExtraInfo"
+                            )
+                            .unwrap()
+                            < response_index
+                    );
+                    assert_eq!(extras[0]["params"]["headers"]["x-request"], "physical");
+                    assert_eq!(extras[0]["params"]["headers"]["host"], "example.test");
+                    assert_eq!(extras[0]["params"]["requestId"], "REQ-XHR");
+                }
+            }
+        }
     }
 }

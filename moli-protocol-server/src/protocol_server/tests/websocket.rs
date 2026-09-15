@@ -3860,23 +3860,41 @@ addEventListener('DOMContentLoaded', () => {
 
 #[tokio::test]
 async fn websocket_cdp_external_writer_with_two_document_writes_reaches_defer_and_dcl() {
-    async fn page() -> impl IntoResponse {
+    external_writer_with_two_document_writes_reaches_defer_and_dcl(false).await;
+}
+
+#[tokio::test]
+async fn websocket_cdp_external_writer_with_ready_document_write_source_reaches_defer_and_dcl() {
+    external_writer_with_two_document_writes_reaches_defer_and_dcl(true).await;
+}
+
+async fn external_writer_with_two_document_writes_reaches_defer_and_dcl(source_ready: bool) {
+    async fn page(source_ready: bool) -> impl IntoResponse {
+        let prepare_source = if source_ready {
+            r#"<script src="/first.js"></script>
+<script>documentWriteOrder = ['head'];</script>"#
+        } else {
+            ""
+        };
         (
             [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
-            r#"<!doctype html>
+            format!(
+                r#"<!doctype html>
 <html>
 <head>
 <script>
 globalThis.documentWriteOrder = ['head'];
 document.addEventListener('DOMContentLoaded', () => documentWriteOrder.push('dcl'));
 </script>
+{prepare_source}
 <script src="/writer.js"></script>
 <script>documentWriteOrder.push('tail');</script>
 <script defer src="/defer.js"></script>
 <script>documentWriteOrder.push('after-defer');</script>
 </head>
 <body><main id="ready">ready</main></body>
-</html>"#,
+</html>"#
+            ),
         )
     }
 
@@ -3907,7 +3925,7 @@ documentWriteOrder.push('writer-end');"#,
     let defer_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let defer_requests_for_route = Arc::clone(&defer_requests);
     let fixture_app = Router::new()
-        .route("/", get(page))
+        .route("/", get(move || page(source_ready)))
         .route("/writer.js", get(writer))
         .route("/first.js", get(first))
         .route("/second.js", get(second))

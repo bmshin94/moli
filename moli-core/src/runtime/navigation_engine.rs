@@ -229,10 +229,6 @@ impl PreparedDocumentPage {
         self.prepared.token().page_id()
     }
 
-    pub fn renderer_devtools_agent_token(&self) -> crate::page::RendererDevToolsAgentToken {
-        self.prepared.renderer_devtools_agent_token()
-    }
-
     pub fn inspection_configuration_endpoint(
         &self,
     ) -> moli_renderer_v8::RendererPreparedDocumentInspectionEndpoint {

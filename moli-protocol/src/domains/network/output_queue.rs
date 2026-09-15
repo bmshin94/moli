@@ -1255,7 +1255,6 @@ pub(crate) enum TargetSubresourcePlanOutput {
     Complete(Box<TargetSubresourceMetadataOutput>),
     RequestStarted(Arc<TargetSubresourceRequestStartedOutput>),
     RequestUpdated(Arc<TargetSubresourceRequestStartedOutput>),
-    RequestExtraInfo(TargetSubresourceRequestExtraInfoOutput),
     ResponseStarted(Arc<TargetSubresourceResponseStartedOutput>),
     DataReceived(TargetSubresourceDataReceivedOutput),
     EventSourceMessageReceived(Box<TargetSubresourceEventSourceMessageReceivedOutput>),
@@ -1264,21 +1263,19 @@ pub(crate) enum TargetSubresourcePlanOutput {
 
 impl TargetSubresourcePlanOutput {
     pub(crate) fn navigation_request_id(&self) -> Option<&str> {
-        match self {
-            Self::RequestStarted(request) | Self::RequestUpdated(request)
-                if request.resource_type() == SubresourceResourceType::Document =>
-            {
-                Some(request.loader_id())
-            }
-            _ => None,
-        }
+        let request = match self {
+            Self::RequestStarted(request) | Self::RequestUpdated(request) => request,
+            Self::ResponseStarted(response) => response.request(),
+            Self::BodyFinished(body) => body.request(),
+            _ => return None,
+        };
+        request.request.navigation_loader_id()
     }
 
     pub(crate) fn index(&self) -> usize {
         match self {
             Self::Complete(output) => output.index(),
             Self::RequestStarted(output) | Self::RequestUpdated(output) => output.index(),
-            Self::RequestExtraInfo(output) => output.index(),
             Self::ResponseStarted(output) => output.index(),
             Self::DataReceived(output) => output.index(),
             Self::EventSourceMessageReceived(output) => output.index(),
@@ -1291,7 +1288,6 @@ impl TargetSubresourcePlanOutput {
             Self::Complete(output) => output.websocket_socket_id(),
             Self::RequestStarted(_)
             | Self::RequestUpdated(_)
-            | Self::RequestExtraInfo(_)
             | Self::ResponseStarted(_)
             | Self::DataReceived(_)
             | Self::EventSourceMessageReceived(_)
@@ -1303,7 +1299,6 @@ impl TargetSubresourcePlanOutput {
         match self {
             Self::Complete(output) => output.request_handle(),
             Self::RequestStarted(output) | Self::RequestUpdated(output) => Some(output.handle()),
-            Self::RequestExtraInfo(output) => Some(output.handle()),
             Self::ResponseStarted(output) => Some(output.handle()),
             Self::DataReceived(output) => Some(output.handle()),
             Self::EventSourceMessageReceived(output) => Some(output.handle()),
@@ -1322,11 +1317,6 @@ impl TargetSubresourcePlanOutput {
             Self::RequestUpdated(output) => TargetSubresourceNetworkDeliveryOutput::RequestUpdated(
                 TargetSubresourceRequestNetworkDeliveryOutput::new(output, request_id),
             ),
-            Self::RequestExtraInfo(output) => {
-                TargetSubresourceNetworkDeliveryOutput::RequestExtraInfo(
-                    TargetSubresourceRequestExtraInfoNetworkDeliveryOutput::new(output, request_id),
-                )
-            }
             Self::ResponseStarted(output) => {
                 TargetSubresourceNetworkDeliveryOutput::ResponseStarted(
                     TargetSubresourceResponseNetworkDeliveryOutput::new(output, request_id),
@@ -1356,7 +1346,6 @@ impl TargetSubresourcePlanOutput {
             Self::Complete(output) => Some(output),
             Self::RequestStarted(_)
             | Self::RequestUpdated(_)
-            | Self::RequestExtraInfo(_)
             | Self::ResponseStarted(_)
             | Self::DataReceived(_)
             | Self::EventSourceMessageReceived(_)
@@ -1370,7 +1359,6 @@ impl TargetSubresourcePlanOutput {
             Self::Complete(output) => Some(output),
             Self::RequestStarted(_)
             | Self::RequestUpdated(_)
-            | Self::RequestExtraInfo(_)
             | Self::ResponseStarted(_)
             | Self::DataReceived(_)
             | Self::EventSourceMessageReceived(_)
@@ -1384,17 +1372,7 @@ pub(crate) struct TargetSubresourceRequestStartedOutput {
     delivery_order_index: usize,
     index: usize,
     loader_id: String,
-    handle: SubresourceNetworkRequestHandle,
-    frame_id: Option<String>,
-    document_url: Url,
-    url: Url,
-    method: String,
-    request_headers: Vec<(String, String)>,
-    request_body: Option<String>,
-    request_body_bytes: Option<Vec<u8>>,
-    resource_type: SubresourceResourceType,
-    request_initiator_type: SubresourceRequestInitiatorType,
-    request_cookie_report: Option<StoredCookieQueryReport>,
+    request: Arc<SubresourceRequestStarted>,
 }
 
 impl TargetSubresourceRequestStartedOutput {
@@ -1402,109 +1380,13 @@ impl TargetSubresourceRequestStartedOutput {
         delivery_order_index: usize,
         index: usize,
         loader_id: &str,
-        request: &SubresourceRequestStarted,
+        request: &Arc<SubresourceRequestStarted>,
     ) -> Self {
         Self {
             delivery_order_index,
             index,
-            loader_id: request
-                .navigation_loader_id()
-                .unwrap_or(loader_id)
-                .to_owned(),
-            handle: request.handle(),
-            frame_id: request.frame_id().map(str::to_owned),
-            document_url: request.document_url().clone(),
-            url: request.url().clone(),
-            method: request.method().to_owned(),
-            request_headers: request.request_headers().to_vec(),
-            request_body: request.request_body().map(str::to_owned),
-            request_body_bytes: request.request_body_bytes().map(<[u8]>::to_vec),
-            resource_type: request.resource_type(),
-            request_initiator_type: request.request_initiator_type(),
-            request_cookie_report: request.request_cookie_report().cloned(),
-        }
-    }
-
-    pub(crate) fn delivery_order_index(&self) -> usize {
-        self.delivery_order_index
-    }
-
-    pub(crate) fn index(&self) -> usize {
-        self.index
-    }
-
-    pub(crate) fn handle(&self) -> SubresourceNetworkRequestHandle {
-        self.handle
-    }
-
-    pub(crate) fn loader_id(&self) -> &str {
-        &self.loader_id
-    }
-
-    pub(crate) fn frame_id(&self) -> Option<&str> {
-        self.frame_id.as_deref()
-    }
-
-    pub(crate) fn document_url(&self) -> &Url {
-        &self.document_url
-    }
-
-    pub(crate) fn url(&self) -> &Url {
-        &self.url
-    }
-
-    pub(crate) fn method(&self) -> &str {
-        &self.method
-    }
-
-    pub(crate) fn request_headers(&self) -> &[(String, String)] {
-        &self.request_headers
-    }
-
-    pub(crate) fn request_body(&self) -> Option<&str> {
-        self.request_body.as_deref()
-    }
-
-    pub(crate) fn request_body_bytes(&self) -> Option<&[u8]> {
-        self.request_body_bytes.as_deref()
-    }
-
-    pub(crate) fn resource_type(&self) -> SubresourceResourceType {
-        self.resource_type
-    }
-
-    pub(crate) fn request_initiator_type(&self) -> SubresourceRequestInitiatorType {
-        self.request_initiator_type
-    }
-
-    pub(crate) fn request_cookie_report(&self) -> Option<&StoredCookieQueryReport> {
-        self.request_cookie_report.as_ref()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TargetSubresourceRequestExtraInfoOutput {
-    delivery_order_index: usize,
-    index: usize,
-    request: Arc<TargetSubresourceRequestStartedOutput>,
-    request_headers: Vec<(String, String)>,
-    request_cookie_report: StoredCookieQueryReport,
-}
-
-impl TargetSubresourceRequestExtraInfoOutput {
-    fn new(
-        delivery_order_index: usize,
-        index: usize,
-        request: Arc<TargetSubresourceRequestStartedOutput>,
-        request_headers: Vec<(String, String)>,
-        request_cookie_report: StoredCookieQueryReport,
-    ) -> Self {
-        Self {
-            delivery_order_index,
-            index,
-            request,
-            request_headers,
-            request_cookie_report,
+            loader_id: loader_id.to_owned(),
+            request: Arc::clone(request),
         }
     }
 
@@ -1520,12 +1402,50 @@ impl TargetSubresourceRequestExtraInfoOutput {
         self.request.handle()
     }
 
-    pub(crate) fn request_cookie_report(&self) -> &StoredCookieQueryReport {
-        &self.request_cookie_report
+    pub(crate) fn loader_id(&self) -> &str {
+        self.request
+            .navigation_loader_id()
+            .unwrap_or(&self.loader_id)
+    }
+
+    pub(crate) fn frame_id(&self) -> Option<&str> {
+        self.request.frame_id()
+    }
+
+    pub(crate) fn document_url(&self) -> &Url {
+        self.request.document_url()
+    }
+
+    pub(crate) fn url(&self) -> &Url {
+        self.request.url()
+    }
+
+    pub(crate) fn method(&self) -> &str {
+        self.request.method()
     }
 
     pub(crate) fn request_headers(&self) -> &[(String, String)] {
-        &self.request_headers
+        self.request.request_headers()
+    }
+
+    pub(crate) fn request_body(&self) -> Option<&str> {
+        self.request.request_body()
+    }
+
+    pub(crate) fn request_body_bytes(&self) -> Option<&[u8]> {
+        self.request.request_body_bytes()
+    }
+
+    pub(crate) fn resource_type(&self) -> SubresourceResourceType {
+        self.request.resource_type()
+    }
+
+    pub(crate) fn request_initiator_type(&self) -> SubresourceRequestInitiatorType {
+        self.request.request_initiator_type()
+    }
+
+    pub(crate) fn request_cookie_report(&self) -> Option<&StoredCookieQueryReport> {
+        self.request.request_cookie_report()
     }
 }
 
@@ -1534,12 +1454,13 @@ pub(crate) struct TargetSubresourceResponseStartedOutput {
     delivery_order_index: usize,
     index: usize,
     request: Arc<TargetSubresourceRequestStartedOutput>,
-    redirect_chain: Vec<TargetSubresourceRedirectOutput>,
+    redirect_chain: Vec<NavigationRedirect>,
     final_url: Url,
     status: u16,
     status_text: Option<String>,
     response_headers: Vec<(String, String)>,
     cookie_set_reports: Vec<StoredCookieSetReport>,
+    request_cookie_report: Option<StoredCookieQueryReport>,
     from_cache: bool,
     network_request_headers: Option<Vec<(String, String)>>,
     negotiated_http_version: Option<NegotiatedHttpVersion>,
@@ -1552,20 +1473,21 @@ impl TargetSubresourceResponseStartedOutput {
         request: Arc<TargetSubresourceRequestStartedOutput>,
         response: &SubresourceResponseStarted,
     ) -> Self {
+        let request_cookie_report = response
+            .request_cookie_report()
+            .cloned()
+            .or_else(|| request.request_cookie_report().cloned());
         Self {
             delivery_order_index,
             index,
             request,
-            redirect_chain: response
-                .redirect_chain()
-                .iter()
-                .map(TargetSubresourceRedirectOutput::from_page_redirect)
-                .collect(),
+            redirect_chain: response.redirect_chain().to_vec(),
             final_url: response.final_url().clone(),
             status: response.status(),
             status_text: response.status_text().map(str::to_owned),
             response_headers: response.response_headers().to_vec(),
             cookie_set_reports: response.cookie_set_reports().to_vec(),
+            request_cookie_report,
             from_cache: response.from_cache(),
             network_request_headers: response
                 .network_request_headers()
@@ -1590,7 +1512,7 @@ impl TargetSubresourceResponseStartedOutput {
         &self.request
     }
 
-    pub(crate) fn redirect_chain(&self) -> &[TargetSubresourceRedirectOutput] {
+    pub(crate) fn redirect_chain(&self) -> &[NavigationRedirect] {
         &self.redirect_chain
     }
 
@@ -1612,6 +1534,10 @@ impl TargetSubresourceResponseStartedOutput {
 
     pub(crate) fn cookie_set_reports(&self) -> &[StoredCookieSetReport] {
         &self.cookie_set_reports
+    }
+
+    pub(crate) fn request_cookie_report(&self) -> Option<&StoredCookieQueryReport> {
+        self.request_cookie_report.as_ref()
     }
 
     pub(crate) fn is_from_cache(&self) -> bool {
@@ -1917,7 +1843,6 @@ pub(crate) enum TargetSubresourceNetworkDeliveryOutput {
     Complete(Box<TargetSubresourceCompleteNetworkDeliveryOutput>),
     RequestStarted(TargetSubresourceRequestNetworkDeliveryOutput),
     RequestUpdated(TargetSubresourceRequestNetworkDeliveryOutput),
-    RequestExtraInfo(TargetSubresourceRequestExtraInfoNetworkDeliveryOutput),
     ResponseStarted(TargetSubresourceResponseNetworkDeliveryOutput),
     DataReceived(TargetSubresourceDataNetworkDeliveryOutput),
     EventSourceMessageReceived(Box<TargetSubresourceEventSourceMessageNetworkDeliveryOutput>),
@@ -1973,30 +1898,6 @@ impl TargetSubresourceRequestNetworkDeliveryOutput {
     }
 
     pub(crate) fn output(&self) -> &TargetSubresourceRequestStartedOutput {
-        &self.output
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TargetSubresourceRequestExtraInfoNetworkDeliveryOutput {
-    request_id: String,
-    output: TargetSubresourceRequestExtraInfoOutput,
-}
-
-impl TargetSubresourceRequestExtraInfoNetworkDeliveryOutput {
-    fn new(output: TargetSubresourceRequestExtraInfoOutput, request_id: String) -> Self {
-        Self { request_id, output }
-    }
-
-    pub(crate) fn request_id(&self) -> &str {
-        &self.request_id
-    }
-
-    pub(crate) fn delivery_order_index(&self) -> usize {
-        self.output.delivery_order_index()
-    }
-
-    pub(crate) fn output(&self) -> &TargetSubresourceRequestExtraInfoOutput {
         &self.output
     }
 }
@@ -2103,7 +2004,6 @@ impl TargetSubresourceNetworkDeliveryOutput {
         match self {
             Self::Complete(output) => output.request_id(),
             Self::RequestStarted(output) | Self::RequestUpdated(output) => output.request_id(),
-            Self::RequestExtraInfo(output) => output.request_id(),
             Self::ResponseStarted(output) => output.request_id(),
             Self::DataReceived(output) => output.request_id(),
             Self::EventSourceMessageReceived(output) => output.request_id(),
@@ -2117,7 +2017,6 @@ impl TargetSubresourceNetworkDeliveryOutput {
             Self::RequestStarted(output) | Self::RequestUpdated(output) => {
                 output.delivery_order_index()
             }
-            Self::RequestExtraInfo(output) => output.delivery_order_index(),
             Self::ResponseStarted(output) => output.delivery_order_index(),
             Self::DataReceived(output) => output.delivery_order_index(),
             Self::EventSourceMessageReceived(output) => output.delivery_order_index(),
@@ -2131,7 +2030,6 @@ impl TargetSubresourceNetworkDeliveryOutput {
             Self::Complete(output) => output.metadata(),
             Self::RequestStarted(_)
             | Self::RequestUpdated(_)
-            | Self::RequestExtraInfo(_)
             | Self::ResponseStarted(_)
             | Self::DataReceived(_)
             | Self::EventSourceMessageReceived(_)
@@ -2146,7 +2044,6 @@ impl TargetSubresourceNetworkDeliveryOutput {
         match self {
             Self::Complete(output) => output.index(),
             Self::RequestStarted(output) | Self::RequestUpdated(output) => output.output().index(),
-            Self::RequestExtraInfo(output) => output.output().index(),
             Self::ResponseStarted(output) => output.output().index(),
             Self::DataReceived(output) => output.output().index(),
             Self::EventSourceMessageReceived(output) => output.output().index(),
@@ -2158,7 +2055,7 @@ impl TargetSubresourceNetworkDeliveryOutput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum TargetSubresourceMetadataOutcome {
     Success {
-        redirect_chain: Vec<TargetSubresourceRedirectOutput>,
+        redirect_chain: Vec<NavigationRedirect>,
         final_url: Url,
         status: u16,
         status_text: Option<String>,
@@ -2181,10 +2078,7 @@ impl TargetSubresourceMetadataOutcome {
                 response_headers,
                 response_body,
             } => Self::Success {
-                redirect_chain: redirect_chain
-                    .iter()
-                    .map(TargetSubresourceRedirectOutput::from_page_redirect)
-                    .collect(),
+                redirect_chain: redirect_chain.clone(),
                 final_url: final_url.clone(),
                 status: *status,
                 status_text: status_text.clone(),
@@ -2194,33 +2088,6 @@ impl TargetSubresourceMetadataOutcome {
             SubresourceNetworkOutcome::Failure { error_text } => Self::Failure {
                 error_text: error_text.clone(),
             },
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TargetSubresourceRedirectOutput {
-    pub(crate) from_url: Url,
-    pub(crate) to_url: Url,
-    pub(crate) status: u16,
-    pub(crate) headers: Vec<(String, String)>,
-    pub(crate) request_cookie_report: Option<StoredCookieQueryReport>,
-    pub(crate) cookie_set_reports: Vec<StoredCookieSetReport>,
-    pub(crate) from_cache: bool,
-    pub(crate) negotiated_http_version: Option<NegotiatedHttpVersion>,
-}
-
-impl TargetSubresourceRedirectOutput {
-    fn from_page_redirect(redirect: &NavigationRedirect) -> Self {
-        Self {
-            from_url: redirect.from_url.clone(),
-            to_url: redirect.to_url.clone(),
-            status: redirect.status,
-            headers: redirect.headers.clone(),
-            request_cookie_report: redirect.request_cookie_report.clone(),
-            cookie_set_reports: redirect.cookie_set_reports.clone(),
-            from_cache: redirect.from_cache,
-            negotiated_http_version: redirect.negotiated_http_version,
         }
     }
 }
@@ -2833,12 +2700,6 @@ impl TargetNetworkOutputQueue {
                 {
                     return;
                 }
-                self.append_missing_subresource_request_extra_info(
-                    *subresource_index,
-                    response.handle(),
-                    response.network_request_headers(),
-                    response.request_cookie_report(),
-                );
                 if self.append_subresource_response_started(*subresource_index, response) {
                     *subresource_index += 1;
                 }
@@ -2963,14 +2824,6 @@ impl TargetNetworkOutputQueue {
         handle: SubresourceNetworkRequestHandle,
         record: &SubresourceNetworkRecord,
     ) {
-        if !self.staged_subresource_responses.contains_key(&handle) {
-            self.append_missing_subresource_request_extra_info(
-                index,
-                handle,
-                record.network_request_headers(),
-                record.request_cookie_report(),
-            );
-        }
         match record.outcome() {
             SubresourceNetworkOutcome::Success {
                 redirect_chain,
@@ -2989,6 +2842,7 @@ impl TargetNetworkOutputQueue {
                     record.cookie_set_reports().to_vec(),
                 )
                 .with_status_text(status_text.clone())
+                .with_request_cookie_report(record.request_cookie_report().cloned())
                 .with_from_cache(record.from_cache())
                 .with_network_request_headers(
                     record
@@ -3011,7 +2865,7 @@ impl TargetNetworkOutputQueue {
         &mut self,
         index: usize,
         document_loader_id: &str,
-        request: &SubresourceRequestStarted,
+        request: &Arc<SubresourceRequestStarted>,
     ) {
         // Atomic Browser recovery may repeat a phase already observed through
         // the source FIFO. Keep publication state, not another native cursor.
@@ -3074,61 +2928,6 @@ impl TargetNetworkOutputQueue {
             .push_subresource(TargetSubresourcePlanOutput::ResponseStarted(output));
         self.subresource_record_count = index + 1;
         true
-    }
-
-    fn append_subresource_request_extra_info(
-        &mut self,
-        index: usize,
-        handle: SubresourceNetworkRequestHandle,
-        request_headers: Vec<(String, String)>,
-        request_cookie_report: StoredCookieQueryReport,
-    ) -> bool {
-        let Some(request) = self.staged_subresource_requests.get(&handle).cloned() else {
-            return false;
-        };
-        let delivery_order_index = self.next_delivery_order_index();
-        let output = TargetSubresourceRequestExtraInfoOutput::new(
-            delivery_order_index,
-            index,
-            request,
-            request_headers,
-            request_cookie_report,
-        );
-        self.delivery_outputs
-            .push_subresource(TargetSubresourcePlanOutput::RequestExtraInfo(output));
-        self.subresource_record_count = index + 1;
-        true
-    }
-
-    fn append_missing_subresource_request_extra_info(
-        &mut self,
-        index: usize,
-        handle: SubresourceNetworkRequestHandle,
-        network_request_headers: Option<&[(String, String)]>,
-        request_cookie_report: Option<&StoredCookieQueryReport>,
-    ) {
-        let Some(request) = self.staged_subresource_requests.get(&handle) else {
-            return;
-        };
-        if request.request_cookie_report().is_some() {
-            return;
-        }
-        let request_headers = network_request_headers
-            .unwrap_or_else(|| request.request_headers())
-            .to_vec();
-        let Some(request_cookie_report) = request_cookie_report.cloned().or_else(|| {
-            network_request_headers
-                .is_some()
-                .then(StoredCookieQueryReport::default)
-        }) else {
-            return;
-        };
-        self.append_subresource_request_extra_info(
-            index,
-            handle,
-            request_headers,
-            request_cookie_report,
-        );
     }
 
     fn append_subresource_data_received(&mut self, index: usize, data: &SubresourceDataReceived) {
@@ -3834,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_compact_network_completion_emits_one_transport_extra_info() {
+    fn staged_compact_network_completion_preserves_transport_metadata() {
         let handle = SubresourceNetworkRequestHandle::new(8);
         let document_url = Url::parse("https://example.com/").expect("document URL should parse");
         let request_url = Url::parse("https://example.com/api").expect("request URL should parse");
@@ -3870,23 +3669,14 @@ mod tests {
         let snapshot = pending_delivery_snapshot(&output_queue, activity, None, &mut request_ids)
             .expect("network completion should produce a backlog snapshot");
         let outputs = subresource_outputs(&snapshot);
-        assert_eq!(outputs.len(), 4);
-        let extras = outputs
-            .iter()
-            .filter_map(|output| match output {
-                TargetSubresourceNetworkDeliveryOutput::RequestExtraInfo(output) => Some(output),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(extras.len(), 1);
+        assert_eq!(outputs.len(), 3);
+        let TargetSubresourceNetworkDeliveryOutput::ResponseStarted(response) = outputs[1] else {
+            panic!("the actual response carries transport metadata");
+        };
         assert_eq!(
-            extras[0].output().request_headers(),
-            &[("User-Agent".to_owned(), "Moli/Test".to_owned())]
+            response.output().network_request_headers(),
+            Some([("User-Agent".to_owned(), "Moli/Test".to_owned())].as_slice())
         );
-        assert!(matches!(
-            outputs[2],
-            TargetSubresourceNetworkDeliveryOutput::ResponseStarted(_)
-        ));
     }
 
     #[test]
@@ -3954,16 +3744,12 @@ mod tests {
         let snapshot = pending_delivery_snapshot(&output_queue, activity, None, &mut request_ids)
             .expect("redirect completion should produce staged output");
         let outputs = subresource_outputs(&snapshot);
-        assert_eq!(outputs.len(), 4);
+        assert_eq!(outputs.len(), 3);
         assert!(matches!(
             outputs[0],
             TargetSubresourceNetworkDeliveryOutput::RequestStarted(_)
         ));
-        assert!(matches!(
-            outputs[1],
-            TargetSubresourceNetworkDeliveryOutput::RequestExtraInfo(_)
-        ));
-        let TargetSubresourceNetworkDeliveryOutput::ResponseStarted(response) = outputs[2] else {
+        let TargetSubresourceNetworkDeliveryOutput::ResponseStarted(response) = outputs[1] else {
             panic!("redirect completion should deliver response-start output");
         };
         assert_eq!(response.request_id(), "REQ-H7");
@@ -3976,7 +3762,7 @@ mod tests {
             "staged response synthesized from a compact completion record should preserve cache provenance"
         );
         assert!(matches!(
-            outputs[3],
+            outputs[2],
             TargetSubresourceNetworkDeliveryOutput::BodyFinished(_)
         ));
     }

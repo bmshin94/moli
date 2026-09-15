@@ -1226,7 +1226,11 @@ impl DocumentRuntime {
                 ready_completion: None,
                 resume_after_completion: VecDeque::new(),
             });
-        if let Some(outcome) = source_load.try_outcome() {
+        // A ready source cannot reenter the parser script that called
+        // document.write; after it unwinds, retain normal parser readiness.
+        if self.parser_reentry.script_nesting_level == 0
+            && let Some(outcome) = source_load.try_outcome()
+        {
             let _ = self.complete_document_write_external_script_load(
                 scope,
                 host_ptr,
