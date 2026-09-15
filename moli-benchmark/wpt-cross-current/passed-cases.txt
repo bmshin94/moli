@@ -325,6 +325,7 @@ css/css-cascade/inherit-initial.html
 css/css-cascade/inline-style-background.html
 css/css-cascade/layer-basic.html
 css/css-cascade/layer-cssom-order-reverse-at-property.html
+css/css-cascade/layer-cssom-order-reverse.html
 css/css-cascade/layer-import.html
 css/css-cascade/layer-important.html
 css/css-cascade/layer-property-override.html
@@ -1544,6 +1545,7 @@ css/css-grid/abspos/positioned-grid-descendants-009.html
 css/css-grid/abspos/positioned-grid-descendants-010.html
 css/css-grid/abspos/positioned-grid-descendants-011.html
 css/css-grid/abspos/positioned-grid-descendants-012.html
+css/css-grid/abspos/positioned-grid-descendants-013.html
 css/css-grid/abspos/positioned-grid-descendants-014.html
 css/css-grid/abspos/positioned-grid-descendants-015.html
 css/css-grid/abspos/positioned-grid-descendants-016.html
@@ -2218,8 +2220,6 @@ css/css-scrollbars/inheritance.html
 css/css-scrollbars/scrollbar-color-parsing.html
 css/css-scrollbars/scrollbar-width-parsing.html
 css/css-shadow/css-scoping-shadow-dynamic-remove-style-detached.html
-css/css-shadow/font-face-006.html
-css/css-shadow/font-face-009.html
 css/css-shadow/host-context-parsing.html
 css/css-shadow/host-descendant-invalidation.html
 css/css-shadow/host-dom-001.html
@@ -5337,6 +5337,7 @@ html/browsers/the-window-object/named-access-on-the-window-object/strict-mode-re
 html/browsers/the-window-object/named-access-on-the-window-object/window-named-properties.html
 html/browsers/the-window-object/named-access-on-the-window-object/window-null-names.html
 html/browsers/the-window-object/navigate-to-about-blank-while-initial-load-pending.html
+html/browsers/the-window-object/open-close/creating_browsing_context_test_01.html
 html/browsers/the-window-object/open-close/open-features-tokenization-noopener.html
 html/browsers/the-window-object/open-close/open-features-tokenization-noreferrer.html
 html/browsers/the-window-object/proxy-getOwnPropertyDescriptor.html
@@ -5345,6 +5346,7 @@ html/browsers/the-window-object/window-open-invalid-url.html
 html/browsers/the-window-object/window-open-noopener.html?_parent
 html/browsers/the-window-object/window-open-noopener.html?_self
 html/browsers/the-window-object/window-open-noopener.html?_top
+html/browsers/the-window-object/window-open-noreferrer.html
 html/browsers/the-window-object/window-prototype-chain.html
 html/browsers/the-windowproxy-exotic-object/windowproxy-define-own-property-unforgeable-same-origin.html
 html/browsers/the-windowproxy-exotic-object/windowproxy-prevent-extensions.html
@@ -5356,6 +5358,7 @@ html/browsers/windows/browsing-context-names/choose-_parent-003.html
 html/browsers/windows/browsing-context-names/choose-_parent-004.html
 html/browsers/windows/browsing-context-names/choose-_self-001.html
 html/browsers/windows/browsing-context-names/choose-_self-002.html
+html/browsers/windows/browsing-context-names/choose-default-001.html
 html/browsers/windows/browsing-context-names/choose-default-002.html
 html/browsers/windows/browsing-context-names/choose-existing-001.html
 html/browsers/windows/browsing-context-window.html
@@ -5572,6 +5575,7 @@ html/semantics/document-metadata/the-meta-element/color-scheme/meta-color-scheme
 html/semantics/document-metadata/the-meta-element/http-equiv-and-name-1.html
 html/semantics/document-metadata/the-meta-element/http-equiv-and-name-2.html
 html/semantics/document-metadata/the-meta-element/pragma-directives/attr-meta-http-equiv-refresh/allow-scripts-flag-changing-1.html
+html/semantics/document-metadata/the-meta-element/pragma-directives/attr-meta-http-equiv-refresh/allow-scripts-flag-changing-2.html
 html/semantics/document-metadata/the-meta-element/pragma-directives/attr-meta-http-equiv-refresh/dynamic-append.html
 html/semantics/document-metadata/the-meta-element/pragma-directives/attr-meta-http-equiv-refresh/not-in-shadow-tree.html
 html/semantics/document-metadata/the-meta-element/pragma-directives/http-equiv-enumerated-ascii-case-insensitive.html
@@ -5620,7 +5624,6 @@ html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroll
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller-nested-4.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller-nested-5.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller-nested.html
-html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-nav-form-submit.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-nav-link-click-fragment.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-nav-link-click.html
@@ -5843,7 +5846,6 @@ html/semantics/forms/the-form-element/form-elements-nameditem-02.html
 html/semantics/forms/the-form-element/form-elements-sameobject.html
 html/semantics/forms/the-form-element/form-indexed-element-shadow.html
 html/semantics/forms/the-form-element/form-indexed-element.html
-html/semantics/forms/the-form-element/form-length.html
 html/semantics/forms/the-form-element/form-nameditem.html
 html/semantics/forms/the-form-element/form-requestsubmit.html
 html/semantics/forms/the-input-element/button.html
@@ -6006,6 +6008,7 @@ html/semantics/interactive-elements/the-details-element/details.html
 html/semantics/interactive-elements/the-details-element/display-table-with-rt-crash.html
 html/semantics/interactive-elements/the-details-element/name-attribute.html
 html/semantics/interactive-elements/the-details-element/toggleEvent.html
+html/semantics/interactive-elements/the-dialog-element/default-color.html
 html/semantics/interactive-elements/the-dialog-element/dialog-active-document.html
 html/semantics/interactive-elements/the-dialog-element/dialog-close-event-async.html
 html/semantics/interactive-elements/the-dialog-element/dialog-close-event.html
@@ -6021,8 +6024,10 @@ html/semantics/interactive-elements/the-dialog-element/dialog-showModal-remove.h
 html/semantics/interactive-elements/the-dialog-element/form-submit-dialog-shadow.html
 html/semantics/interactive-elements/the-dialog-element/inert-does-not-match-disabled-selector.html
 html/semantics/interactive-elements/the-dialog-element/inert-node-is-unselectable.html
+html/semantics/interactive-elements/the-dialog-element/modal-dialog-in-visibility-hidden.html
 html/semantics/interactive-elements/the-dialog-element/submit-dialog-close-event.html
 html/semantics/interactive-elements/the-dialog-element/synthetic-click-inert.html
+html/semantics/interactive-elements/the-dialog-element/top-layer-position.html
 html/semantics/interactive-elements/the-summary-element/activation-behavior.html
 html/semantics/interactive-elements/the-summary-element/anchor-with-inline-element.html
 html/semantics/interactive-elements/the-summary-element/anchor-without-link.html
@@ -6032,7 +6037,6 @@ html/semantics/interfaces.html
 html/semantics/links/links-created-by-a-and-area-elements/anchor-src-encoding.html
 html/semantics/links/links-created-by-a-and-area-elements/htmlanchorelement_attribute-getter-setter.html
 html/semantics/links/links-created-by-a-and-area-elements/htmlanchorelement_getter.html
-html/semantics/links/links-created-by-a-and-area-elements/rel-attribute-clearing.html
 html/semantics/links/links-created-by-a-and-area-elements/target_blank_implicit_noopener.html
 html/semantics/popovers/hide-other-popover-side-effects.html
 html/semantics/popovers/popover-active-document.html
@@ -6342,6 +6346,8 @@ html/semantics/selectors/pseudo-classes/valid-invalid-fieldset-disconnected.html
 html/semantics/tabular-data/attributes-common-to-td-and-th-elements/cellIndex.html
 html/semantics/tabular-data/historical.html
 html/semantics/tabular-data/processing-model-1/col-span-limits.html
+html/semantics/tabular-data/processing-model-1/rowspan-0-quirks.html
+html/semantics/tabular-data/processing-model-1/rowspan-0.html
 html/semantics/tabular-data/processing-model-1/span-limits.html
 html/semantics/tabular-data/the-caption-element/caption_001.html
 html/semantics/tabular-data/the-table-element/caption-methods.html
@@ -6710,6 +6716,7 @@ html/webappapis/dynamic-markup-insertion/document-writeln/document.writeln-03.ht
 html/webappapis/dynamic-markup-insertion/html-unsafe-methods/Document-parseHTMLUnsafe-encoding.html
 html/webappapis/dynamic-markup-insertion/html-unsafe-methods/Document-parseHTMLUnsafe-style-attribute.html
 html/webappapis/dynamic-markup-insertion/html-unsafe-methods/Document-parseHTMLUnsafe-url-base-pushstate.html
+html/webappapis/dynamic-markup-insertion/html-unsafe-methods/Document-parseHTMLUnsafe-url-base.html
 html/webappapis/dynamic-markup-insertion/html-unsafe-methods/Document-parseHTMLUnsafe-url-pushstate.html
 html/webappapis/dynamic-markup-insertion/html-unsafe-methods/Document-parseHTMLUnsafe-url.html
 html/webappapis/dynamic-markup-insertion/html-unsafe-methods/Element-setHTMLUnsafe-04.html
@@ -6851,6 +6858,7 @@ inert/inert-and-contenteditable.html
 inert/inert-does-not-match-disabled-selector.html
 inert/inert-inlines-around-selection-range-in-contenteditable.html
 inert/inert-node-is-unselectable.html
+inert/inert-with-modal-dialog-002.html
 infrastructure/assumptions/cookie.html
 infrastructure/assumptions/html-elements.html
 infrastructure/testharness/full.stop/full-stop.html
@@ -7346,6 +7354,7 @@ quirks/unitless-length/quirks.html
 referrer-policy/generic/subresource-test/attr-referrer-invalid-value.html
 requestidlecallback/basic.html
 requestidlecallback/callback-exception.html
+requestidlecallback/callback-idle-periods.html
 requestidlecallback/callback-iframe-different-origin.html
 requestidlecallback/callback-iframe.html
 requestidlecallback/callback-invoked.html
@@ -7456,7 +7465,6 @@ selection/textcontrols/selectionchange-bubble.html
 selection/textcontrols/selectionchange-on-shadow-dom.html
 selection/textcontrols/selectionchange.html
 selection/toString-ff-bug-001.html
-selection/toString-user-select-none.html
 selection/type.html
 service-workers/cache-storage/cache-api-nested-worker.https.html
 service-workers/cache-storage/credentials.https.html
@@ -7553,7 +7561,6 @@ shadow-dom/declarative/declarative-shadow-dom-slot-assignment.html
 shadow-dom/declarative/declarative-shadow-dom-write-to-iframe.html
 shadow-dom/declarative/declarative-with-disabled-shadow.html
 shadow-dom/declarative/gethtml-ordering.html
-shadow-dom/declarative/gethtml.html
 shadow-dom/declarative/innerhtml-before-closing-tag.html
 shadow-dom/declarative/innerhtml-on-ordinary-template.html
 shadow-dom/declarative/move-template-before-closing-tag.html
@@ -8716,7 +8723,6 @@ xhr/xmlhttprequest-timeout-worker-overrides.html?timeout enabled after initially
 xhr/xmlhttprequest-timeout-worker-overrides.html?timeout overrides load after a delay
 xhr/xmlhttprequest-timeout-worker-overridesexpires.html?timeout set to expired value before load fires
 xhr/xmlhttprequest-timeout-worker-overridesexpires.html?timeout set to expiring value after load fires
-xhr/xmlhttprequest-timeout-worker-overridesexpires.html?timeout set to non-expiring value after timeout fires
 xhr/xmlhttprequest-timeout-worker-simple.html?load fires normally
 xhr/xmlhttprequest-timeout-worker-simple.html?no time out scheduled, load fires normally
 xhr/xmlhttprequest-timeout-worker-simple.html?timeout hit before load
