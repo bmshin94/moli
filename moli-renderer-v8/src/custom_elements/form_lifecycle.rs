@@ -1,5 +1,4 @@
 use super::element_state::is_form_associated_custom_element_handle;
-use super::existing_upgrade::has_pending_upgrade_reaction;
 use super::reaction_types::FormStateRestoreMode;
 use super::reactions::{
     CustomElementReaction, enqueue_custom_element_reaction, with_custom_element_reaction_scope,
@@ -18,9 +17,6 @@ pub(crate) fn enqueue_form_association_callback_if_needed(
     host_ptr: *mut JsContextHost,
     handle: DomHandle,
 ) -> bool {
-    if has_pending_upgrade_reaction(host_ptr, handle) {
-        return false;
-    }
     if !unsafe { &*host_ptr }
         .custom_elements_for_node_handle(handle)
         .is_some_and(|store| store.is_upgraded_handle(handle))
@@ -66,9 +62,6 @@ pub(super) fn enqueue_form_disabled_callback_if_needed(
     host_ptr: *mut JsContextHost,
     handle: DomHandle,
 ) -> bool {
-    if has_pending_upgrade_reaction(host_ptr, handle) {
-        return false;
-    }
     if !unsafe { &*host_ptr }
         .custom_elements_for_node_handle(handle)
         .is_some_and(|store| store.is_upgraded_handle(handle))

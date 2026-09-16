@@ -1,5 +1,5 @@
+use super::CustomElementReaction;
 use super::reactions::{enqueue_custom_element_reaction, with_custom_element_reaction_scope};
-use super::{CustomElementReaction, has_pending_upgrade_reaction};
 
 use super::super::{document_runtime::DomHandle, native_bridge::JsContextHost};
 
@@ -34,9 +34,6 @@ pub(crate) fn enqueue_connected_callback(
     host_ptr: *mut JsContextHost,
     handle: DomHandle,
 ) -> bool {
-    if has_pending_upgrade_reaction(host_ptr, handle) {
-        return false;
-    }
     enqueue_lifecycle_callback(
         scope,
         host_ptr,
@@ -51,9 +48,6 @@ pub(crate) fn enqueue_disconnected_callback(
     host_ptr: *mut JsContextHost,
     handle: DomHandle,
 ) -> bool {
-    if has_pending_upgrade_reaction(host_ptr, handle) {
-        return false;
-    }
     enqueue_lifecycle_callback(
         scope,
         host_ptr,

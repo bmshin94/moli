@@ -3,6 +3,7 @@ use crate::custom_elements::CustomElementRegistryKey;
 
 mod insertion;
 mod parser;
+mod upgrade_reentry;
 
 #[tokio::test]
 async fn popup_classic_script_custom_element_microtasks_wait_for_outer_javascript() {
@@ -8104,9 +8105,11 @@ fn html_fragment_parser_upgrade_reaction_runs_before_descendant_connected_callba
         )
         .expect("HTML fragment custom element upgrade reaction probe should evaluate");
 
+    // The child is still awaiting upgrade when the parent reconnects it. The
+    // nested appendChild reaction scope must upgrade it before returning.
     assert_eq!(
         result,
-        "1,parent:connected|parent:removed|parent:appended|child:connected:1,true"
+        "1,parent:connected|parent:removed|child:connected:1|parent:appended,true"
     );
 }
 
@@ -8158,7 +8161,7 @@ fn html_fragment_parser_upgrade_reaction_survives_move_to_new_document() {
 
     assert_eq!(
         result,
-        "1,parent:connected|parent:removed|parent:appended|child:connected:1"
+        "1,parent:connected|parent:removed|child:connected:1|parent:appended"
     );
 }
 

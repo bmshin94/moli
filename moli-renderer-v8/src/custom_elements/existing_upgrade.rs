@@ -7,7 +7,6 @@ use super::existing_upgrade_candidate::{
 };
 use super::existing_upgrade_failure::fail_existing_custom_element_construction;
 use super::existing_upgrade_invocation::upgrade_existing_custom_element_with_constructor;
-use super::reactions::CustomElementReaction;
 use super::{
     dispatch_form_association_callback_if_needed, dispatch_form_disabled_callback_if_needed,
 };
@@ -17,9 +16,6 @@ pub(crate) fn upgrade_handle_if_defined(
     host_ptr: *mut JsContextHost,
     handle: DomHandle,
 ) -> bool {
-    if has_pending_upgrade_reaction(host_ptr, handle) {
-        return true;
-    }
     let already_handled = unsafe { &*host_ptr }
         .custom_elements_for_node_handle(handle)
         .is_some_and(|store| {
@@ -91,9 +87,6 @@ pub(crate) fn upgrade_element_with_wrapper_if_defined<'s>(
     wrapper: v8::Local<'s, v8::Object>,
     handle: DomHandle,
 ) -> bool {
-    if has_pending_upgrade_reaction(host_ptr, handle) {
-        return true;
-    }
     let already_handled = unsafe { &*host_ptr }
         .custom_elements_for_node_handle(handle)
         .is_some_and(|store| {
@@ -138,13 +131,4 @@ pub(crate) fn upgrade_element_with_wrapper_if_defined<'s>(
         dispatch_form_disabled_callback_if_needed(scope, host_ptr, handle);
     }
     upgraded
-}
-
-pub(crate) fn has_pending_upgrade_reaction(
-    host_ptr: *mut JsContextHost,
-    handle: DomHandle,
-) -> bool {
-    unsafe { &*host_ptr }
-        .custom_element_reactions()
-        .pending_reactions_contain(handle, &CustomElementReaction::Upgrade)
 }

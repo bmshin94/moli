@@ -49,8 +49,7 @@ pub(crate) use element_state::{
 };
 mod existing_upgrade;
 pub(crate) use existing_upgrade::{
-    has_pending_upgrade_reaction, upgrade_element_with_wrapper_if_defined,
-    upgrade_handle_if_defined,
+    upgrade_element_with_wrapper_if_defined, upgrade_handle_if_defined,
 };
 mod existing_upgrade_candidate;
 use existing_upgrade_candidate::custom_element_wrapper_for_existing_upgrade;

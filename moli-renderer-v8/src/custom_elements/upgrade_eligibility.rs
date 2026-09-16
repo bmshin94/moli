@@ -1,10 +1,9 @@
 use super::super::{document_runtime::DomHandle, native_bridge::JsContextHost};
-use super::{definition_name_for_handle, has_pending_upgrade_reaction};
+use super::definition_name_for_handle;
 
 pub(super) fn can_upgrade_handle(host_ptr: *mut JsContextHost, handle: DomHandle) -> bool {
-    if has_pending_upgrade_reaction(host_ptr, handle) {
-        return false;
-    }
+    // A pending reaction does not change the element's state. A nested reaction
+    // scope must be able to enqueue it again and perform the upgrade immediately.
     let host = unsafe { &*host_ptr };
     if host
         .custom_elements_for_node_handle(handle)

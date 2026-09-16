@@ -70,12 +70,4 @@ impl ElementReactionQueue {
             .find_map(Option::as_ref)
             == Some(reaction)
     }
-
-    pub(super) fn pending_reactions_contain(&self, reaction: &CustomElementReaction) -> bool {
-        self.reactions
-            .iter()
-            .skip(self.index)
-            .flatten()
-            .any(|pending| pending == reaction)
-    }
 }
