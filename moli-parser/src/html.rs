@@ -457,8 +457,7 @@ impl HtmlParser {
                 true,
                 self.scripting_enabled,
             );
-        let stream =
-            HtmlTreeSinkStream::from_target_with_scripting(target, self.scripting_enabled);
+        let stream = HtmlTreeSinkStream::from_target_with_scripting(target, self.scripting_enabled);
         for chunk in html_chunks(&html) {
             stream.feed(chunk);
         }
@@ -476,8 +475,7 @@ impl HtmlParser {
                 false,
                 self.scripting_enabled,
             );
-        let stream =
-            HtmlTreeSinkStream::from_target_with_scripting(target, self.scripting_enabled);
+        let stream = HtmlTreeSinkStream::from_target_with_scripting(target, self.scripting_enabled);
         for chunk in html_chunks(&html) {
             stream.feed(chunk);
         }

@@ -101,20 +101,6 @@ impl DocumentRuntime {
         );
     }
 
-    pub(crate) fn apply_child_parser_stream_mutation_effects_to_live_dom_host(
-        &mut self,
-        scope: &mut v8::PinScope<'_, '_>,
-        host_ptr: *mut JsContextHost,
-        effects: DomMutationEffects,
-    ) {
-        self.apply_parser_stream_mutation_effects_to_live_dom_host_with_options(
-            scope,
-            host_ptr,
-            effects,
-            RuntimeMutationOptions::child_parser_tree_sink(),
-        );
-    }
-
     pub(super) fn apply_parser_stream_mutation_effects_to_live_dom_host_with_options(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,

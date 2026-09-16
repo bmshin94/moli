@@ -114,6 +114,11 @@ impl<'a, 'scope, 'pin> ChildFrameLiveParserOwner<'a, 'scope, 'pin> {
             self.host.dom_host(),
             effects,
         );
+        for &root in effects.tree().connected_roots() {
+            crate::native_bridge::element::initialize_parser_inserted_body_window_event_handlers(
+                self.scope, host_ptr, root,
+            );
+        }
         for &root in effects.tree().disconnected_roots() {
             custom_elements::enqueue_disconnected_callbacks_for_subtree(self.scope, host_ptr, root);
         }
@@ -524,9 +529,6 @@ impl ParserElementCreationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
         if !self.targets_current_document() {
             return None;
         }
-        let document_has_body = self
-            .document_body_handle_for_document(request.document_handle)
-            .is_some();
         let child_handle = self
             .host
             .child_browsing_context_host_for_document_handle(request.document_handle)?;
@@ -541,7 +543,6 @@ impl ParserElementCreationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
             scope,
             host_ptr,
             request.document_handle,
-            document_has_body,
             request.local_name,
             request.namespace,
             request.prefix,
