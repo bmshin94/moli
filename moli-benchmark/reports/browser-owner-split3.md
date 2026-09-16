@@ -3,8 +3,9 @@
 Acceptance remains open. The original frozen candidate below exposed a
 ServiceWorker fallback panic, growing output history and slower local navigation
 than main. The fallback was fixed in `7fa476059`; the subsequent retention
-measurements below cover bounded history. Burst throughput and the overall
-performance comparison remain open.
+measurements below cover bounded history. The final native-output follow-up
+passes the Worker burst workload; Slack disconnects and the overall performance
+comparison remain open.
 
 ## Revisions and scope
 
@@ -206,3 +207,54 @@ python3 -P moli-benchmark/scripts/summarize-browser-owner-trace.py /tmp/owner-pr
 The trace summary retains incomplete-probe status, matches commits by exact
 BrowserSequence, reports missing matches, and separates queue wait, commit work,
 projection lag, allocation requests and transport admission failures.
+
+## Native-output follow-up
+
+The release built on `c77a6aba9` has SHA-256
+`fdafb6a1d0b1b1f190fd085a8b2b5238d535689a940b77c3c4eed0a2f69cd5e2`.
+Protocol output now consumes native records and their per-context cursors.
+Cumulative Page-report reads after commands, Runtime.enable, paused requests,
+manifest publication and document replacement are removed, together with the
+second queue and anonymous aggregate cursor. Context handles carry their
+immutable renderer identity, and publications without a command cause skip
+causal Page lookup. Context liveness and mutable Browser operations still belong
+to BrowserOwner. Transport and history budgets are unchanged.
+
+The original **512/1,536/2,048/4,096/4,096** workload passes **3/3** on this pinned
+release. Each run completes all 12,288 records, replays the exact contiguous
+312-record tail and delivers all 256 subsequent live records once. The c77
+failure is retained in `retention-burst/`; final results are in
+`native-output-burst-1/` through `native-output-burst-3/`.
+
+| Steady workload | PSS at 4,096 / 8,192 / 12,288 records |
+| --- | --- |
+| Worker, 24 × 512 | 118.47 / 117.00 / 115.21 MiB |
+| Window and isolated realm, 24 × 512 | 121.84 / 121.93 / 122.11 MiB |
+
+Both retain their exact replay/live-output assertions. The Window probe reports
+636 replayed and 256 live records. Evidence, source hashes and all failed
+attempts remain under `target/smoke/split3-final-acceptance.pie713_t/`;
+`native-output-accepted-measurements.json` summarizes the final measurements.
+
+Slack remains unresolved: fresh c77 and final-release diagnostics each passed
+2/3 attempts, with one WebSocket 1005 disconnect. An intermediate release failed
+3/3; those attempts remain in `throughput-slack-candidate/`. These public-network
+samples do not establish a reliable change in failure rate. A balanced three-round
+local navigation comparison of c77 and the intermediate release also had
+overlapping timing ranges; it does not certify the main-relative performance gate.
+
+Validation includes strict workspace Clippy, 266 focused cases, four real HTTP
+stream cases × 20 zero-retry iterations, 46 CDP groups / 487 scenarios, 165
+WebDriver cases and all three shared-page lifecycle probes. One earlier full
+run failed because a test assumed that receiving the entire body also meant EOF
+had arrived. The four related tests now share the existing bounded read-to-EOF
+loop and retain exact body, encoding, session and continuation assertions.
+
+Final full nextest: **18,503 passed / 13 configured skips**, run
+`30a10911-e44c-49c4-9d9e-595634143caa`. All 91 expected panic test/message pairs
+match the previous accepted run. Five tests for the deleted snapshot-diff
+implementation were removed; a native item-order/reset regression replaces that
+storage-specific coverage. Existing retirement and independent-inspection tests
+now consume actual output fences and compare Runtime and Audits facts separately.
+The 18 changed Rust files match the pinned release source; see
+`native-output-acceptance.json` for the validation manifest.

@@ -1,9 +1,8 @@
 use super::BrowserContext;
-use moli_core::browser::{BrowserSequence, WebContentsHandle};
+use moli_core::browser::BrowserSequence;
 use moli_core::page::{
     RendererAgentAttachmentId, RendererDocumentLifecycleIdentity,
-    RendererRuntimeInspectorMessageBatch, ScriptNetworkOutputItem, ScriptObservableOutputItem,
-    SubresourceNetworkRequestHandle,
+    RendererRuntimeInspectorMessageBatch, ScriptNetworkOutputItem, SubresourceNetworkRequestHandle,
 };
 #[cfg(test)]
 use moli_core::page::{RendererPageDiagnosticsSnapshot, RendererRuntimeObservableSourceSummary};
@@ -146,7 +145,7 @@ impl TargetRuntimeSlot {
 
     fn reset_replacement_document_output_state(&mut self) {
         self.log_output_queue.reset();
-        self.observable_queue.reset_output_queue();
+        self.observable_queue.reset();
     }
 
     pub(crate) fn javascript_dialog_scope_observer(&self) -> TargetJavaScriptDialogScopeObserver {
@@ -445,21 +444,6 @@ impl TargetRuntimeSlot {
         &self,
     ) -> Option<TargetRuntimeObservableSourceOutput> {
         self.observable_queue.latest_source_tail()
-    }
-
-    pub(crate) fn observable_output_cursor_end(&self) -> Option<(usize, usize)> {
-        self.current_renderer_inspection_binding()
-            .is_some()
-            .then(|| self.observable_queue.observable_output_cursor_end())
-            .flatten()
-    }
-
-    pub(crate) fn ingest_observable_output_snapshot(
-        &mut self,
-        items: &[ScriptObservableOutputItem],
-    ) {
-        self.observable_queue
-            .ingest_observable_output_snapshot(items);
     }
 
     pub(crate) fn primary_network_events_enabled(&self) -> bool {
@@ -959,7 +943,6 @@ impl BrowserContext {
                 .runtime_slot
                 .reset_document_output_state();
         }
-        self.ingest_owner_page_observable_output_updates_for_target(target_id);
     }
     pub(super) fn retire_loaded_document_with_reason_for_target(
         &mut self,
@@ -980,7 +963,6 @@ impl BrowserContext {
         let runtime = &mut self.page_targets.get_mut(target_id)?.runtime_slot;
         runtime.transition_renderer_channel_for_page_absence(reason);
         runtime.reset_document_output_state();
-        self.ingest_owner_page_observable_output_updates_for_target(target_id);
         retiring
     }
     pub(crate) fn mark_loaded_page_absent_for_target(
@@ -1219,36 +1201,6 @@ impl BrowserContext {
             .observable_queue
             .append_renderer_lifecycle_error(url, document_id, text, execution_context_id)
     }
-    pub(crate) fn ingest_owner_page_observable_output_updates_for_target(
-        &mut self,
-        target_id: &str,
-    ) -> bool {
-        let Some(projection) = self.page_targets.get_mut(target_id) else {
-            return false;
-        };
-        let web_contents = projection.web_contents_id();
-        let queue = &mut projection.runtime_slot.observable_queue;
-        let handle = WebContentsHandle::new(self.browser_context.id(), web_contents);
-        let Some(document) = self
-            .browser_context
-            .document_handle_for_web_contents(handle)
-            .ok()
-            .flatten()
-        else {
-            queue.reset_output_queue();
-            return false;
-        };
-        let Ok(snapshot) = self
-            .browser_context
-            .document_observable_output_snapshot(document)
-        else {
-            queue.reset_output_queue();
-            return false;
-        };
-        queue.ingest_observable_output_snapshot(&snapshot);
-        true
-    }
-
     pub(crate) fn observe_renderer_page_state_for_target(
         &mut self,
         target_id: &str,

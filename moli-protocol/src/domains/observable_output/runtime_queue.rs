@@ -150,10 +150,8 @@ impl TargetRuntimeObservableSourceOutput {
                     if !include_console_api_messages {
                         continue;
                     }
-                    let emitted = owner_state.emitted_console_entries_for_context(
-                        message.execution_context_id,
-                        summary.default_execution_context_id(),
-                    );
+                    let emitted = owner_state
+                        .emitted_console_entries_for_context(message.execution_context_id);
                     if *context_count_end > emitted {
                         items.push(ObservableRuntimePreparedItem::output(
                             runtime_console_api_called_item(message),
@@ -507,54 +505,14 @@ impl RuntimeObservableEmissionSnapshot {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct TargetRuntimeObservableQueueState {
-    observable_output_items: Vec<ScriptObservableOutputItem>,
     source_cursors: HashMap<DocumentId, (usize, TargetRuntimeObservableSourceSummary)>,
     source_outputs: OutputHistory<TargetRuntimeObservableSourceOutput>,
 }
 
 impl TargetRuntimeObservableQueueState {
     pub(crate) fn reset(&mut self) {
-        self.observable_output_items.clear();
         self.source_cursors.clear();
         self.source_outputs = OutputHistory::default();
-    }
-
-    pub(crate) fn reset_output_queue(&mut self) {
-        self.reset();
-    }
-
-    /// Reconciles a cumulative report snapshot, including producer rewinds.
-    pub(crate) fn ingest_observable_output_snapshot(
-        &mut self,
-        items: &[ScriptObservableOutputItem],
-    ) {
-        if self.observable_output_items.len() > items.len()
-            || self
-                .observable_output_items
-                .iter()
-                .zip(items.iter())
-                .any(|(previous, next)| previous != next)
-        {
-            self.observable_output_items.clear();
-        }
-
-        let start_item_index = self.observable_output_items.len();
-        self.observable_output_items
-            .extend(items[start_item_index..].iter().cloned());
-    }
-
-    fn console_event_count(&self) -> usize {
-        self.observable_output_items
-            .iter()
-            .filter(|item| matches!(item, ScriptObservableOutputItem::ConsoleMessage(_)))
-            .count()
-    }
-
-    fn lifecycle_error_event_count(&self) -> usize {
-        self.observable_output_items
-            .iter()
-            .filter(|item| matches!(item, ScriptObservableOutputItem::LifecycleError(_)))
-            .count()
     }
 
     #[cfg(test)]
@@ -671,9 +629,8 @@ impl TargetRuntimeObservableQueueState {
     /// Appends one concrete console fact already ordered by the renderer
     /// output stream.
     ///
-    /// Unlike the legacy renderer summary path, this never rebuilds or diffs
-    /// a source snapshot. Protocol owns the durable per-attachment cursor and
-    /// advances it exactly once for the admitted record.
+    /// Protocol owns the durable per-attachment cursor and advances it exactly
+    /// once for the admitted record.
     pub(crate) fn append_renderer_console_message(
         &mut self,
         url: String,
@@ -791,15 +748,6 @@ impl TargetRuntimeObservableQueueState {
         self.source_tail_for_document(latest.document_id())
     }
 
-    pub(crate) fn observable_output_cursor_end(&self) -> Option<(usize, usize)> {
-        (!self.observable_output_items.is_empty()).then(|| {
-            (
-                self.console_event_count(),
-                self.lifecycle_error_event_count(),
-            )
-        })
-    }
-
     #[cfg(test)]
     pub(crate) fn source_snapshot(&self) -> TargetRuntimeObservableQueueSnapshot {
         self.snapshot_with_source_outputs(self.source_outputs.iter().cloned().collect())
@@ -811,7 +759,25 @@ impl TargetRuntimeObservableQueueState {
         source_outputs: Vec<TargetRuntimeObservableSourceOutput>,
     ) -> TargetRuntimeObservableQueueSnapshot {
         TargetRuntimeObservableQueueSnapshot {
-            observable_output_items: self.observable_output_items.clone(),
+            observable_output_items: self
+                .latest_source_tail()
+                .map(|source| {
+                    source
+                        .source_items
+                        .iter()
+                        .map(|item| match item {
+                            TargetRuntimeObservableSourceItem::ConsoleMessage {
+                                message, ..
+                            } => {
+                                ScriptObservableOutputItem::ConsoleMessage(message.message.clone())
+                            }
+                            TargetRuntimeObservableSourceItem::LifecycleError { text, .. } => {
+                                ScriptObservableOutputItem::LifecycleError(text.clone())
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             source_outputs,
         }
     }
@@ -899,8 +865,8 @@ mod tests {
 
     use super::{HashMap, TargetRuntimeObservableState};
     use super::{
-        TargetRuntimeObservableQueueSnapshot, TargetRuntimeObservableQueueState,
-        TargetRuntimeObservableSourceItem, TargetRuntimeObservableSourceSummary,
+        TargetRuntimeObservableQueueState, TargetRuntimeObservableSourceItem,
+        TargetRuntimeObservableSourceSummary,
     };
     use crate::conn::DocumentId;
 
@@ -912,29 +878,6 @@ mod tests {
         source: RendererRuntimeObservableSourceSummary,
     ) -> RendererPageDiagnosticsSnapshot {
         RendererPageDiagnosticsSnapshot::from_runtime_observable_source(source)
-    }
-
-    fn observable_output_items(
-        console: &[&str],
-        lifecycle_errors: &[&str],
-    ) -> Vec<ScriptObservableOutputItem> {
-        let mut events = console
-            .iter()
-            .map(|message| ScriptObservableOutputItem::ConsoleMessage((*message).to_owned()))
-            .collect::<Vec<_>>();
-        events.extend(
-            lifecycle_errors
-                .iter()
-                .map(|error| ScriptObservableOutputItem::LifecycleError((*error).to_owned())),
-        );
-        events
-    }
-
-    fn apply_observable_page_output_update(
-        queue: &mut TargetRuntimeObservableQueueState,
-        items: &[ScriptObservableOutputItem],
-    ) {
-        queue.ingest_observable_output_snapshot(items);
     }
 
     #[test]
@@ -979,142 +922,46 @@ mod tests {
     }
 
     #[test]
-    fn target_runtime_observable_queue_appends_matching_tail() {
+    fn native_runtime_queue_preserves_order_and_resets_document_cursors() {
         let mut queue = TargetRuntimeObservableQueueState::default();
-
-        apply_observable_page_output_update(
-            &mut queue,
-            &[
-                ScriptObservableOutputItem::ConsoleMessage("console-a".to_owned()),
-                ScriptObservableOutputItem::LifecycleError("error-a".to_owned()),
-            ],
+        let url = "https://example.test/".to_owned();
+        queue.append_renderer_console_message(
+            url.clone(),
+            document_id(17),
+            runtime_console_message(7, "console-a"),
         );
-        apply_observable_page_output_update(
-            &mut queue,
-            &[
-                ScriptObservableOutputItem::ConsoleMessage("console-a".to_owned()),
-                ScriptObservableOutputItem::LifecycleError("error-a".to_owned()),
-                ScriptObservableOutputItem::ConsoleMessage("console-b".to_owned()),
-                ScriptObservableOutputItem::LifecycleError("error-b".to_owned()),
-            ],
+        queue.append_renderer_lifecycle_error(
+            url.clone(),
+            document_id(17),
+            "error-a".into(),
+            Some(7),
         );
-
+        queue.append_renderer_console_message(
+            url.clone(),
+            document_id(17),
+            runtime_console_message(7, "console-b"),
+        );
+        let source = queue.latest_source_tail().unwrap();
         assert_eq!(
-            queue.snapshot(),
-            TargetRuntimeObservableQueueSnapshot {
-                observable_output_items: vec![
-                    ScriptObservableOutputItem::ConsoleMessage("console-a".to_owned()),
-                    ScriptObservableOutputItem::LifecycleError("error-a".to_owned()),
-                    ScriptObservableOutputItem::ConsoleMessage("console-b".to_owned()),
-                    ScriptObservableOutputItem::LifecycleError("error-b".to_owned()),
-                ],
-                source_outputs: Vec::new(),
-            }
+            queue.snapshot().observable_output_items,
+            vec![
+                ScriptObservableOutputItem::ConsoleMessage("console-a".into()),
+                ScriptObservableOutputItem::LifecycleError("error-a".into()),
+                ScriptObservableOutputItem::ConsoleMessage("console-b".into()),
+            ]
         );
-    }
-
-    #[test]
-    fn target_runtime_observable_queue_append_update_preserves_producer_item_order() {
-        let mut queue = TargetRuntimeObservableQueueState::default();
-        let first_items = vec![ScriptObservableOutputItem::ConsoleMessage(
-            "console-a".to_owned(),
-        )];
-        let all_items = vec![
-            ScriptObservableOutputItem::ConsoleMessage("console-a".to_owned()),
-            ScriptObservableOutputItem::LifecycleError("error-a".to_owned()),
-            ScriptObservableOutputItem::ConsoleMessage("console-b".to_owned()),
-        ];
-
-        apply_observable_page_output_update(&mut queue, &first_items);
-        apply_observable_page_output_update(&mut queue, &all_items);
-
-        assert_eq!(
-            queue.snapshot(),
-            TargetRuntimeObservableQueueSnapshot {
-                observable_output_items: vec![
-                    ScriptObservableOutputItem::ConsoleMessage("console-a".to_owned()),
-                    ScriptObservableOutputItem::LifecycleError("error-a".to_owned()),
-                    ScriptObservableOutputItem::ConsoleMessage("console-b".to_owned()),
-                ],
-                source_outputs: Vec::new(),
-            },
-            "observable producer item append update should append from the source item cursor instead of regrouping by event family"
-        );
-        assert_eq!(queue.observable_output_items.len(), 3);
-    }
-
-    #[test]
-    fn target_runtime_observable_queue_reports_owner_output_cursor_end() {
-        let mut queue = TargetRuntimeObservableQueueState::default();
-        assert_eq!(
-            queue.observable_output_cursor_end(),
-            None,
-            "empty owner output queue should not masquerade as a synced cursor source"
-        );
-
-        apply_observable_page_output_update(
-            &mut queue,
-            &observable_output_items(&["console-a", "console-b"], &["error-a"]),
-        );
-
-        assert_eq!(
-            queue.observable_output_cursor_end(),
-            Some((2, 1)),
-            "aggregate cursor should be derived from already-ingested owner output only"
-        );
-    }
-
-    #[test]
-    fn target_runtime_observable_queue_recovers_producer_items_on_prefix_drift() {
-        let mut queue = TargetRuntimeObservableQueueState::default();
-        let first_items = vec![ScriptObservableOutputItem::ConsoleMessage("old".to_owned())];
-        let replacement_items = vec![ScriptObservableOutputItem::LifecycleError(
-            "replacement".to_owned(),
-        )];
-
-        apply_observable_page_output_update(&mut queue, &first_items);
-        apply_observable_page_output_update(&mut queue, &replacement_items);
-
-        assert_eq!(
-            queue.snapshot(),
-            TargetRuntimeObservableQueueSnapshot {
-                observable_output_items: vec![ScriptObservableOutputItem::LifecycleError(
-                    "replacement".to_owned()
-                )],
-                source_outputs: Vec::new(),
-            },
-            "observable producer item prefix drift must rebuild same-count replacement output instead of trusting the previous item cursor"
-        );
-        assert_eq!(queue.observable_output_items.len(), 1);
-    }
-
-    #[test]
-    fn target_runtime_observable_queue_rebuilds_on_rewind_or_replacement() {
-        let mut queue = TargetRuntimeObservableQueueState::default();
-
-        apply_observable_page_output_update(
-            &mut queue,
-            &[
-                ScriptObservableOutputItem::ConsoleMessage("console-a".to_owned()),
-                ScriptObservableOutputItem::ConsoleMessage("console-b".to_owned()),
-                ScriptObservableOutputItem::LifecycleError("error-a".to_owned()),
-                ScriptObservableOutputItem::LifecycleError("error-b".to_owned()),
-            ],
-        );
-        apply_observable_page_output_update(
-            &mut queue,
-            &[ScriptObservableOutputItem::ConsoleMessage(
-                "console-new".to_owned(),
-            )],
-        );
-
-        assert_eq!(
-            queue.snapshot(),
-            TargetRuntimeObservableQueueSnapshot {
-                observable_output_items: observable_output_items(&["console-new"], &[]),
-                source_outputs: Vec::new(),
-            }
-        );
+        assert_eq!(source.cursor_end(), Some((HashMap::from([(7, 2)]), 1)));
+        queue.reset();
+        assert!(queue.latest_source_tail().is_none());
+        let fresh = queue
+            .append_renderer_console_message(
+                url,
+                document_id(18),
+                runtime_console_message(7, "new"),
+            )
+            .unwrap();
+        assert_eq!(fresh.source_item_start_index(), 0);
+        assert_eq!(fresh.cursor_end(), Some((HashMap::from([(7, 1)]), 0)));
     }
 
     #[test]

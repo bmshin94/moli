@@ -485,8 +485,7 @@ impl BrowserContext {
         &self,
         runtime_id: moli_core::RendererBrowserContextRuntimeId,
     ) -> bool {
-        self.browser_context
-            .routes_renderer_browser_context_runtime(runtime_id)
+        self.browser_context.renderer_runtime_id() == runtime_id
     }
 
     pub(crate) fn target_id_for_renderer_owner_local_host_id(
