@@ -73,6 +73,7 @@ DEFAULT_TESTHARNESS_TIMEOUT_SECONDS = 10.0
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 MAX_REQUEST_BODY_LINE_BYTES = 64 * 1024
 XHR_RESPONSE_RESOURCE_PATHS = {
+    "/xhr/resources/corsenabled.py",
     "/xhr/resources/status.py",
     "/xhr/resources/last-modified.py",
 }
@@ -1018,9 +1019,9 @@ def _sidecar_response_headers(file_path: Path) -> list[tuple[str, str]]:
 
 
 def _response_content_type_and_extra_headers(
-    content_type: str,
+    content_type: str | None,
     extra_headers: list[tuple[str, str]] | None,
-) -> tuple[str, list[tuple[str, str]]]:
+) -> tuple[str | None, list[tuple[str, str]]]:
     """Merge static MIME guessing with WPT sidecar/pipe response headers."""
 
     merged_content_type = content_type
@@ -1189,11 +1190,11 @@ def _static_response_headers(
 
 
 def _static_response_header_block(
-    content_type: str,
+    content_type: str | None,
     extra_headers: list[tuple[str, str]] | None,
 ) -> list[tuple[str, str]]:
     headers = list(extra_headers or [])
-    if not any(name.lower() == "content-type" for name, _ in headers):
+    if content_type is not None and not any(name.lower() == "content-type" for name, _ in headers):
         headers.insert(0, ("Content-Type", content_type))
     return headers
 
@@ -2364,11 +2365,75 @@ def _make_handler(
                 return self._serve_xhr_response_resource
             raise AttributeError(name)
 
+        def _read_content_length_request_body(self) -> bytes | None:
+            if self.headers.get("Transfer-Encoding") is not None:
+                self._reject_request_body(400)
+                return None
+            length_str = self.headers.get("Content-Length")
+            if length_str is None:
+                return b""
+            try:
+                length = int(length_str)
+            except ValueError:
+                self._reject_request_body(400)
+                return None
+            if length < 0:
+                self._reject_request_body(400)
+                return None
+            if length > MAX_REQUEST_BODY_BYTES:
+                self._reject_request_body(413)
+                return None
+            try:
+                raw = self.rfile.read(length)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.close_connection = True
+                return None
+            if len(raw) != length:
+                self.close_connection = True
+                return None
+            return raw
+
+        def _serve_xhr_cors_echo(self, parsed, *, emit_body: bool) -> None:
+            try:
+                params = parse_qs(parsed.query, keep_blank_values=True, encoding="latin-1")
+                if "delay" in params:
+                    time.sleep(int(params["delay"][0]))
+                request_body = self._read_content_length_request_body()
+                if request_body is None:
+                    return
+                status, reason, body = 200, None, b"Test"
+                headers = [
+                    ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Credentials", "true"),
+                    ("Access-Control-Allow-Methods", "GET, POST, PUT, FOO"),
+                    ("Access-Control-Allow-Headers", "x-test, x-foo"),
+                    ("Access-Control-Expose-Headers",
+                     "x-request-method, x-request-content-type, x-request-query, "
+                     "x-request-content-length, x-request-data"),
+                ]
+                if "safelist_content_type" in params:
+                    headers.append(("Access-Control-Allow-Headers", "content-type"))
+                headers.extend([
+                    ("X-Request-Method", self.command),
+                    ("X-Request-Query", parsed.query or "NO"),
+                    ("X-Request-Content-Length", self.headers.get("Content-Length", "NO")),
+                    ("X-Request-Content-Type", self.headers.get("Content-Type", "NO")),
+                    ("X-Request-Data", request_body.decode("latin-1")),
+                ])
+            except (ValueError, OSError, OverflowError):
+                self.send_error(500)
+                return
+            self._send_bytes(None, body, emit_body=emit_body, extra_headers=headers,
+                             status_code=status, status_text=reason)
+
         def _serve_xhr_response_resource(self, *, emit_body: bool = True) -> bool:
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             if path not in XHR_RESPONSE_RESOURCE_PATHS:
                 return False
+            if path == "/xhr/resources/corsenabled.py":
+                self._serve_xhr_cors_echo(parsed, emit_body=emit_body)
+                return True
             try:
                 if path == "/xhr/resources/status.py":
                     status, reason, content_type, body = _fetch_status_response(parsed.query)
@@ -2549,7 +2614,7 @@ def _make_handler(
 
         def _send_bytes(
             self,
-            content_type: str,
+            content_type: str | None,
             body: bytes,
             *,
             emit_body: bool,
