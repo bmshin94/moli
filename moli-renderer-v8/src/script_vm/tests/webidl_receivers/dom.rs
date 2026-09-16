@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn detached_child_window_event_methods_preserve_receiver_identity() {
+    let mut vm = new_parsed_test_vm(
+        "https://detached-window-event-receiver.test/",
+        "<!doctype html><body></body>",
+    );
+    let result = vm.eval(r#"
+(() => {
+  const frame = document.body.appendChild(document.createElement('iframe'));
+  const child = frame.contentWindow;
+  const methods = [child.EventTarget.prototype, EventTarget.prototype];
+  const log = [];
+  const listener = () => log.push('listener');
+  window.addEventListener('test', listener);
+  child.addEventListener('test', listener);
+  frame.remove();
+  for (const methodsInRealm of methods) {
+    const {addEventListener: add, removeEventListener: remove, dispatchEvent: dispatch} = methodsInRealm;
+    remove.call(child, 'test', listener);
+    add.call(child, 'test', listener);
+    log.push(dispatch.call(child, new Event('test')));
+    remove.call(child, 'test', listener);
+    for (const receiver of [{}, Object.create(child), new Proxy(child, {})]) {
+      for (const invoke of [
+        () => add.call(receiver, 'test', listener),
+        () => remove.call(receiver, 'test', listener),
+        () => dispatch.call(receiver, new Event('test'))
+      ]) {
+        try { invoke(); log.push('accepted invalid receiver'); }
+        catch (error) { if (error.name !== 'TypeError') log.push(error.name); }
+      }
+    }
+  }
+  window.dispatchEvent(new Event('test'));
+  return JSON.stringify(log);
+})()
+"#).expect("detached Window remains a valid EventTarget without affecting the parent");
+    assert_eq!(result, r#"[true,true,"listener"]"#);
+}
+
+#[test]
 fn dom_receiver_templates_reject_invalid_interfaces_before_conversion() {
     let mut vm = new_storage_test_vm("https://dom-receiver-templates.test/");
     let result = vm.eval(r#"

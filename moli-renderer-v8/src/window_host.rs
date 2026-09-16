@@ -290,8 +290,12 @@ pub(super) fn event_target_add_event_listener_callback<'s>(
     }
     let child_window_target = child_window_handle(scope, args.this());
     let target = if let Some(handle) = child_window_target {
-        host.current_child_window_event_target(handle)
-            .map(EventTargetHandle::ChildWindow)
+        let Some(target) = host.current_child_window_event_target(handle) else {
+            // Detachment clears the Window's listeners and execution context,
+            // but retained references still have a valid EventTarget receiver.
+            return;
+        };
+        Some(EventTargetHandle::ChildWindow(target))
     } else {
         event_target_handle_from_this(scope, &args, host_ptr, host)
     };
@@ -395,8 +399,11 @@ pub(super) fn event_target_remove_event_listener_callback<'s>(
     };
     let capture = call.options.capture;
     let target = if let Some(handle) = child_window_handle(scope, args.this()) {
-        host.current_child_window_event_target(handle)
-            .map(EventTargetHandle::ChildWindow)
+        let Some(target) = host.current_child_window_event_target(handle) else {
+            // The listeners were already removed when this Window detached.
+            return;
+        };
+        Some(EventTargetHandle::ChildWindow(target))
     } else {
         event_target_handle_from_this(scope, &args, host_ptr, host)
     };
@@ -2087,15 +2094,9 @@ fn child_window_handle<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> Option<crate::document_runtime::DomHandle> {
-    let global = scope.get_current_context().global(scope);
-    if object.strict_equals(global.into()) {
-        return object_child_window_handle(scope, object);
-    }
-    let field = object
-        .get_internal_field(scope, 1)
-        .and_then(|value| v8::Local::<v8::Value>::try_from(value).ok())
-        .and_then(|value| value.number_value(scope))?;
-    if !field.is_finite() || field.fract() != 0.0 || field != 0.0 {
+    // A borrowed method can receive another realm's global Window as well as a
+    // bridge wrapper. Check its native brand, independent of the callee realm.
+    if !crate::web_api_interfaces::Window::is_instance(scope, object) {
         return None;
     }
     object_child_window_handle(scope, object)
