@@ -57,7 +57,7 @@ struct CdpOwnerRuntimeConfig {
     cookie_profile: SharedCookieProfile,
     storage_partition: Arc<StoragePartitionState>,
     navigation_runtime_config: NavigationRuntimeConfig,
-    cdp_screencast_fps: u8,
+    screencast_interval_ms: u32,
 }
 
 impl SharedCdpOwnerRegistry {
@@ -68,7 +68,7 @@ impl SharedCdpOwnerRegistry {
         cookie_profile: SharedCookieProfile,
         storage_partition: Arc<StoragePartitionState>,
         navigation_runtime_config: NavigationRuntimeConfig,
-        cdp_screencast_fps: u8,
+        screencast_interval_ms: u32,
     ) -> Self {
         Self {
             inner: Arc::new(CdpOwnerRegistryInner {
@@ -79,7 +79,7 @@ impl SharedCdpOwnerRegistry {
                     cookie_profile,
                     storage_partition,
                     navigation_runtime_config,
-                    cdp_screencast_fps,
+                    screencast_interval_ms,
                 },
                 state: Mutex::new(CdpOwnerRegistryState::default()),
                 shared_owner: Mutex::new(None),
@@ -136,7 +136,7 @@ impl SharedCdpOwnerRegistry {
             receivers,
             initial_storage_partition,
             self.inner.config.navigation_runtime_config.clone(),
-            self.inner.config.cdp_screencast_fps,
+            self.inner.config.screencast_interval_ms,
             Some(CdpTargetHostIntegration::new(
                 self.inner.config.target_id_allocator.clone(),
                 self.inner.config.tab_target_id_allocator.clone(),
@@ -204,18 +204,18 @@ fn spawn_owner_task(
     receivers: CdpFrontendReceivers,
     initial_storage_partition: CdpInitialStoragePartition,
     navigation_runtime_config: NavigationRuntimeConfig,
-    cdp_screencast_fps: u8,
+    screencast_interval_ms: u32,
     target_host_integration: Option<CdpTargetHostIntegration>,
     owner_lifecycle: Option<CdpOwnerActorLifecycle>,
     checkpoint_tx: mpsc::UnboundedSender<CdpCookieSnapshot>,
 ) -> oneshot::Receiver<()> {
     spawn_protocol_local_task("cdp-owner", move || async move {
         let (scheduler, scheduler_receivers) =
-            CdpScheduler::new_with_deferred_default_target_runtime_and_screencast_fps(
+            CdpScheduler::new_with_deferred_default_target_runtime_and_screencast_interval(
                 initial_storage_partition,
                 navigation_runtime_config,
                 target_host_integration,
-                cdp_screencast_fps,
+                screencast_interval_ms,
             );
         let actor = spawn_cdp_scheduler_actor(
             scheduler,

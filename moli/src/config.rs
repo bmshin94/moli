@@ -63,8 +63,8 @@ impl AppConfig {
                 config.server.host = args.host.clone();
                 config.server.port = args.port;
                 config.server.timeout_secs = args.timeout;
-                if let Some(fps) = args.cdp_screencast_fps {
-                    config.server.cdp_screencast_fps = fps;
+                if let Some(interval_ms) = args.screencast_interval {
+                    config.server.screencast_interval_ms = interval_ms;
                 }
             }
             Commands::Import(_) => {}

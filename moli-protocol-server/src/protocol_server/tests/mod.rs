@@ -275,7 +275,7 @@ fn protocol_server_test_state(
             protocol_server_test_fetch_config(fetch_config),
             optional_resource_fetch_mask,
         ),
-        1,
+        crate::config::DEFAULT_SCREENCAST_INTERVAL_MS,
     )
     .expect("test app state should initialize")
 }
@@ -436,7 +436,7 @@ async fn spawn_test_protocol_server_with_runtime_config(
         addr,
         storage_partition,
         navigation_runtime_config,
-        1,
+        crate::config::DEFAULT_SCREENCAST_INTERVAL_MS,
     )
     .expect("test app state should initialize");
     let server = tokio::spawn(async move {

@@ -155,7 +155,7 @@ impl ProtocolServer {
             addr,
             self.storage_partition.clone(),
             self.navigation_runtime_config.clone(),
-            self.config.cdp_screencast_fps,
+            self.config.screencast_interval_ms,
         )?;
 
         let cdp_owner_registry = app_state.cdp_owner_registry.clone();
@@ -771,7 +771,7 @@ impl AppState {
                 subframe_loading_enabled,
                 LayoutPolicy::default(),
             ),
-            1,
+            crate::config::DEFAULT_SCREENCAST_INTERVAL_MS,
         )
     }
 
@@ -779,14 +779,14 @@ impl AppState {
         addr: SocketAddr,
         storage_partition: Arc<StoragePartitionState>,
         navigation_runtime_config: NavigationRuntimeConfig,
-        cdp_screencast_fps: u8,
+        screencast_interval_ms: u32,
     ) -> anyhow::Result<Self> {
         Ok(Self::from_parts(
             addr,
             SharedCookieProfile::from_storage_partition(storage_partition.clone()),
             storage_partition,
             navigation_runtime_config,
-            cdp_screencast_fps,
+            screencast_interval_ms,
         ))
     }
 
@@ -795,7 +795,7 @@ impl AppState {
         cookie_profile: SharedCookieProfile,
         storage_partition: Arc<StoragePartitionState>,
         navigation_runtime_config: NavigationRuntimeConfig,
-        cdp_screencast_fps: u8,
+        screencast_interval_ms: u32,
     ) -> Self {
         let cdp_agent_host_directory = SharedCdpAgentHostDirectory::default();
         let cdp_target_id_allocator = Arc::new(AtomicU64::new(0));
@@ -807,7 +807,7 @@ impl AppState {
             cookie_profile.clone(),
             storage_partition.clone(),
             navigation_runtime_config.clone(),
-            cdp_screencast_fps,
+            screencast_interval_ms,
         );
         Self {
             browser_ws_url: format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"),

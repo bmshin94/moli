@@ -614,7 +614,7 @@ fn infers_serve_mode_when_called_without_args() {
             host: "127.0.0.1".to_owned(),
             port: 9222,
             timeout: 10,
-            cdp_screencast_fps: None,
+            screencast_interval: None,
             common: CommonArgs::default(),
         }))
     );
@@ -640,7 +640,7 @@ fn parses_serve_flags_with_explicit_command() {
             host: "0.0.0.0".to_owned(),
             port: 9333,
             timeout: 42,
-            cdp_screencast_fps: None,
+            screencast_interval: None,
             common: CommonArgs::default(),
         }))
     );
@@ -1571,26 +1571,47 @@ fn layout_selects_on_demand_policy_for_fetch_and_serve() {
 }
 
 #[test]
-fn cdp_screencast_fps_requires_layout_and_accepts_one_through_sixty() {
-    for fps in ["1", "30", "60"] {
+fn screencast_interval_requires_layout_and_accepts_positive_milliseconds() {
+    for interval_ms in ["1", "16", "17", "33", "250", "1000", "1500", "4294967295"] {
         let cli = Cli::try_parse_from(normalize_args_for_compat([
             "moli",
             "serve",
             "--layout",
-            "--cdp-screencast-fps",
-            fps,
+            "--screencast-interval",
+            interval_ms,
         ]))
         .unwrap();
         let config = AppConfig::from_cli(&cli).unwrap();
-        assert_eq!(config.server.cdp_screencast_fps, fps.parse::<u8>().unwrap());
+        assert_eq!(
+            config.server.screencast_interval_ms,
+            interval_ms.parse::<u32>().unwrap()
+        );
     }
 
     for args in [
-        vec!["moli", "serve", "--cdp-screencast-fps", "30"],
-        vec!["moli", "serve", "--layout", "--cdp-screencast-fps", "0"],
-        vec!["moli", "serve", "--layout", "--cdp-screencast-fps", "61"],
+        vec!["moli", "serve", "--screencast-interval", "33"],
+        vec!["moli", "serve", "--layout", "--screencast-interval", "0"],
+        vec!["moli", "serve", "--layout", "--screencast-interval", "-1"],
+        vec!["moli", "serve", "--layout", "--screencast-interval", "1.5"],
+        vec![
+            "moli",
+            "serve",
+            "--layout",
+            "--screencast-interval",
+            "4294967296",
+        ],
+        vec!["moli", "serve", "--layout", "--cdp-screencast-fps", "30"],
     ] {
         assert!(Cli::try_parse_from(normalize_args_for_compat(args)).is_err());
+    }
+}
+
+#[test]
+fn screencast_interval_defaults_to_one_second() {
+    for args in [vec!["moli", "serve"], vec!["moli", "serve", "--layout"]] {
+        let cli = Cli::try_parse_from(normalize_args_for_compat(args)).unwrap();
+        let config = AppConfig::from_cli(&cli).unwrap();
+        assert_eq!(config.server.screencast_interval_ms, 1000);
     }
 }
 
