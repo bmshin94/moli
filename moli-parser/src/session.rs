@@ -34,6 +34,13 @@ pub(super) enum HtmlParserSessionResult {
     Script(ParseHandle),
 }
 
+// html5ever carries tokenizer pauses through Script(Handle). Keep the pause
+// reason separate from the tree builder's DOM handles at this adapter boundary.
+enum TokenizerPause {
+    Handoff(ParseHandle),
+    OwnerInterrupted,
+}
+
 struct EmbedderPausingTreeBuilder {
     inner: TreeBuilder<ParseHandle, DocumentSink>,
 }
@@ -128,16 +135,24 @@ impl EmbedderPausingTreeBuilder {
 }
 
 impl TokenSink for EmbedderPausingTreeBuilder {
-    type Handle = ParseHandle;
+    type Handle = TokenizerPause;
 
     fn process_token(&self, token: Token, line_number: u64) -> TokenSinkResult<Self::Handle> {
         let result = self.process_token_before_callbacks(token, line_number);
         if self.sink().finish_parser_dom_mutations().is_break() {
             // A nested parser invocation already handed its blocker to the
             // owner. Stop this outer feed before it consumes another token.
-            return TokenSinkResult::Script(ParseHandle::owner_interrupted());
+            return TokenSinkResult::Script(TokenizerPause::OwnerInterrupted);
         }
-        result
+        match result {
+            TokenSinkResult::Continue => TokenSinkResult::Continue,
+            TokenSinkResult::Script(handle) => {
+                TokenSinkResult::Script(TokenizerPause::Handoff(handle))
+            }
+            TokenSinkResult::Plaintext => TokenSinkResult::Plaintext,
+            TokenSinkResult::RawData(kind) => TokenSinkResult::RawData(kind),
+            TokenSinkResult::EncodingIndicator(label) => TokenSinkResult::EncodingIndicator(label),
+        }
     }
 
     fn end(&self) {
@@ -325,12 +340,11 @@ fn feed_with_definitive_encoding(
             // advisory notification without exposing a false parser pause.
             TokenizerResult::EncodingIndicator(_) => {}
             TokenizerResult::Done => return HtmlParserSessionResult::InputDrained,
-            TokenizerResult::Script(handle) => {
-                return if handle.is_owner_interrupted() {
-                    HtmlParserSessionResult::OwnerInterrupted
-                } else {
-                    HtmlParserSessionResult::Script(handle)
-                };
+            TokenizerResult::Script(TokenizerPause::Handoff(handle)) => {
+                return HtmlParserSessionResult::Script(handle);
+            }
+            TokenizerResult::Script(TokenizerPause::OwnerInterrupted) => {
+                return HtmlParserSessionResult::OwnerInterrupted;
             }
         }
     }

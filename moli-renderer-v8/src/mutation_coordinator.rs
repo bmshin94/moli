@@ -1,7 +1,9 @@
 use std::time::Instant;
 
 use crate::dom::native::{DomHost, DomMutationEffects, NativeNodeId, ScriptPrepareTriggerKind};
-use crate::style_engine::StyleMutationEffect;
+
+mod notifications;
+pub(crate) use notifications::notify_dom_mutation;
 
 use super::{
     host::{
@@ -9,7 +11,6 @@ use super::{
         RuntimeScriptStartDecision, ScriptElementLoader, ScriptElementLoaderOptions,
     },
     native_bridge::{self, JsContextHost},
-    observer_runtime,
     util::v8str,
 };
 
@@ -19,8 +20,6 @@ pub(super) struct MutationCoordinator;
 pub(super) struct MutationCoordinatorApplyResult {
     pub(super) changed: bool,
     pub(super) runtime_script_start_candidates: Vec<RuntimeScriptStartCandidate>,
-    pub(super) removed_open_popovers: Vec<NativeNodeId>,
-    pub(super) changed_slots: Vec<NativeNodeId>,
 }
 
 #[derive(Debug)]
@@ -175,14 +174,11 @@ impl MutationCoordinator {
             return MutationCoordinatorApplyResult {
                 changed: false,
                 runtime_script_start_candidates: Vec::new(),
-                removed_open_popovers: Vec::new(),
-                changed_slots: Vec::new(),
             };
         }
         if options.source == DomMutationSource::JsDomApi {
             Self::note_script_children_changed_by_api(dom_host, &effects);
         }
-        unsafe { &mut *host_ptr }.note_app_manifest_link_mutation(dom_host, &effects);
         let cpu_profile_enabled = moli_trace::cpu_profile_enabled();
         let total_started = cpu_profile_enabled.then(Instant::now);
         tracing::trace!(
@@ -194,19 +190,12 @@ impl MutationCoordinator {
             dispatch_atomic_move_callbacks = options.dispatch_atomic_move_callbacks,
             "applying runtime mutation effects"
         );
-        let style_effects_started = cpu_profile_enabled.then(Instant::now);
-        let style_effects = StyleMutationEffect::from_dom_mutation_effects(dom_host, &effects);
-        let style_effect_count = style_effects.len();
-        let style_effects_us = style_effects_started
-            .map(|started| started.elapsed().as_micros())
-            .unwrap_or_default();
-        let style_invalidation_started = cpu_profile_enabled.then(Instant::now);
-        if !style_effects.is_empty() {
-            unsafe { &mut *host_ptr }.note_style_mutation_effects(&style_effects);
-        }
-        let style_invalidation_us = style_invalidation_started
-            .map(|started| started.elapsed().as_micros())
-            .unwrap_or_default();
+        let notifications::MutationNotificationTimings {
+            style_effect_count,
+            style_effects_us,
+            style_invalidation_us,
+            observer_us,
+        } = notify_dom_mutation(scope, host_ptr, dom_host, &effects);
 
         let timing_started = moli_trace::cdp_nav_timing_enabled().then(Instant::now);
         let prepare_connected_scripts = options.prepares_connected_scripts();
@@ -262,12 +251,6 @@ impl MutationCoordinator {
         let script_planning_us = script_planning_started
             .map(|started| started.elapsed().as_micros())
             .unwrap_or_default();
-        let observer_started = cpu_profile_enabled.then(Instant::now);
-        observer_runtime::queue_mutation_records(scope, host_ptr, dom_host, &effects);
-        let observer_us = observer_started
-            .map(|started| started.elapsed().as_micros())
-            .unwrap_or_default();
-
         let script_start_started = cpu_profile_enabled.then(Instant::now);
         let mut runtime_script_start_candidates = Vec::new();
         for request in script_start_requests {
@@ -328,8 +311,6 @@ impl MutationCoordinator {
         MutationCoordinatorApplyResult {
             changed: true,
             runtime_script_start_candidates,
-            removed_open_popovers: effects.tree().removed_open_popovers().to_vec(),
-            changed_slots: effects.slots().changed_slots().to_vec(),
         }
     }
 

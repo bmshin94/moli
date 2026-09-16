@@ -27,6 +27,7 @@ use crate::{
         ParserElementCreationConsumer, ParserElementCreationRequest, ParserMutationEffectConsumer,
         ParserPlanningReadView, ParserScriptHandoff, ParserScriptRead, PreparedImportMapSource,
     },
+    parser_mutation_effects::{ParserMutationEffectsOwner, apply_parser_mutation_effects},
     planning::ScriptSource,
     types::{ScriptKind, ScriptSourceKind},
 };
@@ -60,7 +61,34 @@ struct ChildFrameLiveParserOwner<'a, 'scope, 'pin> {
     child_document_handle: DomHandle,
     document_owner: Option<FrameDocumentOwner>,
     parser_control: Option<crate::live_document_parser::DocumentParserSessionControlHandle>,
+    mutation_effects: ChildParserMutationEffects,
+}
+
+struct ChildParserMutationEffects {
+    document_handle: DomHandle,
     reaction_queue_active: bool,
+}
+
+impl ParserMutationEffectsOwner for ChildParserMutationEffects {
+    type Prepared = ();
+
+    fn prepare_parser_mutation_effects(&mut self, _effects: &DomMutationEffects) {}
+
+    fn ensure_parser_reaction_queue(&mut self, host_ptr: *mut JsContextHost) {
+        if !self.reaction_queue_active {
+            custom_elements::push_parser_custom_element_reaction_queue(host_ptr);
+            self.reaction_queue_active = true;
+        }
+    }
+
+    fn finish_parser_mutation_effects(
+        &mut self,
+        scope: &mut v8::PinScope<'_, '_>,
+        host_ptr: *mut JsContextHost,
+        _prepared: (),
+    ) {
+        unsafe { &mut *host_ptr }.sync_child_browsing_context_subtree(scope, self.document_handle);
+    }
 }
 
 impl<'a, 'scope, 'pin> ChildFrameLiveParserOwner<'a, 'scope, 'pin> {
@@ -81,7 +109,10 @@ impl<'a, 'scope, 'pin> ChildFrameLiveParserOwner<'a, 'scope, 'pin> {
             child_document_handle,
             document_owner,
             parser_control,
-            reaction_queue_active: false,
+            mutation_effects: ChildParserMutationEffects {
+                document_handle: child_document_handle,
+                reaction_queue_active: false,
+            },
         }
     }
 
@@ -94,44 +125,6 @@ impl<'a, 'scope, 'pin> ChildFrameLiveParserOwner<'a, 'scope, 'pin> {
                     .current_child_document_owner(child)
             })
             == self.document_owner
-    }
-
-    fn ensure_reaction_queue(&mut self) {
-        if !self.reaction_queue_active {
-            custom_elements::push_parser_custom_element_reaction_queue(self.host);
-            self.reaction_queue_active = true;
-        }
-    }
-
-    fn apply_child_parser_mutation_effects(&mut self, effects: &DomMutationEffects) {
-        if !effects.did_change() {
-            return;
-        }
-        let host_ptr = self.host as *mut JsContextHost;
-        crate::observer_runtime::queue_mutation_records(
-            self.scope,
-            host_ptr,
-            self.host.dom_host(),
-            effects,
-        );
-        for &root in effects.tree().disconnected_roots() {
-            custom_elements::enqueue_disconnected_callbacks_for_subtree(self.scope, host_ptr, root);
-        }
-        custom_elements::enqueue_connected_and_form_callbacks_for_already_upgraded_subtrees(
-            self.scope,
-            host_ptr,
-            effects.tree().connected_roots(),
-        );
-        if custom_elements::form_owner_mutation_effects_touch_html_form(
-            self.host.dom_host(),
-            effects,
-        ) {
-            custom_elements::enqueue_form_association_callbacks_for_all(self.scope, host_ptr);
-        }
-        self.host
-            .sync_owner_style_sheet_texts_for_document_tree_scopes(self.child_document_handle);
-        self.host
-            .sync_child_browsing_context_subtree(self.scope, self.child_document_handle);
     }
 }
 
@@ -190,12 +183,11 @@ impl ParserMutationEffectConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
         if !self.targets_current_document() {
             return;
         }
-        self.ensure_reaction_queue();
-        self.apply_child_parser_mutation_effects(&effects);
+        apply_parser_mutation_effects(self.scope, self.host, &mut self.mutation_effects, &effects);
     }
 
     fn finish_parser_dom_mutations(&mut self) -> std::ops::ControlFlow<()> {
-        if std::mem::take(&mut self.reaction_queue_active) {
+        if std::mem::take(&mut self.mutation_effects.reaction_queue_active) {
             custom_elements::flush_parser_custom_element_reaction_queue(self.scope, self.host);
         }
         if !self.targets_current_document()
@@ -337,9 +329,10 @@ impl ParserDomMutationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
         // The tree sink invokes this queue after releasing its structural
         // borrow, before returning to the tree builder. Nested document.write
         // can then use the insertion point preceding this element's children.
-        self.ensure_reaction_queue();
+        self.mutation_effects
+            .ensure_parser_reaction_queue(self.host);
         let effects = mutation.apply_to_dom_host(self.host.dom_host_mut());
-        self.apply_child_parser_mutation_effects(&effects);
+        self.consume_parser_mutation_effects(effects);
     }
 
     fn create_parser_element_without_attributes(

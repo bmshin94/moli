@@ -1,8 +1,9 @@
 use super::mutation_commands::{
-    apply_runtime_mutation_effects_to_dom_host, finish_runtime_mutation_effects,
+    RuntimeMutationApplyResult, finish_runtime_mutation_effects, prepare_runtime_mutation_effects,
 };
 use super::*;
 use crate::parser::{ParserPlanningReadView, ParserScriptRead};
+use crate::parser_mutation_effects::{ParserMutationEffectsOwner, apply_parser_mutation_effects};
 use crate::stylesheet_blocking::StylesheetElementRead;
 use html5ever::tree_builder::QuirksMode;
 // This slice collects the remaining low-level facade methods that mostly forward into `DomHost`
@@ -97,39 +98,8 @@ impl DocumentRuntime {
         host_ptr: *mut JsContextHost,
         effects: DomMutationEffects,
     ) {
-        let connected_roots = effects.tree().connected_roots().to_vec();
-        let form_owner_effects = effects.clone();
         self.assert_active_parser_document_incarnation();
-        let result = {
-            let dom_host = self.dom_host.borrow_mut();
-            apply_runtime_mutation_effects_to_dom_host(
-                &mut self.mutations,
-                &self.document,
-                self.script_lifecycle.scripts_mut(),
-                &mut self.events,
-                scope,
-                host_ptr,
-                dom_host,
-                effects,
-                RuntimeMutationOptions::parser_tree_sink(),
-            )
-        };
-        let _ = finish_runtime_mutation_effects(self, scope, host_ptr, result);
-        if !connected_roots.is_empty() {
-            self.ensure_parser_custom_element_reaction_queue(host_ptr);
-            crate::custom_elements::enqueue_connected_and_form_callbacks_for_already_upgraded_subtrees(
-                scope,
-                host_ptr,
-                &connected_roots,
-            );
-        }
-        if crate::custom_elements::form_owner_mutation_effects_touch_html_form(
-            self.dom_host(),
-            &form_owner_effects,
-        ) {
-            self.ensure_parser_custom_element_reaction_queue(host_ptr);
-            crate::custom_elements::enqueue_form_association_callbacks_for_all(scope, host_ptr);
-        }
+        apply_parser_mutation_effects(scope, host_ptr, self, &effects);
     }
 
     pub(crate) fn parser_runtime_dom_node_exists(&mut self, node_id: DomHandle) -> bool {
@@ -843,14 +813,30 @@ impl DocumentRuntime {
     }
 }
 
-pub(super) fn sync_style_sources_from_dom_mutation_effects(
-    host_ptr: *mut JsContextHost,
-    effects: &DomMutationEffects,
-) {
-    if effects.stylesheet_owners().changes().is_empty() {
-        return;
+impl ParserMutationEffectsOwner for DocumentRuntime {
+    type Prepared = RuntimeMutationApplyResult;
+
+    fn prepare_parser_mutation_effects(&mut self, effects: &DomMutationEffects) -> Self::Prepared {
+        prepare_runtime_mutation_effects(
+            self.dom_host(),
+            self.document.url(),
+            effects,
+            RuntimeMutationOptions::parser_tree_sink(),
+        )
     }
-    unsafe { &mut *host_ptr }.apply_stylesheet_owner_changes(effects.stylesheet_owners().changes());
+
+    fn ensure_parser_reaction_queue(&mut self, host_ptr: *mut JsContextHost) {
+        self.ensure_parser_custom_element_reaction_queue(host_ptr);
+    }
+
+    fn finish_parser_mutation_effects(
+        &mut self,
+        scope: &mut v8::PinScope<'_, '_>,
+        host_ptr: *mut JsContextHost,
+        prepared: Self::Prepared,
+    ) {
+        let _ = finish_runtime_mutation_effects(self, scope, host_ptr, prepared);
+    }
 }
 
 #[cfg(test)]

@@ -338,9 +338,6 @@ pub(super) struct ParseHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParseHandleIdentity {
     DomNode(NativeNodeId),
-    // html5ever exposes only Script(handle) as an embedder yield. This marker
-    // is translated to OwnerInterrupted before any DOM handle is inspected.
-    OwnerInterrupted,
     // Standalone fragment parsing, like `Element.innerHTML` staging, only has a
     // context element name. Chromium keeps a real `context_element` next to the
     // `DocumentFragment` target; our detached staging parser uses this
@@ -1363,18 +1360,6 @@ impl Drop for ParserInputContext {
 }
 
 impl ParseHandle {
-    pub(super) fn owner_interrupted() -> Self {
-        Self {
-            identity: ParseHandleIdentity::OwnerInterrupted,
-            element_name: None,
-            parser_flags: ParserElementFlags::default(),
-        }
-    }
-
-    pub(super) fn is_owner_interrupted(&self) -> bool {
-        self.identity == ParseHandleIdentity::OwnerInterrupted
-    }
-
     pub(super) fn new(node_id: NativeNodeId, element_name: Option<Rc<QualName>>) -> Self {
         Self {
             identity: ParseHandleIdentity::DomNode(node_id),
@@ -1406,8 +1391,7 @@ impl ParseHandle {
     pub(super) fn dom_node_id(&self) -> Option<NativeNodeId> {
         match self.identity {
             ParseHandleIdentity::DomNode(node_id) => Some(node_id),
-            ParseHandleIdentity::SyntheticFragmentContext
-            | ParseHandleIdentity::OwnerInterrupted => None,
+            ParseHandleIdentity::SyntheticFragmentContext => None,
         }
     }
 

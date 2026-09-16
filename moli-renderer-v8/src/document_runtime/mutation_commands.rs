@@ -9,7 +9,6 @@ use crate::{
 };
 use moli_dom::native::{Element, Node, NodeType};
 
-use super::dom_facade::sync_style_sources_from_dom_mutation_effects;
 use super::*;
 
 mod details;
@@ -1709,7 +1708,7 @@ impl DocumentRuntime {
     }
 }
 
-pub(super) struct RuntimeMutationApplyResult {
+pub(crate) struct RuntimeMutationApplyResult {
     changed: bool,
     meta_refresh_candidates: Vec<MetaRefreshNavigation>,
     devtools_dom_mutations: Vec<super::devtools_mutations::DevToolsDomMutationFact>,
@@ -1919,25 +1918,17 @@ fn execute_committed_inline_classic_script(
     }
 }
 
-pub(super) fn apply_runtime_mutation_effects_to_dom_host(
-    mutations: &mut MutationCoordinator,
-    document: &HostDocumentState,
-    scripts: &mut HostScriptScheduler,
-    events: &mut HostEventTargetRegistry,
-    scope: &mut v8::PinScope<'_, '_>,
-    host_ptr: *mut JsContextHost,
-    dom_host: &mut DomHost,
-    effects: DomMutationEffects,
+pub(super) fn prepare_runtime_mutation_effects(
+    dom_host: &DomHost,
+    document_url: &Url,
+    effects: &DomMutationEffects,
     options: RuntimeMutationOptions,
 ) -> RuntimeMutationApplyResult {
-    let cpu_profile_enabled = moli_trace::cpu_profile_enabled();
-    let total_started = cpu_profile_enabled.then(Instant::now);
-    let style_sources_started = cpu_profile_enabled.then(Instant::now);
     let stylesheet_owner_changes = effects.stylesheet_owners().changes().to_vec();
     let meta_refresh_candidates = super::meta_refresh::meta_refresh_navigations_from_mutation(
         dom_host,
-        &effects,
-        document.url(),
+        effects,
+        document_url,
     );
     let inline_style_attribute_csp_mutations = if options.check_inline_style_csp {
         effects
@@ -1975,11 +1966,36 @@ pub(super) fn apply_runtime_mutation_effects_to_dom_host(
         Vec::new()
     };
     let devtools_dom_mutations =
-        super::devtools_mutations::capture_devtools_dom_mutation_facts(dom_host, &effects);
-    if effects.did_change() {
-        sync_style_sources_from_dom_mutation_effects(host_ptr, &effects);
+        super::devtools_mutations::capture_devtools_dom_mutation_facts(dom_host, effects);
+    RuntimeMutationApplyResult {
+        changed: effects.did_change(),
+        meta_refresh_candidates,
+        devtools_dom_mutations,
+        runtime_script_start_candidates: Vec::new(),
+        removed_open_popovers: effects.tree().removed_open_popovers().to_vec(),
+        changed_slots: effects.slots().changed_slots().to_vec(),
+        stylesheet_owner_changes,
+        inline_style_attribute_csp_mutations,
+        connected_style_csp_roots,
     }
-    let style_sources_us = style_sources_started
+}
+
+pub(super) fn apply_runtime_mutation_effects_to_dom_host(
+    mutations: &mut MutationCoordinator,
+    document: &HostDocumentState,
+    scripts: &mut HostScriptScheduler,
+    events: &mut HostEventTargetRegistry,
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut JsContextHost,
+    dom_host: &mut DomHost,
+    effects: DomMutationEffects,
+    options: RuntimeMutationOptions,
+) -> RuntimeMutationApplyResult {
+    let cpu_profile_enabled = moli_trace::cpu_profile_enabled();
+    let total_started = cpu_profile_enabled.then(Instant::now);
+    let preparation_started = cpu_profile_enabled.then(Instant::now);
+    let mut result = prepare_runtime_mutation_effects(dom_host, document.url(), &effects, options);
+    let preparation_us = preparation_started
         .map(|started| started.elapsed().as_micros())
         .unwrap_or_default();
     let started = dom_binding_timing_started();
@@ -1992,24 +2008,16 @@ pub(super) fn apply_runtime_mutation_effects_to_dom_host(
             tracing::info!(
                 target: "moli_cpu_profile",
                 stage = "apply_runtime_mutation_effects",
-                style_sources_us,
-                coordinator_us = total_us.saturating_sub(style_sources_us),
+                preparation_us,
+                coordinator_us = total_us.saturating_sub(preparation_us),
                 total_us,
             );
         }
     }
     record_dom_binding_timing("mutation.apply", started);
-    RuntimeMutationApplyResult {
-        changed: mutation_result.changed,
-        meta_refresh_candidates,
-        devtools_dom_mutations,
-        runtime_script_start_candidates: mutation_result.runtime_script_start_candidates,
-        removed_open_popovers: mutation_result.removed_open_popovers,
-        changed_slots: mutation_result.changed_slots,
-        stylesheet_owner_changes,
-        inline_style_attribute_csp_mutations,
-        connected_style_csp_roots,
-    }
+    result.changed = mutation_result.changed;
+    result.runtime_script_start_candidates = mutation_result.runtime_script_start_candidates;
+    result
 }
 
 fn should_dispatch_attribute_changed_for_set(

@@ -80,6 +80,7 @@ mod page_resource_completion;
 mod page_task_queue;
 mod parser_module_evaluation;
 mod parser_module_pending;
+mod parser_mutation_effects;
 mod parser_script;
 mod permissions_policy;
 mod queue_microtask;

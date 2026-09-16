@@ -1,6 +1,115 @@
 use super::*;
 
 #[test]
+fn main_and_child_parser_mutation_notifications_preserve_order_and_identity() {
+    let mut vm = new_storage_test_vm("https://parser-mutation-parity.test/");
+    let result = vm.eval(r#"
+      (() => {
+        function exercise(w) {
+          const d = w.document;
+          d.open(); d.write('<!doctype html><body>');
+          const log = [], records = [];
+          const collect = entries => records.push(...entries.map(r => [
+            r.target.nodeName, Array.from(r.addedNodes, n => n.nodeName), r.removedNodes.length
+          ]));
+          const observer = new w.MutationObserver(collect);
+          observer.observe(d.body, {childList:true, subtree:true});
+          class Probe extends w.HTMLElement {
+            static get observedAttributes() { return ['title']; }
+            constructor() { super(); log.push('construct'); }
+            attributeChangedCallback(name, oldValue, value) { log.push(name + ':' + value); }
+            connectedCallback() { log.push('connected:' + this.childNodes.length); }
+          }
+          let internals;
+          class Face extends w.HTMLElement {
+            static formAssociated = true;
+            constructor() { super(); internals = this.attachInternals(); }
+            connectedCallback() { log.push('face:' + (internals.form?.id || 'null')); }
+            formAssociatedCallback(form) { log.push('form:' + (form?.id || 'null')); }
+          }
+          w.customElements.define('x-mutation-probe', Probe);
+          w.customElements.define('x-mutation-face', Face);
+          d.write('<x-mutation-probe title=parsed>text</x-mutation-probe>' +
+            '<x-mutation-face form=owner></x-mutation-face><form id=owner></form><iframe id=nested></iframe>');
+          collect(observer.takeRecords());
+          observer.disconnect();
+          const nested = d.getElementById('nested');
+          const result = {log, records, form:internals.form === d.getElementById('owner'),
+            childIdentity:nested.contentDocument === nested.contentWindow.document};
+          d.close();
+          return result;
+        }
+        const main = exercise(window);
+        const frame = document.createElement('iframe');
+        document.body.appendChild(frame);
+        const child = exercise(frame.contentWindow);
+        frame.remove();
+        return JSON.stringify([main, child]);
+      })()
+    "#).unwrap();
+    let expected = serde_json::json!({
+        "log": ["construct", "title:parsed", "connected:0", "face:null", "form:owner"],
+        "records": [
+            ["BODY", ["X-MUTATION-PROBE"], 0],
+            ["X-MUTATION-PROBE", ["#text"], 0],
+            ["BODY", ["X-MUTATION-FACE"], 0],
+            ["BODY", ["FORM"], 0],
+            ["BODY", ["IFRAME"], 0]
+        ],
+        "form": true,
+        "childIdentity": true
+    });
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!([expected, expected]),
+    );
+}
+
+#[test]
+fn main_and_child_parser_styles_are_current_in_reactions_and_preserve_cssom_edits() {
+    let mut vm = new_storage_test_vm("https://parser-style-mutation-parity.test/");
+    let result = vm.eval(r#"
+      (() => {
+        function exercise(w) {
+          const d = w.document;
+          d.open(); d.write('<!doctype html><body><style id=first>.first { color: red; }</style>');
+          const first = d.getElementById('first').sheet;
+          first.insertRule('.kept { color: green; }', first.cssRules.length);
+          const log = [];
+          class Probe extends w.HTMLElement {
+            connectedCallback() {
+              log.push({color:w.getComputedStyle(this).color,
+                selectors:Array.from(d.getElementById('second').sheet.cssRules, r => r.selectorText)});
+            }
+          }
+          w.customElements.define('x-style-probe', Probe);
+          d.write('<style id=second>x-style-probe { color: rgb(1, 2, 3); }</style><x-style-probe></x-style-probe>');
+          d.write('<div>unrelated insertion</div>');
+          const result = {log, identity:first === d.getElementById('first').sheet,
+            firstSelectors:Array.from(first.cssRules, r => r.selectorText)};
+          d.close();
+          return result;
+        }
+        const main = exercise(window);
+        const frame = document.createElement('iframe');
+        document.body.appendChild(frame);
+        const child = exercise(frame.contentWindow);
+        frame.remove();
+        return JSON.stringify([main, child]);
+      })()
+    "#).unwrap();
+    let expected = serde_json::json!({
+        "log": [{"color": "rgb(1, 2, 3)", "selectors": ["x-style-probe"]}],
+        "identity": true,
+        "firstSelectors": [".first", ".kept"]
+    });
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!([expected, expected]),
+    );
+}
+
+#[test]
 fn child_parser_write_constructs_elements_and_runs_reactions_synchronously() {
     let mut vm = new_storage_test_vm("https://child-parser-custom-elements.test/");
     let result = vm.eval(r#"
