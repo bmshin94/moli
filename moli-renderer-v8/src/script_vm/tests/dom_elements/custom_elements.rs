@@ -1,6 +1,7 @@
 use super::*;
 use crate::custom_elements::CustomElementRegistryKey;
 
+mod insertion;
 mod parser;
 
 #[tokio::test]

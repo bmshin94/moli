@@ -129,7 +129,7 @@ impl DocumentRuntime {
                         scope,
                         host_ptr,
                         insertion_plan,
-                        profile.sync_upgrade_connected_subtrees,
+                        profile.upgrade_connected_subtrees,
                     );
                 });
             }
@@ -138,7 +138,7 @@ impl DocumentRuntime {
                     scope,
                     host_ptr,
                     insertion_plan,
-                    profile.sync_upgrade_connected_subtrees,
+                    profile.upgrade_connected_subtrees,
                 );
             }
         }
@@ -149,7 +149,7 @@ impl DocumentRuntime {
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut JsContextHost,
         insertion_plan: &TreeInsertionPlan<'_>,
-        sync_upgrade_connected_subtrees: bool,
+        upgrade_connected_subtrees: bool,
     ) {
         let was_connected = insertion_plan.was_lifecycle_connected_before_insert();
         let adopted_across_documents = insertion_plan.adoption.crosses_documents();
@@ -181,7 +181,7 @@ impl DocumentRuntime {
             host_ptr,
             insertion_plan.insertion_roots,
             was_connected && !adopted_across_documents,
-            sync_upgrade_connected_subtrees,
+            upgrade_connected_subtrees,
         );
         let is_lifecycle_connected = insertion_plan
             .insertion_roots

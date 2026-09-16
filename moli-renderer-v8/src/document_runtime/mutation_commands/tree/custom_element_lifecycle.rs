@@ -92,7 +92,7 @@ impl DocumentRuntime {
         host_ptr: *mut JsContextHost,
         roots: &[DomHandle],
         was_connected: bool,
-        sync_upgrade_subtrees: bool,
+        upgrade_subtrees: bool,
     ) {
         if was_connected
             || !roots
@@ -105,26 +105,33 @@ impl DocumentRuntime {
         // been defined and none have been upgraded yet — the typical state for
         // pages that don't use the Custom Elements API. See
         // CustomElementStore::is_subtree_lifecycle_quiescent.
-        let host = unsafe { &*host_ptr };
-        if host.custom_elements_subtree_lifecycle_quiescent() {
+        if unsafe { &*host_ptr }.custom_elements_subtree_lifecycle_quiescent() {
             return;
         }
-        if sync_upgrade_subtrees {
-            for &root in roots {
-                if custom_elements::is_shadow_including_rooted_in_browsing_context_document(
-                    host, root,
-                ) {
-                    let _ = custom_elements::upgrade_subtree_if_defined(scope, host_ptr, root);
+        for &root in roots {
+            if !self.is_custom_element_lifecycle_connected(root) {
+                continue;
+            }
+            let can_upgrade = upgrade_subtrees
+                && custom_elements::is_shadow_including_rooted_in_browsing_context_document(
+                    unsafe { &*host_ptr },
+                    root,
+                );
+            let mut handles = Vec::new();
+            self.collect_subtree_handles_preorder(root, &mut handles);
+            for handle in handles {
+                // Insertion queues either a connection for an existing custom
+                // element or an upgrade. The upgrade owns its initial connection
+                // callback, and both kinds of reaction retain subtree order.
+                let is_custom = unsafe { &*host_ptr }
+                    .custom_elements_for_node_handle(handle)
+                    .is_some_and(|store| store.is_upgraded_handle(handle));
+                if is_custom {
+                    custom_elements::enqueue_connected_callback(scope, host_ptr, handle);
+                } else if can_upgrade {
+                    custom_elements::enqueue_upgrade_reaction_if_defined(scope, host_ptr, handle);
                 }
             }
-        }
-        for &root in roots {
-            self.enqueue_custom_element_lifecycle_in_subtree(
-                scope,
-                host_ptr,
-                root,
-                "connectedCallback",
-            );
         }
     }
 

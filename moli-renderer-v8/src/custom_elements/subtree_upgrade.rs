@@ -52,6 +52,18 @@ pub(crate) fn upgrade_subtree_if_defined_for_registry(
     true
 }
 
+pub(crate) fn enqueue_upgrade_reaction_if_defined(
+    scope: &mut v8::PinScope<'_, '_>,
+    host_ptr: *mut JsContextHost,
+    handle: DomHandle,
+) -> bool {
+    if !can_upgrade_handle(host_ptr, handle) {
+        return false;
+    }
+    enqueue_custom_element_reaction(scope, host_ptr, handle, CustomElementReaction::Upgrade);
+    true
+}
+
 pub(crate) fn enqueue_upgrade_reactions_for_subtree(
     scope: &mut v8::PinScope<'_, '_>,
     host_ptr: *mut JsContextHost,
@@ -61,15 +73,7 @@ pub(crate) fn enqueue_upgrade_reactions_for_subtree(
     collect_shadow_including_subtree_handles(host_ptr, root, &mut handles);
     let mut enqueued = false;
     for handle in handles {
-        if can_upgrade_handle(host_ptr, handle) {
-            enqueue_custom_element_reaction(
-                scope,
-                host_ptr,
-                handle,
-                CustomElementReaction::Upgrade,
-            );
-            enqueued = true;
-        }
+        enqueued |= enqueue_upgrade_reaction_if_defined(scope, host_ptr, handle);
     }
     enqueued
 }

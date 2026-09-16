@@ -21,7 +21,7 @@ pub(super) struct TreeMutationSourceProfile {
     pub(super) source: TreeMutationSideEffectSource,
     pub(super) reaction_policy: TreeReactionDispatchPolicy,
     pub(super) nonce_policy: TreeNoncePolicy,
-    pub(super) sync_upgrade_connected_subtrees: bool,
+    pub(super) upgrade_connected_subtrees: bool,
     pub(super) queue_parser_details_toggle_events: bool,
 }
 
@@ -53,7 +53,7 @@ impl TreeMutationSourceProfile {
             source: TreeMutationSideEffectSource::JsDomApi,
             reaction_policy,
             nonce_policy,
-            sync_upgrade_connected_subtrees: true,
+            upgrade_connected_subtrees: true,
             queue_parser_details_toggle_events: false,
         }
     }
@@ -70,7 +70,7 @@ impl TreeMutationSourceProfile {
             source: TreeMutationSideEffectSource::ParserTreeSink,
             reaction_policy: TreeReactionDispatchPolicy::AppendToCurrentQueue,
             nonce_policy: TreeNoncePolicy::HideInsertedContentAttributes,
-            sync_upgrade_connected_subtrees: false,
+            upgrade_connected_subtrees: false,
             queue_parser_details_toggle_events: true,
         }
     }
@@ -94,7 +94,7 @@ impl TreeMutationSourceProfile {
             source: TreeMutationSideEffectSource::JsDomApi,
             reaction_policy: TreeReactionDispatchPolicy::AppendToCurrentQueue,
             nonce_policy: TreeNoncePolicy::HideInsertedContentAttributes,
-            sync_upgrade_connected_subtrees: false,
+            upgrade_connected_subtrees: false,
             queue_parser_details_toggle_events: true,
         }
     }
