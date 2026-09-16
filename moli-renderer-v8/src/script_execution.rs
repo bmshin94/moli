@@ -39,12 +39,5 @@ fn run<'s, R>(
     scope: &mut v8::PinScope<'s, '_>,
     execute: impl FnOnce(&mut v8::PinScope<'s, '_>) -> R,
 ) -> R {
-    if scope.get_microtasks_policy() == v8::MicrotasksPolicy::Auto {
-        return execute(scope);
-    }
-    let microtasks = std::pin::pin!(v8::MicrotasksScope::new(
-        scope,
-        v8::MicrotasksScopeType::RunMicrotasks,
-    ));
-    execute(microtasks.init())
+    moli_v8_util::with_microtasks_scope(scope, execute)
 }

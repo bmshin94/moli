@@ -1551,6 +1551,62 @@ fn custom_element_constructor_selected_prototypes_survive_wrapper_lookup() {
 }
 
 #[test]
+fn custom_element_constructor_selected_prototype_survives_prevent_extensions() {
+    let mut vm = new_storage_test_vm("https://ce-non-extensible-prototype.test/");
+    let result = vm.eval(r#"
+        (() => {
+          window.addEventListener("error", event => event.preventDefault());
+          const html = document.documentElement || document.appendChild(document.createElement("html"));
+          const body = document.body || html.appendChild(document.createElement("body"));
+          const frame = body.appendChild(document.createElement("iframe"));
+          const failures = [];
+          for (const [realm, w] of [["main", window], ["child", frame.contentWindow]]) {
+            const doc = w.document;
+            const root = doc.body || doc.documentElement || doc;
+            for (const mode of ["create", "upgrade", "parser"]) {
+              const name = `non-extensible-${mode}-${realm}`;
+              const selected = Object.create(w.HTMLElement.prototype);
+              let constructed;
+              class SelectedElement extends w.HTMLElement {
+                constructor() {
+                  super();
+                  constructed = this;
+                  Object.setPrototypeOf(this, selected);
+                  Object.preventExtensions(this);
+                }
+              }
+              let element;
+              if (mode === "upgrade") {
+                element = doc.createElement(name);
+                root.appendChild(element);
+              }
+              w.customElements.define(name, SelectedElement);
+              if (mode === "create") {
+                element = doc.createElement(name);
+                root.appendChild(element);
+              } else if (mode === "parser") {
+                const container = root.appendChild(doc.createElement("div"));
+                container.innerHTML = `<${name}></${name}>`;
+                element = container.firstChild;
+              }
+              const lookedUp = doc.querySelector(name);
+              if (element !== constructed || lookedUp !== element || Object.isExtensible(element) ||
+                  Object.getPrototypeOf(element) !== selected ||
+                  Object.getPrototypeOf(lookedUp) !== selected) {
+                failures.push({realm, mode, same: element === constructed,
+                  lookup: lookedUp === element, extensible: Object.isExtensible(element),
+                  selected: Object.getPrototypeOf(element) === selected,
+                  lookupSelected: Object.getPrototypeOf(lookedUp) === selected});
+              }
+            }
+          }
+          return JSON.stringify(failures);
+        })()
+    "#).expect("non-extensible custom elements should retain their selected prototype");
+    assert_eq!(result, "[]");
+}
+
+#[test]
 fn child_failed_custom_element_creation_preserves_original_and_fallback_prototypes() {
     let mut vm = new_storage_test_vm("https://ce-fallback-prototype.test/");
     let result = vm

@@ -323,10 +323,14 @@ fn script_and_module_execution_use_the_shared_entry_points() {
         expected,
         "evaluate modules through script_execution::evaluate_module"
     );
+    assert!(
+        renderer_source_inventory(count_microtask_scopes).is_empty(),
+        "renderer execution must use moli_v8_util::with_microtasks_scope"
+    );
     assert_eq!(
-        renderer_source_inventory(count_microtask_scopes),
+        renderer_source_inventory(count_shared_microtask_boundaries),
         expected,
-        "execution scopes belong to the shared entry points, not individual callers"
+        "the shared script entry point must own the renderer microtask boundary"
     );
 }
 
@@ -347,6 +351,12 @@ fn count_module_evaluations(source: &str) -> usize {
 fn count_microtask_scopes(source: &str) -> usize {
     compact_source(source)
         .matches(concat!("v8::MicrotasksScope::", "new("))
+        .count()
+}
+
+fn count_shared_microtask_boundaries(source: &str) -> usize {
+    compact_source(source)
+        .matches(concat!("moli_v8_util::", "with_microtasks_scope("))
         .count()
 }
 

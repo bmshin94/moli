@@ -3375,6 +3375,7 @@ name = "moli-webidl-callback"
 version = "0.1.0"
 dependencies = [
  "moli-v8-test-util",
+ "moli-v8-util",
  "v8",
 ]
 

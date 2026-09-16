@@ -80,14 +80,9 @@ pub fn with_webidl_callback_contexts<'s, R>(
     operation: impl FnOnce(&mut v8::PinScope<'s, '_>) -> R,
 ) -> R {
     let scope = &mut v8::ContextScope::new(scope, relevant_context);
-    if scope.get_microtasks_policy() == v8::MicrotasksPolicy::Auto {
-        return with_incumbent_context(scope, incumbent_context, operation);
-    }
-    let microtasks = pin!(v8::MicrotasksScope::new(
-        scope,
-        v8::MicrotasksScopeType::RunMicrotasks,
-    ));
-    with_incumbent_context(microtasks.init(), incumbent_context, operation)
+    moli_v8_util::with_microtasks_scope(scope, |scope| {
+        with_incumbent_context(scope, incumbent_context, operation)
+    })
 }
 
 fn with_incumbent_context<'s, R>(
