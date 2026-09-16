@@ -1630,6 +1630,7 @@ fn source_url_matches(
 enum CspSchemeMatch {
     NotMatching,
     Exact,
+    WebSocketToHttp,
     Upgrade,
 }
 
@@ -1673,8 +1674,20 @@ fn csp_scheme_match(source_scheme: &str, request_scheme: &str) -> CspSchemeMatch
     if source_scheme.eq_ignore_ascii_case(request_scheme) {
         return CspSchemeMatch::Exact;
     }
+    // CSP permits WebSocket sources to match HTTP URLs at the same security
+    // level. Keep this distinct from exact matching used by 'self' and from
+    // secure upgrades, which also participate in port-upgrade checks.
+    // https://w3c.github.io/webappsec-csp/#match-schemes
+    if (source_scheme.eq_ignore_ascii_case("ws") && request_scheme.eq_ignore_ascii_case("http"))
+        || (source_scheme.eq_ignore_ascii_case("wss")
+            && request_scheme.eq_ignore_ascii_case("https"))
+    {
+        return CspSchemeMatch::WebSocketToHttp;
+    }
     if (source_scheme.eq_ignore_ascii_case("http") && request_scheme.eq_ignore_ascii_case("https"))
-        || (source_scheme.eq_ignore_ascii_case("ws") && request_scheme.eq_ignore_ascii_case("wss"))
+        || (source_scheme.eq_ignore_ascii_case("ws")
+            && (request_scheme.eq_ignore_ascii_case("wss")
+                || request_scheme.eq_ignore_ascii_case("https")))
     {
         return CspSchemeMatch::Upgrade;
     }
@@ -2477,6 +2490,95 @@ mod tests {
             ContentSecurityPolicyResourceKind::WorkerConnect,
             "ws://cdn.test/socket"
         ));
+    }
+
+    #[test]
+    fn websocket_source_schemes_match_http_without_allowing_reverse_transitions() {
+        for (source_scheme, matches) in [
+            ("http", [true, true, false, false]),
+            ("https", [false, true, false, false]),
+            ("ws", [true, true, true, true]),
+            ("wss", [false, true, false, true]),
+        ] {
+            for (request_scheme, expected) in
+                ["http", "https", "ws", "wss"].into_iter().zip(matches)
+            {
+                for kind in [
+                    ContentSecurityPolicyResourceKind::DocumentConnect,
+                    ContentSecurityPolicyResourceKind::WorkerConnect,
+                ] {
+                    for scheme in [source_scheme.to_owned(), source_scheme.to_ascii_uppercase()] {
+                        let request = format!("{request_scheme}://cdn.test:8443/socket");
+                        for source in [
+                            format!("{scheme}:"),
+                            format!("{scheme}://cdn.test:*/socket"),
+                            format!("{scheme}://*.test:*/socket"),
+                        ] {
+                            assert_eq!(
+                                allowed(&format!("connect-src {source}"), kind, &request),
+                                expected,
+                                "{source} with {request} for {kind:?}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn websocket_to_http_host_sources_preserve_port_host_and_path_checks() {
+        for authority in ["cdn.test", "*.test"] {
+            for (source_scheme, source_port, request, expected) in [
+                ("ws", "", "http://cdn.test/socket", true),
+                ("ws", ":80", "http://cdn.test/socket", true),
+                ("ws", ":8080", "http://cdn.test:8080/socket", true),
+                ("ws", ":8080", "http://cdn.test:8081/socket", false),
+                ("ws", "", "https://cdn.test/socket", true),
+                ("wss", "", "https://cdn.test/socket", true),
+                ("wss", ":443", "https://cdn.test/socket", true),
+                ("wss", ":8443", "https://cdn.test:8443/socket", true),
+                ("wss", ":8443", "https://cdn.test:9443/socket", false),
+                ("ws", ":*", "https://other.example:8443/socket", false),
+                ("ws", ":*", "https://cdn.test:8443/other", false),
+                ("wss", ":*", "http://cdn.test:8443/socket", false),
+            ] {
+                let policy =
+                    format!("connect-src {source_scheme}://{authority}{source_port}/socket");
+                for kind in [
+                    ContentSecurityPolicyResourceKind::DocumentConnect,
+                    ContentSecurityPolicyResourceKind::WorkerConnect,
+                ] {
+                    assert_eq!(
+                        allowed(&policy, kind, request),
+                        expected,
+                        "{policy} with {request}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn websocket_scheme_compatibility_does_not_make_self_origins_equal() {
+        for (protected, request, expected) in [
+            ("ws://app.test/", "ws://app.test/socket", true),
+            ("ws://app.test/", "http://app.test/socket", false),
+            ("ws://app.test/", "https://app.test/socket", true),
+            ("wss://app.test/", "https://app.test/socket", true),
+            ("wss://app.test/", "http://app.test/socket", false),
+        ] {
+            assert_eq!(
+                content_security_policy_allows_url(
+                    &["connect-src 'self'".to_owned()],
+                    &Url::parse(protected).unwrap(),
+                    &request_url(request),
+                    ContentSecurityPolicyResourceKind::DocumentConnect,
+                ),
+                expected,
+                "'self' in {protected} with {request}",
+            );
+        }
     }
 
     #[test]
