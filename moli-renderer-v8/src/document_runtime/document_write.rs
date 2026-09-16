@@ -80,6 +80,13 @@ impl ParserMutationEffectConsumer for DocumentWriteParserMutationOwner<'_, '_, '
                 effects,
             );
     }
+    fn finish_parser_dom_mutations(&mut self) -> std::ops::ControlFlow<()> {
+        if self.targets_live_document() {
+            self.runtime
+                .run_pending_parser_post_step_runtime_work(self.scope, self.host_ptr);
+        }
+        std::ops::ControlFlow::Continue(())
+    }
 }
 
 impl ParserDomReadConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> {
@@ -185,8 +192,6 @@ impl ParserDomMutationConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> 
             self.host_ptr,
             mutation,
         );
-        self.runtime
-            .run_pending_parser_post_step_runtime_work(self.scope, self.host_ptr);
     }
 
     fn create_parser_element_without_attributes(
@@ -1717,7 +1722,7 @@ impl DocumentRuntime {
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut JsContextHost,
-        stream: &mut DocumentStream,
+        stream: &DocumentStream,
         input: DocumentWriteParserPumpInput<'_>,
     ) -> DocumentWriteParserPumpStep {
         let outcome =
@@ -2360,7 +2365,7 @@ impl DocumentRuntime {
                 } else {
                     DocumentWriteParserPumpInput::Ordinary(chunk.as_str())
                 };
-                insertion_controller.with_parser_stream_mut(|stream| {
+                insertion_controller.with_parser_stream(|stream| {
                     self.pump_document_write_parser_step(scope, host_ptr, stream, input)
                 })
             };
@@ -2374,9 +2379,7 @@ impl DocumentRuntime {
                     },
             } = parser_step;
             let discovered_parser_meta_csp_candidates = insertion_controller
-                .with_parser_stream_mut(
-                    DocumentStream::drain_discovered_parser_meta_csp_candidates,
-                );
+                .with_parser_stream(DocumentStream::drain_discovered_parser_meta_csp_candidates);
             for handle in &discovered_parser_meta_csp_candidates {
                 self.process_parser_meta_content_security_policy(*handle);
             }
@@ -2402,7 +2405,8 @@ impl DocumentRuntime {
             );
 
             match result {
-                ParserPumpStep::InputDrained => {
+                ParserPumpStep::InputDrained
+                | ParserPumpStep::Yield(ParserYield::OwnerInterrupted) => {
                     return true;
                 }
                 ParserPumpStep::Yield(ParserYield::CustomElementConstruction(_handoff)) => {

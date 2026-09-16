@@ -65,6 +65,8 @@ pub(crate) use form_lifecycle::{
     dispatch_form_association_callback_if_needed, dispatch_form_disabled_callback_if_needed,
     enqueue_form_association_callback_if_needed,
 };
+mod form_owner_mutation;
+pub(crate) use form_owner_mutation::form_owner_mutation_effects_touch_html_form;
 mod form_lifecycle_scans;
 pub(crate) use form_lifecycle_scans::{
     dispatch_form_association_callbacks_for_all, dispatch_form_disabled_callbacks_in_subtree,

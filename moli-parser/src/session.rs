@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use html5ever::{LocalName, Namespace, QualName};
 use html5ever::{
@@ -25,11 +25,12 @@ pub(super) struct HtmlTreeSinkSession {
 
 pub(super) struct HtmlParserSession {
     tokenizer: Tokenizer<EmbedderPausingTreeBuilder>,
-    input: InputStack,
+    input: RefCell<InputStack>,
 }
 
 pub(super) enum HtmlParserSessionResult {
     InputDrained,
+    OwnerInterrupted,
     Script(ParseHandle),
 }
 
@@ -59,10 +60,12 @@ impl EmbedderPausingTreeBuilder {
     }
 }
 
-impl TokenSink for EmbedderPausingTreeBuilder {
-    type Handle = ParseHandle;
-
-    fn process_token(&self, token: Token, line_number: u64) -> TokenSinkResult<Self::Handle> {
+impl EmbedderPausingTreeBuilder {
+    fn process_token_before_callbacks(
+        &self,
+        token: Token,
+        line_number: u64,
+    ) -> TokenSinkResult<ParseHandle> {
         let in_foreign_content = self
             .inner
             .adjusted_current_node_present_but_not_in_html_namespace();
@@ -122,9 +125,24 @@ impl TokenSink for EmbedderPausingTreeBuilder {
         }
         TokenSinkResult::Continue
     }
+}
+
+impl TokenSink for EmbedderPausingTreeBuilder {
+    type Handle = ParseHandle;
+
+    fn process_token(&self, token: Token, line_number: u64) -> TokenSinkResult<Self::Handle> {
+        let result = self.process_token_before_callbacks(token, line_number);
+        if self.sink().finish_parser_dom_mutations().is_break() {
+            // A nested parser invocation already handed its blocker to the
+            // owner. Stop this outer feed before it consumes another token.
+            return TokenSinkResult::Script(ParseHandle::owner_interrupted());
+        }
+        result
+    }
 
     fn end(&self) {
-        self.inner.end()
+        self.inner.end();
+        let _ = self.sink().finish_parser_dom_mutations();
     }
 
     fn adjusted_current_node_present_but_not_in_html_namespace(&self) -> bool {
@@ -138,7 +156,7 @@ impl HtmlParserSession {
         let tree_builder = EmbedderPausingTreeBuilder::new(sink, opts.tree_builder);
         Self {
             tokenizer: Tokenizer::new(tree_builder, opts.tokenizer),
-            input: InputStack::default(),
+            input: RefCell::default(),
         }
     }
 
@@ -160,14 +178,15 @@ impl HtmlParserSession {
         };
         Self {
             tokenizer: Tokenizer::new(tree_builder, tokenizer_options),
-            input: InputStack::default(),
+            input: RefCell::default(),
         }
     }
 
-    pub(super) fn process(&mut self, input: StrTendril) {
-        self.input.push_back(input);
+    pub(super) fn process(&self, input: StrTendril) {
+        self.input.borrow_mut().push_back(input);
+        let input = self.input.borrow().current();
         while let HtmlParserSessionResult::Script(_) =
-            feed_with_definitive_encoding(&self.tokenizer, self.input.current())
+            feed_with_definitive_encoding(&self.tokenizer, &input)
         {
             // Non-pump callers intentionally parse through embedder pauses. They have no
             // runtime owner to notify, so parser-side custom-element handoffs and
@@ -176,11 +195,11 @@ impl HtmlParserSession {
         }
     }
 
-    pub(super) fn push_back(&mut self, input: StrTendril) {
-        self.input.push_back(input);
+    pub(super) fn push_back(&self, input: StrTendril) {
+        self.input.borrow_mut().push_back(input);
     }
 
-    pub(super) fn begin_inserted_input(&mut self, input: StrTendril) {
+    pub(super) fn begin_inserted_input(&self, input: StrTendril) {
         if input.is_empty() {
             return;
         }
@@ -189,31 +208,39 @@ impl HtmlParserSession {
         // restored. Prefer permanent unknown locations over reporting
         // plausible but incorrect document lines.
         self.tokenizer.sink.sink().mark_source_positions_unknown();
-        self.input.begin_inserted(input);
+        self.input.borrow_mut().begin_inserted(input);
     }
 
-    pub(super) fn append_to_current_inserted_input(&mut self, input: StrTendril) -> bool {
-        self.input.append_to_current_inserted(input)
+    pub(super) fn append_to_current_inserted_input(&self, input: StrTendril) -> bool {
+        self.input.borrow_mut().append_to_current_inserted(input)
+    }
+
+    pub(super) fn append_at_current_insertion_point(&self, input: StrTendril) {
+        self.tokenizer.sink.sink().mark_source_positions_unknown();
+        self.input.borrow_mut().push_back(input);
     }
 
     pub(super) fn has_buffered_input(&self) -> bool {
-        self.input.has_input()
+        self.input.borrow().has_input()
     }
 
     pub(super) fn buffered_input_len(&self) -> usize {
-        self.input.len()
+        self.input.borrow().len()
     }
 
     pub(super) fn snapshot_buffered_input(&self) -> String {
-        self.input.snapshot()
+        self.input.borrow().snapshot()
     }
 
-    pub(super) fn feed(&mut self) -> HtmlParserSessionResult {
-        let result = feed_with_definitive_encoding(&self.tokenizer, self.input.current());
-        if matches!(result, HtmlParserSessionResult::InputDrained) {
+    pub(super) fn feed(&self) -> HtmlParserSessionResult {
+        let input = self.input.borrow().current();
+        let result = feed_with_definitive_encoding(&self.tokenizer, &input);
+        if matches!(result, HtmlParserSessionResult::InputDrained)
+            && self.input.borrow().is_current(&input)
+        {
             // The restored parent is intentionally consumed by the next parser
             // step so each insertion depth keeps an explicit input boundary.
-            self.input.restore_parent_if_current_empty();
+            self.input.borrow_mut().restore_parent_if_current_empty();
         }
         result
     }
@@ -224,7 +251,7 @@ impl HtmlParserSession {
 
     pub(super) fn finish(self) -> ParserStreamHtmlTreeSinkTarget {
         let Self { tokenizer, input } = self;
-        let input_buffer = input.into_buffer();
+        let input_buffer = input.into_inner().into_buffer();
         while let HtmlParserSessionResult::Script(_) =
             feed_with_definitive_encoding(&tokenizer, &input_buffer)
         {
@@ -245,7 +272,7 @@ impl HtmlParserSession {
 
     pub(super) fn finish_live_runtime_dom_sink_parser(self) -> ParserFinishDiscoverySignals {
         let Self { tokenizer, input } = self;
-        let input_buffer = input.into_buffer();
+        let input_buffer = input.into_inner().into_buffer();
         while let HtmlParserSessionResult::Script(_) =
             feed_with_definitive_encoding(&tokenizer, &input_buffer)
         {
@@ -299,7 +326,11 @@ fn feed_with_definitive_encoding(
             TokenizerResult::EncodingIndicator(_) => {}
             TokenizerResult::Done => return HtmlParserSessionResult::InputDrained,
             TokenizerResult::Script(handle) => {
-                return HtmlParserSessionResult::Script(handle);
+                return if handle.is_owner_interrupted() {
+                    HtmlParserSessionResult::OwnerInterrupted
+                } else {
+                    HtmlParserSessionResult::Script(handle)
+                };
             }
         }
     }

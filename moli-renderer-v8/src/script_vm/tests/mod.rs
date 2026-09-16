@@ -611,8 +611,7 @@ fn new_streamed_parser_page_task_executor_test_vm(
     markup: &str,
     loader: &ResourceRequestClient,
 ) -> crate::runtime::PageVmTaskExecutorTestHarness {
-    let mut stream =
-        HtmlParser::SCRIPTING_ENABLED.start_document(Url::parse(url).expect("test URL"));
+    let stream = HtmlParser::SCRIPTING_ENABLED.start_document(Url::parse(url).expect("test URL"));
     stream.feed(markup);
     let page = crate::runtime::PageVmTaskExecutorTestHarness::new_with_dom_host(
         stream.take_parser_stream_dom_host(),
@@ -14331,8 +14330,7 @@ async fn in_flight_connected_modulepreload_does_not_delay_window_load() {
 
 fn new_streamed_parser_test_vm(url: &str, markup: &str) -> StandaloneScriptVmHarness {
     let _js_runtime = crate::JsRuntime::initialize();
-    let mut stream =
-        HtmlParser::SCRIPTING_ENABLED.start_document(Url::parse(url).expect("test url"));
+    let stream = HtmlParser::SCRIPTING_ENABLED.start_document(Url::parse(url).expect("test url"));
     stream.feed(markup);
     let dom_host = stream.take_parser_stream_dom_host();
     let page_task_queue = crate::page_task_queue::PageTaskQueueTestHarness::new();

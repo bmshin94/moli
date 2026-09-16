@@ -22,6 +22,7 @@
 //! later runtime turn.
 
 use html5ever::{tendril::StrTendril, tokenizer::BufferQueue};
+use std::rc::Rc;
 
 /// The tokenizer's current input plus suspended parent insertion frames.
 ///
@@ -29,8 +30,8 @@ use html5ever::{tendril::StrTendril, tokenizer::BufferQueue};
 /// is consumed from `current`, followed by `parents` in reverse order.
 #[derive(Default)]
 pub(super) struct InputStack {
-    current: BufferQueue,
-    parents: Vec<BufferQueue>,
+    current: Rc<BufferQueue>,
+    parents: Vec<Rc<BufferQueue>>,
 }
 
 impl InputStack {
@@ -70,8 +71,12 @@ impl InputStack {
     }
 
     /// Return the queue that `html5ever` may consume in the current parser step.
-    pub(super) fn current(&self) -> &BufferQueue {
-        &self.current
+    pub(super) fn current(&self) -> Rc<BufferQueue> {
+        self.current.clone()
+    }
+
+    pub(super) fn is_current(&self, input: &Rc<BufferQueue>) -> bool {
+        Rc::ptr_eq(&self.current, input)
     }
 
     /// Restore one parent after the current frame has been fully consumed.
@@ -121,13 +126,14 @@ impl InputStack {
     /// nearest to farthest. No input is reparsed or otherwise transformed.
     pub(super) fn into_buffer(mut self) -> BufferQueue {
         while let Some(parent) = self.parents.pop() {
-            append_queue(parent, &self.current);
+            append_queue(&parent, &self.current);
         }
-        self.current
+        Rc::try_unwrap(self.current)
+            .unwrap_or_else(|_| panic!("cannot finish an active tokenizer input"))
     }
 
     fn queues_in_consumption_order(&self) -> impl Iterator<Item = &BufferQueue> {
-        std::iter::once(&self.current).chain(self.parents.iter().rev())
+        std::iter::once(self.current.as_ref()).chain(self.parents.iter().rev().map(Rc::as_ref))
     }
 }
 
@@ -147,7 +153,7 @@ fn append_queue_snapshot(input: &BufferQueue, snapshot: &mut String) {
     }
 }
 
-fn append_queue(source: BufferQueue, destination: &BufferQueue) {
+fn append_queue(source: &BufferQueue, destination: &BufferQueue) {
     while let Some(chunk) = source.pop_front() {
         destination.push_back(chunk);
     }

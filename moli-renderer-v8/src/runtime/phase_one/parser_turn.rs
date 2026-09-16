@@ -54,6 +54,12 @@ impl ParserMutationEffectConsumer for PhaseOneParserOwner<'_> {
             .vm
             .apply_parser_stream_mutation_effects_to_live_dom_host_in_default_context(effects);
     }
+    fn finish_parser_dom_mutations(&mut self) -> std::ops::ControlFlow<()> {
+        let _ = self
+            .vm
+            .run_pending_parser_post_step_runtime_work_in_default_context();
+        std::ops::ControlFlow::Continue(())
+    }
 }
 
 impl ParserDomReadConsumer for PhaseOneParserOwner<'_> {
@@ -194,9 +200,6 @@ impl ParserDomMutationConsumer for PhaseOneParserOwner<'_> {
         let _ = self
             .vm
             .apply_parser_dom_mutation_to_live_dom_host_in_default_context(mutation);
-        let _ = self
-            .vm
-            .run_pending_parser_post_step_runtime_work_in_default_context();
     }
 
     fn create_parser_element_without_attributes(

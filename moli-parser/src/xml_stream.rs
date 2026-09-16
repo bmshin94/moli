@@ -29,7 +29,9 @@ use crate::{
     ParserPlanningReadView, ParserPumpOutcome, ParserPumpStep, ParserScriptHandoff, ParserYield,
     PreparedScript,
     html::ParseHandle,
-    live_target::{ParserRuntimeDomSinks, ParserStreamHtmlTreeSinkTarget},
+    live_target::{
+        ParserMutationEffectDelivery, ParserRuntimeDomSinks, ParserStreamHtmlTreeSinkTarget,
+    },
     stream::prepare_parser_script_handoff_for_static_document,
     xml_tree_viewer::transform_parser_target_to_xml_tree_view,
 };
@@ -82,6 +84,20 @@ enum RawXmlParserStep {
     Script(NativeNodeId),
     BlockingStylesheet(NativeNodeId),
     InputDrained,
+}
+
+impl XmlStreamDocumentSink {
+    fn mutate_target(
+        &self,
+        mutation: impl FnOnce(&mut ParserStreamHtmlTreeSinkTarget) -> ParserMutationEffectDelivery,
+    ) {
+        let delivery = mutation(&mut self.target.borrow_mut().common);
+        delivery.consume();
+        let finish = self.target.borrow().common.mutation_finisher();
+        if let Some(finish) = finish {
+            let _ = finish();
+        }
+    }
 }
 
 impl XmlDocumentStream {
@@ -647,11 +663,7 @@ impl TreeSink for XmlStreamDocumentSink {
                 HtmlNodeOrText::AppendText(HtmlStrTendril::from(text.as_ref()))
             }
         };
-        self.target
-            .borrow_mut()
-            .common
-            .append(parent.inner.node_id(), child)
-            .consume();
+        self.mutate_target(|target| target.append(parent.inner.node_id(), child));
     }
 
     fn append_before_sibling(&self, sibling: &Self::Handle, child: XmlNodeOrText<Self::Handle>) {
@@ -662,11 +674,7 @@ impl TreeSink for XmlStreamDocumentSink {
                 HtmlNodeOrText::AppendText(HtmlStrTendril::from(text.as_ref()))
             }
         };
-        self.target
-            .borrow_mut()
-            .common
-            .append_before_sibling(sibling.inner.node_id(), child)
-            .consume();
+        self.mutate_target(|target| target.append_before_sibling(sibling.inner.node_id(), child));
     }
 
     fn append_based_on_parent_node(
@@ -682,15 +690,13 @@ impl TreeSink for XmlStreamDocumentSink {
                 HtmlNodeOrText::AppendText(HtmlStrTendril::from(text.as_ref()))
             }
         };
-        self.target
-            .borrow_mut()
-            .common
-            .append_based_on_parent_node(
+        self.mutate_target(|target| {
+            target.append_based_on_parent_node(
                 element.inner.node_id(),
                 prev_element.inner.node_id(),
                 child,
             )
-            .consume();
+        });
     }
 
     fn append_doctype_to_document(
@@ -699,15 +705,13 @@ impl TreeSink for XmlStreamDocumentSink {
         public_id: StrTendril,
         system_id: StrTendril,
     ) {
-        self.target
-            .borrow_mut()
-            .common
-            .append_doctype(
+        self.mutate_target(|target| {
+            target.append_doctype(
                 name.to_string(),
                 public_id.to_string(),
                 system_id.to_string(),
             )
-            .consume();
+        });
     }
 
     fn mark_script_already_started(&self, node: &Self::Handle) {
@@ -756,19 +760,13 @@ impl TreeSink for XmlStreamDocumentSink {
     }
 
     fn remove_from_parent(&self, target: &Self::Handle) {
-        self.target
-            .borrow_mut()
-            .common
-            .remove_from_parent(target.inner.node_id())
-            .consume();
+        self.mutate_target(|parser| parser.remove_from_parent(target.inner.node_id()));
     }
 
     fn reparent_children(&self, node: &Self::Handle, new_parent: &Self::Handle) {
-        self.target
-            .borrow_mut()
-            .common
-            .reparent_children(node.inner.node_id(), new_parent.inner.node_id())
-            .consume();
+        self.mutate_target(|target| {
+            target.reparent_children(node.inner.node_id(), new_parent.inner.node_id())
+        });
     }
 }
 

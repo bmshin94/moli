@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn parser_created_link_blocker_is_captured_before_link_processing_state_is_consumed() {
         let parser = HtmlParser::SCRIPTING_ENABLED;
-        let mut stream = parser.start_document(url::Url::parse("https://example.com/").unwrap());
+        let stream = parser.start_document(url::Url::parse("https://example.com/").unwrap());
         stream.append_to_end(
             "<!doctype html><html><head><link rel=stylesheet href='/slow.css'><script>window.x = 1;</script></head></html>".to_owned(),
         );

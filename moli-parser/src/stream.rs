@@ -9,7 +9,10 @@ use moli_stylesheet_blocking::{
     DocumentBlockingStylesheetSignature, StylesheetBlockingReadView,
     collect_document_owned_blocking_stylesheets_before_in_view,
 };
-use std::collections::HashMap;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+};
 
 use crate::script_planning::{
     ParserPlanningReadView, PrepareScriptOutcome, PreparedImportMap, PreparedScript,
@@ -34,12 +37,13 @@ use super::{
 pub(super) struct HtmlTreeSinkStream {
     parser: HtmlParserSession,
     script_input: ParserInputQueue,
-    parser_script_positions: HashMap<NativeNodeId, usize>,
-    next_parser_script_position: usize,
+    parser_script_positions: RefCell<HashMap<NativeNodeId, usize>>,
+    next_parser_script_position: Cell<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RawParserStep {
+    OwnerInterrupted,
     Script(NativeNodeId),
     CustomElementConstruction,
     BlockingStylesheet(NativeNodeId),
@@ -433,8 +437,8 @@ impl HtmlTreeSinkStream {
         Self {
             parser: session.parser,
             script_input: session.script_input,
-            parser_script_positions: HashMap::new(),
-            next_parser_script_position: 0,
+            parser_script_positions: RefCell::default(),
+            next_parser_script_position: Cell::new(0),
         }
     }
 
@@ -455,19 +459,20 @@ impl HtmlTreeSinkStream {
         Self {
             parser: session.parser,
             script_input: session.script_input,
-            parser_script_positions: HashMap::new(),
-            next_parser_script_position: 0,
+            parser_script_positions: RefCell::default(),
+            next_parser_script_position: Cell::new(0),
         }
     }
 
-    fn parser_script_position(&mut self, node_id: NativeNodeId) -> usize {
+    fn parser_script_position(&self, node_id: NativeNodeId) -> usize {
         *self
             .parser_script_positions
+            .borrow_mut()
             .entry(node_id)
             .or_insert_with(|| {
-                let position = self.next_parser_script_position;
-                self.next_parser_script_position =
-                    self.next_parser_script_position.saturating_add(1);
+                let position = self.next_parser_script_position.get();
+                self.next_parser_script_position
+                    .set(position.saturating_add(1));
                 position
             })
     }
@@ -500,7 +505,7 @@ impl HtmlTreeSinkStream {
         self.script_input.take_processed_insertion_meta_csp_count()
     }
 
-    pub fn feed(&mut self, chunk: &str) {
+    pub fn feed(&self, chunk: &str) {
         if chunk.is_empty() {
             return;
         }
@@ -508,11 +513,11 @@ impl HtmlTreeSinkStream {
         self.parser.process(StrTendril::from(chunk));
     }
 
-    pub fn pump_parser_step(&mut self, chunk: &str) -> ParserPumpOutcome {
+    pub fn pump_parser_step(&self, chunk: &str) -> ParserPumpOutcome {
         self.pump_parser_step_with_source(chunk, false)
     }
 
-    pub fn pump_parser_inserted_step(&mut self, chunk: &str) -> ParserPumpOutcome {
+    pub fn pump_parser_inserted_step(&self, chunk: &str) -> ParserPumpOutcome {
         if chunk.is_empty() {
             return ParserPumpOutcome {
                 result: ParserPumpStep::InputDrained,
@@ -524,13 +529,18 @@ impl HtmlTreeSinkStream {
         self.pump_parser_step_with_source(chunk, true)
     }
 
-    pub fn append_to_current_inserted_input(&mut self, chunk: &str) -> bool {
+    pub fn append_to_current_inserted_input(&self, chunk: &str) -> bool {
         self.parser
             .append_to_current_inserted_input(StrTendril::from(chunk))
     }
 
+    pub fn append_at_current_insertion_point(&self, chunk: &str) {
+        self.parser
+            .append_at_current_insertion_point(StrTendril::from(chunk));
+    }
+
     fn pump_parser_step_with_source(
-        &mut self,
+        &self,
         chunk: &str,
         inserted_source: bool,
     ) -> ParserPumpOutcome {
@@ -550,6 +560,7 @@ impl HtmlTreeSinkStream {
             && !paused_for_custom_element
             && self.peek_pending_blocking_stylesheet_pause().is_some();
         let result = match tokenizer_result {
+            HtmlParserSessionResult::OwnerInterrupted => RawParserStep::OwnerInterrupted,
             HtmlParserSessionResult::Script(handle) if paused_for_custom_element => {
                 debug_assert_eq!(
                     self.peek_pending_custom_element_construction_handoff_placeholder(),
@@ -583,7 +594,8 @@ impl HtmlTreeSinkStream {
                 .collect::<HashMap<_, _>>();
         let handoff_parser_position = match result {
             RawParserStep::Script(node_id) => Some(self.parser_script_position(node_id)),
-            RawParserStep::CustomElementConstruction
+            RawParserStep::OwnerInterrupted
+            | RawParserStep::CustomElementConstruction
             | RawParserStep::BlockingStylesheet(_)
             | RawParserStep::InputDrained => None,
         };
@@ -607,7 +619,8 @@ impl HtmlTreeSinkStream {
                         prepare_parser_script(&*target, node_id, handoff_parser_position),
                     ))
                 }
-                RawParserStep::CustomElementConstruction
+                RawParserStep::OwnerInterrupted
+                | RawParserStep::CustomElementConstruction
                 | RawParserStep::BlockingStylesheet(_)
                 | RawParserStep::InputDrained => None,
             };
@@ -660,6 +673,8 @@ impl HtmlTreeSinkStream {
                 ParserPumpStep::Yield(ParserYield::BlockingStylesheet(
                     ParserBlockingStylesheetPause { node_id },
                 ))
+            } else if let RawParserStep::OwnerInterrupted = result {
+                ParserPumpStep::Yield(ParserYield::OwnerInterrupted)
             } else if let Some(handoff) = self.pop_pending_custom_element_construction_handoff() {
                 ParserPumpStep::Yield(ParserYield::CustomElementConstruction(Box::new(handoff)))
             } else {
@@ -715,66 +730,64 @@ impl HtmlTreeSinkStream {
         self.parser.sink().snapshot_parser_stream_dom_host()
     }
 
-    pub fn take_parser_stream_null_custom_element_registry_elements(
-        &mut self,
-    ) -> Vec<NativeNodeId> {
+    pub fn take_parser_stream_null_custom_element_registry_elements(&self) -> Vec<NativeNodeId> {
         self.parser
             .sink()
             .take_parser_stream_null_custom_element_registry_elements()
     }
 
-    pub fn take_parser_stream_dom_host(&mut self) -> DomHost {
+    pub fn take_parser_stream_dom_host(&self) -> DomHost {
         self.parser.sink().take_parser_stream_dom_host()
     }
 
-    pub fn restore_parser_stream_dom_host(&mut self, dom_host: DomHost) {
+    pub fn restore_parser_stream_dom_host(&self, dom_host: DomHost) {
         self.parser.sink().restore_parser_stream_dom_host(dom_host);
     }
 
-    pub(super) fn enter_runtime_dom_sinks_parse_step(&mut self, sinks: ParserRuntimeDomSinks) {
+    pub(super) fn enter_runtime_dom_sinks_parse_step(&self, sinks: ParserRuntimeDomSinks) {
         self.parser.sink().enter_runtime_dom_sinks_parse_step(sinks);
     }
 
-    pub fn clear_runtime_dom_sinks_after_parse_step(&mut self) {
+    pub fn clear_runtime_dom_sinks_after_parse_step(&self) {
         self.parser
             .sink()
             .clear_runtime_dom_sinks_after_parse_step()
     }
 
-    pub fn replace_parser_stream_document(&mut self, document: NativeDom) {
+    pub fn replace_parser_stream_document(&self, document: NativeDom) {
         self.parser.sink().replace_parser_stream_document(document);
     }
 
-    pub fn drain_ready_parser_scripts(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_ready_parser_scripts(&self) -> Vec<NativeNodeId> {
         self.parser.sink().drain_ready_parser_scripts()
     }
 
-    pub fn drain_discovered_async_prefetch_candidates(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_discovered_async_prefetch_candidates(&self) -> Vec<NativeNodeId> {
         self.parser
             .sink()
             .drain_discovered_async_prefetch_candidates()
     }
 
-    pub fn drain_discovered_modulepreload_link_candidates(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_discovered_modulepreload_link_candidates(&self) -> Vec<NativeNodeId> {
         self.parser
             .sink()
             .drain_discovered_modulepreload_link_candidates()
     }
 
-    pub fn drain_discovered_parser_meta_csp_candidates(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_discovered_parser_meta_csp_candidates(&self) -> Vec<NativeNodeId> {
         self.parser
             .sink()
             .drain_discovered_parser_meta_csp_candidates()
     }
 
-    pub fn note_defined_autonomous_custom_element(&mut self, local_name: &str) {
+    pub fn note_defined_autonomous_custom_element(&self, local_name: &str) {
         self.parser
             .sink()
             .note_defined_autonomous_custom_element(local_name);
     }
 
     pub fn drain_pending_custom_element_construction_handoffs(
-        &mut self,
+        &self,
     ) -> Vec<crate::html::ParserCustomElementConstructionHandoff> {
         self.parser
             .sink()
@@ -794,7 +807,7 @@ impl HtmlTreeSinkStream {
     }
 
     fn pop_pending_custom_element_construction_handoff(
-        &mut self,
+        &self,
     ) -> Option<crate::html::ParserCustomElementConstructionHandoff> {
         self.parser
             .sink()
@@ -805,12 +818,12 @@ impl HtmlTreeSinkStream {
         self.parser.sink().pending_blocking_stylesheet_pause()
     }
 
-    fn pop_pending_blocking_stylesheet_pause(&mut self) -> Option<NativeNodeId> {
+    fn pop_pending_blocking_stylesheet_pause(&self) -> Option<NativeNodeId> {
         self.parser.sink().pop_pending_blocking_stylesheet_pause()
     }
 
     fn drain_discovered_blocking_stylesheet_inputs(
-        &mut self,
+        &self,
     ) -> Vec<moli_stylesheet_blocking::DocumentOwnedBlockingStylesheetDiscoveryInput> {
         self.parser
             .sink()
@@ -823,7 +836,7 @@ impl HtmlTreeSinkStream {
         self.parser.sink().captured_blocking_stylesheet_signatures()
     }
 
-    pub fn mark_script_already_started(&mut self, node_id: NativeNodeId) {
+    pub fn mark_script_already_started(&self, node_id: NativeNodeId) {
         self.parser.sink().mark_script_already_started(node_id);
     }
 
@@ -1271,7 +1284,7 @@ mod tests {
 
     #[test]
     fn parser_stream_feed_continues_past_definitive_encoding_indicator() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1289,7 +1302,7 @@ mod tests {
 
     #[test]
     fn parser_stream_pump_continues_past_definitive_encoding_indicator() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1309,7 +1322,7 @@ mod tests {
 
     #[test]
     fn parser_stream_finish_continues_past_definitive_encoding_indicator() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let outcome = stream.pump_parser_step(concat!(
@@ -1468,7 +1481,7 @@ mod tests {
 
     #[test]
     fn parser_handoff_preserves_defer_modes_for_owner_acceptance() {
-        let mut classic_stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let classic_stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let classic = classic_stream
@@ -1483,7 +1496,7 @@ mod tests {
         assert_eq!(script.kind, ScriptKind::Classic);
         assert_eq!(script.mode, ScriptMode::Defer);
 
-        let mut module_stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let module_stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let module = module_stream
@@ -1501,7 +1514,7 @@ mod tests {
 
     #[test]
     fn parser_stream_assigns_stable_positions_to_shadow_root_scripts() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let first = stream
@@ -1535,7 +1548,7 @@ mod tests {
 
     #[test]
     fn parser_stream_keeps_ordinary_template_scripts_inert() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let handoff = stream
@@ -1570,7 +1583,7 @@ mod tests {
 
     #[test]
     fn parser_handoff_keeps_import_maps_out_of_executable_script_lanes() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let result = stream
@@ -1590,7 +1603,7 @@ mod tests {
                 if source.contains("\"x\":\"/x.js\"")
         ));
 
-        let mut external_stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let external_stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let result = external_stream
@@ -1650,7 +1663,7 @@ mod tests {
 
     #[test]
     fn empty_src_parser_script_handoff_is_unprepared_not_fetchable() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1675,7 +1688,7 @@ mod tests {
 
     #[test]
     fn invalid_src_parser_script_handoff_preserves_preparation_failure() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1703,7 +1716,7 @@ mod tests {
 
     #[test]
     fn parser_script_handoff_uses_html5ever_line_with_unknown_column_across_input_chunks() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1728,7 +1741,7 @@ mod tests {
 
     #[test]
     fn nonempty_parser_inserted_input_permanently_degrades_source_locations() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1775,7 +1788,7 @@ mod tests {
 
     #[test]
     fn blocked_nested_writes_keep_each_input_at_its_insertion_depth() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1801,7 +1814,7 @@ mod tests {
 
     #[test]
     fn parser_token_crossing_inserted_and_original_input_stays_unknown() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1848,7 +1861,7 @@ mod tests {
 
     #[test]
     fn parser_inserted_character_reference_chunks_degrade_without_disrupting_parsing() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         let markup =
@@ -1881,7 +1894,7 @@ mod tests {
 
     #[test]
     fn parser_original_source_uses_html5ever_line_without_tracking_utf16_columns() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1903,7 +1916,7 @@ mod tests {
 
     #[test]
     fn empty_parser_inserted_input_preserves_following_line_location() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1935,7 +1948,7 @@ mod tests {
 
     #[test]
     fn parser_stream_surfaces_inline_svg_script_handoff() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -1973,7 +1986,7 @@ mod tests {
 
     #[test]
     fn parser_stream_surfaces_self_closing_external_svg_script_handoff() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -2000,7 +2013,7 @@ mod tests {
 
     #[test]
     fn parser_stream_does_not_execute_svg_script_popped_by_an_ancestor_end_tag() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -2021,7 +2034,7 @@ mod tests {
 
     #[test]
     fn data_block_handoff_consumes_parser_inserted_prepare_state() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -2053,7 +2066,7 @@ mod tests {
 
     #[test]
     fn parser_stream_records_custom_element_construction_handoff_candidates() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         stream.note_defined_autonomous_custom_element("x-ready");
@@ -2094,7 +2107,7 @@ mod tests {
 
     #[test]
     fn parser_stream_surfaces_multiple_custom_element_handoffs_one_at_a_time() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         stream.note_defined_autonomous_custom_element("x-ready");
@@ -2137,7 +2150,7 @@ mod tests {
 
     #[test]
     fn parser_stream_custom_element_handoff_pauses_before_following_sibling_tokens() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         stream.note_defined_autonomous_custom_element("x-ready");
@@ -2168,7 +2181,7 @@ mod tests {
 
     #[test]
     fn parser_stream_consumes_blocking_stylesheet_pause_before_resuming_tokenizer() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -2222,7 +2235,7 @@ mod tests {
 
     #[test]
     fn parser_stream_feed_consumes_custom_element_handoff_without_runtime_owner() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
         stream.note_defined_autonomous_custom_element("x-ready");
@@ -2254,7 +2267,7 @@ mod tests {
 
     #[test]
     fn parser_stream_does_not_record_custom_element_handoff_without_runtime_definition() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page.html").expect("test url"),
         );
 
@@ -2311,8 +2324,7 @@ mod tests {
     #[test]
     fn parser_stream_caches_document_url_before_runtime_dom_takeover() {
         let url = Url::parse("https://example.test/page.html").expect("test url");
-        let mut stream =
-            DocumentStream::new_scripting_enabled_parser_stream_for_testing(url.clone());
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(url.clone());
         let dom_host = stream.take_parser_stream_dom_host();
 
         let cached_url = stream.with_stylesheet_blocking_read_view(|view| view.final_url_clone());
@@ -2327,7 +2339,7 @@ mod tests {
 
     #[test]
     fn parser_stream_reports_style_import_blocker_before_classic_handoff() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page").expect("test url"),
         );
 
@@ -2358,7 +2370,7 @@ mod tests {
 
     #[test]
     fn parser_stream_reports_split_connected_meta_csp_once_and_ignores_template_contents() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page").expect("test url"),
         );
 
@@ -2392,7 +2404,7 @@ mod tests {
 
     #[test]
     fn parser_stream_reports_style_import_blocker_on_runtime_dom_sinks() {
-        let mut stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
+        let stream = DocumentStream::new_scripting_enabled_parser_stream_for_testing(
             Url::parse("https://example.test/page").expect("test url"),
         );
         let mut dom_host = stream.take_parser_stream_dom_host();

@@ -930,28 +930,43 @@ pub(in crate::native_bridge::context_host) fn dispatch_child_document_readiness_
     document: v8::Local<'s, v8::Object>,
     ready_state: DocumentReadyState,
 ) {
-    set_child_document_ready_state(scope, document, ready_state);
-    let _ =
-        dispatch_detached_simple_event(scope, document, "readystatechange", false, false, false);
+    if set_child_document_ready_state(scope, document, ready_state) {
+        let _ = dispatch_detached_simple_event(
+            scope,
+            document,
+            "readystatechange",
+            false,
+            false,
+            false,
+        );
+    }
 }
 
 fn set_child_document_ready_state<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     document: v8::Local<'s, v8::Object>,
     ready_state: DocumentReadyState,
-) {
+) -> bool {
     if let Some(state) = get_private_object(scope, document, DETACHED_STATE_SLOT) {
         if let Some(value) = v8_string(scope, ready_state.as_str()) {
-            let _ = state.set(scope, v8str(scope, "readyState").into(), value.into());
+            let key = v8str(scope, "readyState").into();
+            if state
+                .get(scope, key)
+                .is_some_and(|old| old.strict_equals(value.into()))
+            {
+                return false;
+            }
+            return state.set(scope, key, value.into()) == Some(true);
         }
-        return;
+        return false;
     }
     if let Some(host_ptr) = context_host_ptr_from_global_bridge(scope)
         && let Ok((object_host_ptr, document_handle)) =
             crate::native_bridge::node::node_runtime_and_handle_from_object(scope, document)
         && object_host_ptr == host_ptr
     {
-        let _ = unsafe { &mut *host_ptr }
+        return unsafe { &mut *host_ptr }
             .set_dom_document_ready_state_for_handle(document_handle, ready_state);
     }
+    false
 }

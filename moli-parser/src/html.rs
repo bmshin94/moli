@@ -67,7 +67,7 @@ struct ParserInputState {
 
 pub struct DocumentStream {
     inner: HtmlTreeSinkStream,
-    input: HtmlParserInputStream,
+    input: RefCell<HtmlParserInputStream>,
 }
 
 #[derive(Debug, Default)]
@@ -314,6 +314,9 @@ pub struct ParserBlockingStylesheetPause {
 
 #[derive(Debug, Clone)]
 pub enum ParserYield {
+    /// A synchronous callback suspended or canceled this parser. The owner
+    /// already holds the blocker; this yield transfers no new work.
+    OwnerInterrupted,
     Script(Box<ParserScriptHandoff>),
     CustomElementConstruction(Box<ParserCustomElementConstructionHandoff>),
     BlockingStylesheet(ParserBlockingStylesheetPause),
@@ -335,6 +338,9 @@ pub(super) struct ParseHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParseHandleIdentity {
     DomNode(NativeNodeId),
+    // html5ever exposes only Script(handle) as an embedder yield. This marker
+    // is translated to OwnerInterrupted before any DOM handle is inspected.
+    OwnerInterrupted,
     // Standalone fragment parsing, like `Element.innerHTML` staging, only has a
     // context element name. Chromium keeps a real `context_element` next to the
     // `DocumentFragment` target; our detached staging parser uses this
@@ -410,7 +416,7 @@ impl HtmlParser {
     }
 
     pub fn parse_dom_host(&self, final_url: Url, html: String) -> DomHost {
-        let mut stream = self.start_document(final_url);
+        let stream = self.start_document(final_url);
         for chunk in html_chunks(&html) {
             stream.feed(chunk);
         }
@@ -424,8 +430,7 @@ impl HtmlParser {
     ) -> NativeDom {
         let target =
             ParserStreamHtmlTreeSinkTarget::new_with_declarative_shadow_roots(final_url, false);
-        let mut stream =
-            HtmlTreeSinkStream::from_target_with_scripting(target, self.scripting_enabled);
+        let stream = HtmlTreeSinkStream::from_target_with_scripting(target, self.scripting_enabled);
         for chunk in html_chunks(&html) {
             stream.feed(chunk);
         }
@@ -481,7 +486,7 @@ impl HtmlParser {
         );
         let context_handle = ParseHandle::new_synthetic_fragment_context(Rc::new(context));
         let sink = DocumentSink::new(target);
-        let mut parser = HtmlParserSession::new_fragment(
+        let parser = HtmlParserSession::new_fragment(
             sink,
             html_parse_opts_with_scripting(scripting_enabled),
             context_handle,
@@ -524,7 +529,7 @@ impl HtmlParser {
             // SAFETY: `consumer` remains exclusively borrowed until the
             // constructor clears the sink bundle before returning.
             unsafe { ParserRuntimeDomSinks::from_consumer_without_element_creation(consumer) };
-        let mut stream = DocumentStream::new_live_fragment_root(
+        let stream = DocumentStream::new_live_fragment_root(
             final_url,
             fragment_handle,
             owner_document_handle,
@@ -552,7 +557,7 @@ impl DocumentStream {
     fn new_parser_stream(final_url: Url, scripting_enabled: bool) -> Self {
         Self {
             inner: new_parser_stream_html_tree_sink_stream(final_url, scripting_enabled),
-            input: HtmlParserInputStream::default(),
+            input: RefCell::default(),
         }
     }
 
@@ -567,7 +572,7 @@ impl DocumentStream {
                 document_handle,
                 scripting_enabled,
             ),
-            input: HtmlParserInputStream::default(),
+            input: RefCell::default(),
         }
     }
 
@@ -594,7 +599,7 @@ impl DocumentStream {
                 allow_declarative_shadow_roots,
                 scripting_enabled,
             ),
-            input: HtmlParserInputStream::default(),
+            input: RefCell::default(),
         }
     }
 
@@ -648,13 +653,13 @@ impl DocumentStream {
         )
     }
 
-    pub fn note_defined_autonomous_custom_element(&mut self, local_name: &str) {
+    pub fn note_defined_autonomous_custom_element(&self, local_name: &str) {
         self.inner
             .note_defined_autonomous_custom_element(local_name);
     }
 
     pub fn drain_pending_custom_element_construction_handoffs(
-        &mut self,
+        &self,
     ) -> Vec<ParserCustomElementConstructionHandoff> {
         self.inner
             .drain_pending_custom_element_construction_handoffs()
@@ -680,12 +685,12 @@ impl DocumentStream {
         self.inner.take_processed_insertion_meta_csp_count()
     }
 
-    pub fn feed(&mut self, chunk: &str) {
+    pub fn feed(&self, chunk: &str) {
         self.inner.feed(chunk)
     }
 
     fn feed_with_runtime_dom_consumer_without_element_creation<T>(
-        &mut self,
+        &self,
         chunk: &str,
         consumer: &mut T,
     ) where
@@ -696,7 +701,7 @@ impl DocumentStream {
         let sinks =
             unsafe { ParserRuntimeDomSinks::from_consumer_without_element_creation(consumer) };
         self.inner.enter_runtime_dom_sinks_parse_step(sinks);
-        let mut step = RuntimeDomSinksParserStep { stream: self };
+        let step = RuntimeDomSinksParserStep { stream: self };
         step.feed(chunk);
     }
 
@@ -705,9 +710,9 @@ impl DocumentStream {
     /// The tokenizer only receives a bounded prefix when the owner pumps the
     /// parser.  Appending while a script or stylesheet blocks parsing therefore
     /// cannot advance the DOM commit frontier.
-    pub fn append_to_end(&mut self, chunk: String) {
+    pub fn append_to_end(&self, chunk: String) {
         if !chunk.is_empty() {
-            self.input.end_segments.push_back(chunk);
+            self.input.borrow_mut().end_segments.push_back(chunk);
         }
     }
 
@@ -717,14 +722,20 @@ impl DocumentStream {
     /// continues writing while that input is blocked on a nested resource.
     /// The input must remain after the blocked frame's unconsumed tail rather
     /// than becoming a newer nested insertion.
-    pub fn append_to_current_inserted_input(&mut self, chunk: &str) -> bool {
+    pub fn append_to_current_inserted_input(&self, chunk: &str) -> bool {
         self.inner.append_to_current_inserted_input(chunk)
+    }
+
+    /// Insert at the active token's insertion point without opening a script
+    /// frame. A parser reaction appends after the current frame's unread tail.
+    pub fn append_at_current_insertion_point(&self, chunk: &str) {
+        self.inner.append_at_current_insertion_point(chunk);
     }
 
     pub fn has_pending_input(&self) -> bool {
         self.inner.has_script_input()
             || self.inner.has_buffered_input()
-            || !self.input.end_segments.is_empty()
+            || !self.input.borrow().end_segments.is_empty()
     }
 
     pub fn next_input_len(&self) -> usize {
@@ -735,14 +746,14 @@ impl DocumentStream {
                     .has_buffered_input()
                     .then(|| self.inner.buffered_input_len())
             })
-            .or_else(|| self.input.end_segments.front().map(String::len))
+            .or_else(|| self.input.borrow().end_segments.front().map(String::len))
             .unwrap_or_default()
     }
 
     pub fn snapshot_pending_input(&self) -> String {
         let mut pending = self.inner.snapshot_script_input();
         pending.push_str(&self.inner.snapshot_buffered_input());
-        for segment in &self.input.end_segments {
+        for segment in &self.input.borrow().end_segments {
             pending.push_str(segment);
         }
         pending
@@ -750,10 +761,10 @@ impl DocumentStream {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn queued_end_segment_count_for_testing(&self) -> usize {
-        self.input.end_segments.len()
+        self.input.borrow().end_segments.len()
     }
 
-    fn take_next_owned_input(&mut self, max_bytes: usize) -> (String, bool) {
+    fn take_next_owned_input(&self, max_bytes: usize) -> (String, bool) {
         if let Some(input) = self.inner.take_next_script_input() {
             // One parser insertion is an atomic source segment. Splitting it
             // outside html5ever would let a remainder jump ahead of bytes the
@@ -765,17 +776,17 @@ impl DocumentStream {
             return (String::new(), false);
         }
 
-        let Some(input) = self.input.end_segments.pop_front() else {
+        let Some(input) = self.input.borrow_mut().end_segments.pop_front() else {
             return (String::new(), false);
         };
         let (prefix, remainder) = split_parser_input_prefix(input, max_bytes);
         if let Some(remainder) = remainder {
-            self.input.end_segments.push_front(remainder);
+            self.input.borrow_mut().end_segments.push_front(remainder);
         }
         (prefix, false)
     }
 
-    pub fn pump_next_parser_step(&mut self, max_bytes: usize) -> ParserPumpOutcome {
+    pub fn pump_next_parser_step(&self, max_bytes: usize) -> ParserPumpOutcome {
         let (chunk, inserted_source) = self.take_next_owned_input(max_bytes);
         if inserted_source {
             self.inner.pump_parser_inserted_step(&chunk)
@@ -806,17 +817,17 @@ impl DocumentStream {
     /// Returning `ParserPumpStep::InputDrained` means:
     /// - the current input buffer has been consumed as far as html5ever can go for now
     /// - either there is no pending yield, or more bytes are needed before another boundary exists
-    pub fn pump_parser_step(&mut self, chunk: &str) -> ParserPumpOutcome {
+    pub fn pump_parser_step(&self, chunk: &str) -> ParserPumpOutcome {
         self.inner.pump_parser_step(chunk)
     }
 
     #[cfg(test)]
-    pub(crate) fn pump_parser_inserted_step(&mut self, chunk: &str) -> ParserPumpOutcome {
+    pub(crate) fn pump_parser_inserted_step(&self, chunk: &str) -> ParserPumpOutcome {
         self.inner.pump_parser_inserted_step(chunk)
     }
 
     pub fn pump_parser_step_with_runtime_dom_consumer<T>(
-        &mut self,
+        &self,
         chunk: &str,
         consumer: &mut T,
     ) -> ParserPumpOutcome
@@ -833,7 +844,7 @@ impl DocumentStream {
     }
 
     pub fn pump_next_parser_step_with_runtime_dom_consumer<T>(
-        &mut self,
+        &self,
         max_bytes: usize,
         consumer: &mut T,
     ) -> ParserPumpOutcome
@@ -847,12 +858,12 @@ impl DocumentStream {
         // parser-step Drop guard removes every erased callback before return.
         let sinks = unsafe { ParserRuntimeDomSinks::from_consumer(consumer) };
         self.inner.enter_runtime_dom_sinks_parse_step(sinks);
-        let mut step = RuntimeDomSinksParserStep { stream: self };
+        let step = RuntimeDomSinksParserStep { stream: self };
         step.pump_next_parser_step(max_bytes)
     }
 
     pub fn pump_parser_step_with_runtime_dom_consumer_without_element_creation<T>(
-        &mut self,
+        &self,
         chunk: &str,
         consumer: &mut T,
     ) -> ParserPumpOutcome
@@ -867,7 +878,7 @@ impl DocumentStream {
     }
 
     pub fn pump_parser_step_with_runtime_dom_consumers<T, E>(
-        &mut self,
+        &self,
         chunk: &str,
         consumer: &mut T,
         element_consumer: &mut E,
@@ -883,17 +894,17 @@ impl DocumentStream {
     }
 
     fn pump_parser_step_with_runtime_dom_sinks(
-        &mut self,
+        &self,
         chunk: &str,
         sinks: ParserRuntimeDomSinks,
     ) -> ParserPumpOutcome {
         self.inner.enter_runtime_dom_sinks_parse_step(sinks);
-        let mut step = RuntimeDomSinksParserStep { stream: self };
+        let step = RuntimeDomSinksParserStep { stream: self };
         step.pump_parser_step(chunk)
     }
 
     pub fn pump_parser_inserted_step_with_runtime_dom_consumer<T>(
-        &mut self,
+        &self,
         chunk: &str,
         consumer: &mut T,
     ) -> ParserPumpOutcome
@@ -910,12 +921,12 @@ impl DocumentStream {
     }
 
     fn pump_parser_inserted_step_with_runtime_dom_sinks(
-        &mut self,
+        &self,
         chunk: &str,
         sinks: ParserRuntimeDomSinks,
     ) -> ParserPumpOutcome {
         self.inner.enter_runtime_dom_sinks_parse_step(sinks);
-        let mut step = RuntimeDomSinksParserStep { stream: self };
+        let step = RuntimeDomSinksParserStep { stream: self };
         step.pump_parser_inserted_step(chunk)
     }
 
@@ -951,7 +962,7 @@ impl DocumentStream {
     }
 
     fn finish_with_runtime_dom_sinks(
-        mut self,
+        self,
         sinks: ParserRuntimeDomSinks,
     ) -> ParserFinishDiscoverySignals {
         self.inner.enter_runtime_dom_sinks_parse_step(sinks);
@@ -974,23 +985,21 @@ impl DocumentStream {
         self.inner.snapshot_parser_stream_dom_host()
     }
 
-    pub fn take_parser_stream_null_custom_element_registry_elements(
-        &mut self,
-    ) -> Vec<NativeNodeId> {
+    pub fn take_parser_stream_null_custom_element_registry_elements(&self) -> Vec<NativeNodeId> {
         self.inner
             .take_parser_stream_null_custom_element_registry_elements()
     }
 
-    pub fn take_parser_stream_dom_host(&mut self) -> DomHost {
+    pub fn take_parser_stream_dom_host(&self) -> DomHost {
         self.inner.take_parser_stream_dom_host()
     }
 
-    pub fn restore_parser_stream_dom_host(&mut self, dom_host: DomHost) {
+    pub fn restore_parser_stream_dom_host(&self, dom_host: DomHost) {
         self.inner.restore_parser_stream_dom_host(dom_host);
     }
 
     pub fn with_parser_stream_dom_host_for_bootstrap<R>(
-        &mut self,
+        &self,
         f: impl FnOnce(DomHost) -> std::result::Result<R, Box<(anyhow::Error, DomHost)>>,
     ) -> anyhow::Result<R> {
         let bootstrap_document = self.inner.take_parser_stream_dom_host();
@@ -1006,29 +1015,29 @@ impl DocumentStream {
     }
 
     pub fn replace_parser_stream_document_from_snapshot(
-        &mut self,
+        &self,
         document: ParserStreamDocumentSnapshot,
     ) {
         self.inner.replace_parser_stream_document(document.into())
     }
 
-    pub fn drain_ready_parser_scripts(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_ready_parser_scripts(&self) -> Vec<NativeNodeId> {
         self.inner.drain_ready_parser_scripts()
     }
 
-    pub fn drain_discovered_async_prefetch_candidates(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_discovered_async_prefetch_candidates(&self) -> Vec<NativeNodeId> {
         self.inner.drain_discovered_async_prefetch_candidates()
     }
 
-    pub fn drain_discovered_modulepreload_link_candidates(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_discovered_modulepreload_link_candidates(&self) -> Vec<NativeNodeId> {
         self.inner.drain_discovered_modulepreload_link_candidates()
     }
 
-    pub fn drain_discovered_parser_meta_csp_candidates(&mut self) -> Vec<NativeNodeId> {
+    pub fn drain_discovered_parser_meta_csp_candidates(&self) -> Vec<NativeNodeId> {
         self.inner.drain_discovered_parser_meta_csp_candidates()
     }
 
-    pub fn mark_script_already_started(&mut self, node_id: NativeNodeId) {
+    pub fn mark_script_already_started(&self, node_id: NativeNodeId) {
         // The streaming parser and the live runtime intentionally share DOM snapshots during
         // parse-time execution. When runtime code claims ownership of a parser-discovered script
         // without executing it immediately (phase 2 `defer` / external `async`), we still need
@@ -1048,23 +1057,23 @@ impl DocumentStream {
 }
 
 struct RuntimeDomSinksParserStep<'a> {
-    stream: &'a mut DocumentStream,
+    stream: &'a DocumentStream,
 }
 
 impl RuntimeDomSinksParserStep<'_> {
-    fn feed(&mut self, chunk: &str) {
+    fn feed(&self, chunk: &str) {
         self.stream.inner.feed(chunk);
     }
 
-    fn pump_parser_step(&mut self, chunk: &str) -> ParserPumpOutcome {
+    fn pump_parser_step(&self, chunk: &str) -> ParserPumpOutcome {
         self.stream.pump_parser_step(chunk)
     }
 
-    fn pump_parser_inserted_step(&mut self, chunk: &str) -> ParserPumpOutcome {
+    fn pump_parser_inserted_step(&self, chunk: &str) -> ParserPumpOutcome {
         self.stream.inner.pump_parser_inserted_step(chunk)
     }
 
-    fn pump_next_parser_step(&mut self, max_bytes: usize) -> ParserPumpOutcome {
+    fn pump_next_parser_step(&self, max_bytes: usize) -> ParserPumpOutcome {
         self.stream.pump_next_parser_step(max_bytes)
     }
 }
@@ -1354,6 +1363,18 @@ impl Drop for ParserInputContext {
 }
 
 impl ParseHandle {
+    pub(super) fn owner_interrupted() -> Self {
+        Self {
+            identity: ParseHandleIdentity::OwnerInterrupted,
+            element_name: None,
+            parser_flags: ParserElementFlags::default(),
+        }
+    }
+
+    pub(super) fn is_owner_interrupted(&self) -> bool {
+        self.identity == ParseHandleIdentity::OwnerInterrupted
+    }
+
     pub(super) fn new(node_id: NativeNodeId, element_name: Option<Rc<QualName>>) -> Self {
         Self {
             identity: ParseHandleIdentity::DomNode(node_id),
@@ -1385,7 +1406,8 @@ impl ParseHandle {
     pub(super) fn dom_node_id(&self) -> Option<NativeNodeId> {
         match self.identity {
             ParseHandleIdentity::DomNode(node_id) => Some(node_id),
-            ParseHandleIdentity::SyntheticFragmentContext => None,
+            ParseHandleIdentity::SyntheticFragmentContext
+            | ParseHandleIdentity::OwnerInterrupted => None,
         }
     }
 
@@ -1431,6 +1453,14 @@ impl DocumentSink {
             mutation(&mut target)
         };
         delivery.consume();
+    }
+
+    pub(super) fn finish_parser_dom_mutations(&self) -> std::ops::ControlFlow<()> {
+        // Do not retain the target borrow while invoking JavaScript. The tree
+        // builder calls this after updating its open-element stack, so nested
+        // document.write() sees the completed token's insertion state.
+        let finish = self.target.borrow().mutation_finisher();
+        finish.map_or(std::ops::ControlFlow::Continue(()), |finish| finish())
     }
 
     pub(super) fn new(target: ParserStreamHtmlTreeSinkTarget) -> Self {
@@ -1837,7 +1867,7 @@ mod tests {
     }
 
     fn parse_test_document_with_scripting(html: &str, scripting_enabled: bool) -> NativeDom {
-        let mut stream = HtmlParser::with_scripting_enabled(scripting_enabled)
+        let stream = HtmlParser::with_scripting_enabled(scripting_enabled)
             .start_document(Url::parse("https://example.test/").expect("test url"));
         stream.feed(html);
         stream.finish()

@@ -26,12 +26,19 @@ use super::html_chunks;
 
 pub trait ParserMutationEffectConsumer {
     fn consume_parser_mutation_effects(&mut self, effects: DomMutationEffects);
+
+    /// Run callbacks after the tree builder has completed the current token.
+    /// Break if a callback suspended or canceled the owning parser session.
+    fn finish_parser_dom_mutations(&mut self) -> std::ops::ControlFlow<()> {
+        std::ops::ControlFlow::Continue(())
+    }
 }
 
 #[derive(Clone, Copy)]
 struct ParserMutationEffectSink {
     data: NonNull<()>,
     consume: unsafe fn(NonNull<()>, DomMutationEffects),
+    finish: unsafe fn(NonNull<()>) -> std::ops::ControlFlow<()>,
 }
 
 impl ParserMutationEffectSink {
@@ -45,10 +52,23 @@ impl ParserMutationEffectSink {
             unsafe { data.cast::<T>().as_mut() }.consume_parser_mutation_effects(effects);
         }
 
+        unsafe fn finish_impl<T: ParserMutationEffectConsumer>(
+            data: NonNull<()>,
+        ) -> std::ops::ControlFlow<()> {
+            // SAFETY: the same scoped consumer owns both callbacks.
+            unsafe { data.cast::<T>().as_mut() }.finish_parser_dom_mutations()
+        }
+
         Self {
             data: NonNull::from(consumer).cast(),
             consume: consume_impl::<T>,
+            finish: finish_impl::<T>,
         }
+    }
+
+    fn finish(self) -> std::ops::ControlFlow<()> {
+        // SAFETY: the parser step keeps the consumer alive until this callback returns.
+        unsafe { (self.finish)(self.data) }
     }
 
     fn consume(self, effects: DomMutationEffects) {
@@ -1954,6 +1974,7 @@ pub(super) struct ParserStreamHtmlTreeSinkTarget {
     /// Runtime-owned read/mutation/effect sinks for the current parser step.
     /// Present only while a runtime DOM sink step is active.
     runtime_dom_sinks: Option<ParserRuntimeDomSinks>,
+    suspended_runtime_dom_sinks: Vec<ParserRuntimeDomSinks>,
     /// Set when html5ever resolves the next insertion point to template
     /// contents. The handle also identifies the inert owner Document to use
     /// when creating the next node.
@@ -1984,6 +2005,13 @@ impl Drop for ParserRuntimeDomTargetStep<'_> {
 }
 
 impl ParserStreamHtmlTreeSinkTarget {
+    pub(super) fn mutation_finisher(
+        &self,
+    ) -> Option<impl FnOnce() -> std::ops::ControlFlow<()> + use<>> {
+        let sink = self.runtime_dom_sinks.as_ref()?.mutation_effect_sink();
+        Some(move || sink.finish())
+    }
+
     fn new(final_url: Url) -> Self {
         Self::new_with_declarative_shadow_roots(final_url, true)
     }
@@ -2000,6 +2028,7 @@ impl ParserStreamHtmlTreeSinkTarget {
             parser_owner_document_handle: Some(document_handle),
             parser_document_url: Some(final_url),
             runtime_dom_sinks: None,
+            suspended_runtime_dom_sinks: Vec::new(),
             next_template_contents_insertion: None,
             open_template_element_depth: 0,
             pending_open_parser_element: None,
@@ -2019,6 +2048,7 @@ impl ParserStreamHtmlTreeSinkTarget {
             parser_owner_document_handle: Some(document_handle),
             parser_document_url: Some(final_url),
             runtime_dom_sinks: None,
+            suspended_runtime_dom_sinks: Vec::new(),
             next_template_contents_insertion: None,
             open_template_element_depth: 0,
             pending_open_parser_element: None,
@@ -2055,6 +2085,7 @@ impl ParserStreamHtmlTreeSinkTarget {
             parser_owner_document_handle: Some(document_handle),
             parser_document_url: Some(final_url),
             runtime_dom_sinks: None,
+            suspended_runtime_dom_sinks: Vec::new(),
             next_template_contents_insertion: None,
             open_template_element_depth: 0,
             pending_open_parser_element: None,
@@ -2078,6 +2109,7 @@ impl ParserStreamHtmlTreeSinkTarget {
             parser_owner_document_handle: Some(owner_document_handle),
             parser_document_url: Some(final_url),
             runtime_dom_sinks: Some(runtime_dom_sinks),
+            suspended_runtime_dom_sinks: Vec::new(),
             next_template_contents_insertion: None,
             open_template_element_depth: 0,
             pending_open_parser_element: None,
@@ -3432,10 +3464,12 @@ impl ParserStreamHtmlTreeSinkTarget {
 
     pub(super) fn enter_runtime_dom_sinks_parse_step(&mut self, sinks: ParserRuntimeDomSinks) {
         assert!(
-            self.owned_dom_host.is_none() && self.runtime_dom_sinks.is_none(),
-            "parser target should not already hold an owned DOM backend or sink bundle when entering a runtime-DOM sink step"
+            self.owned_dom_host.is_none(),
+            "parser target should not hold an owned DOM backend when entering a runtime-DOM sink step"
         );
-        self.runtime_dom_sinks = Some(sinks);
+        if let Some(previous) = self.runtime_dom_sinks.replace(sinks) {
+            self.suspended_runtime_dom_sinks.push(previous);
+        }
     }
 
     #[cfg(test)]
@@ -3462,7 +3496,7 @@ impl ParserStreamHtmlTreeSinkTarget {
             self.runtime_dom_sinks.is_some(),
             "parser target should hold runtime DOM sinks during a runtime-DOM sink step"
         );
-        self.runtime_dom_sinks = None;
+        self.runtime_dom_sinks = self.suspended_runtime_dom_sinks.pop();
     }
 
     pub(super) fn replace_parser_stream_document(&mut self, document: NativeDom) {
@@ -3524,7 +3558,7 @@ pub(super) fn new_live_fragment_root_html_tree_sink_stream(
     allow_declarative_shadow_roots: bool,
     scripting_enabled: bool,
 ) -> HtmlTreeSinkStream {
-    let mut stream = HtmlTreeSinkStream::from_fragment_target(
+    let stream = HtmlTreeSinkStream::from_fragment_target(
         ParserStreamHtmlTreeSinkTarget::new_live_fragment_root(
             final_url,
             fragment_handle,
@@ -3625,8 +3659,7 @@ fn parser_stream_html_tree_sink_target_builds_dom_and_records_parser_state() {
     let html = "<!doctype html><html><head><template id=t><span>inner</span></template><script>window.inline = true;</script><script async src=\"/async.js\"></script></head><body><div>hello</div></body></html>";
     let url = Url::parse("https://example.test/").expect("test url");
 
-    let mut live =
-        crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url.clone());
+    let live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url.clone());
     for chunk in html_chunks(html) {
         live.feed(chunk);
     }
@@ -3686,7 +3719,7 @@ fn parser_stream_async_prefetch_uses_shared_script_type_classification() {
     );
     let url = Url::parse("https://example.test/").expect("test url");
 
-    let mut live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     for chunk in html_chunks(html) {
         live.feed(chunk);
     }
@@ -3723,7 +3756,7 @@ fn parser_stream_discovers_modulepreload_link_candidates() {
     );
     let url = Url::parse("https://example.test/").expect("test url");
 
-    let mut live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut modulepreload_candidates = Vec::new();
     for chunk in html_chunks(html) {
         let outcome = live.pump_parser_step(chunk);
@@ -3757,8 +3790,7 @@ fn parser_stream_discovers_modulepreload_link_candidates() {
 fn parser_stream_html_tree_sink_target_matches_parser_for_parser_created_flag() {
     let html = "<!doctype html><html><body><script src=\"/app.js\"></script><style>@import url('/a.css');</style></body></html>";
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut live =
-        crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url.clone());
+    let live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url.clone());
     for chunk in html_chunks(html) {
         live.feed(chunk);
     }
@@ -3783,7 +3815,7 @@ fn parser_stream_html_tree_sink_target_matches_parser_for_parser_created_flag() 
 #[test]
 fn parser_stream_runtime_dom_sinks_pump_preserves_runtime_mutation_effects() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut dom_host = stream.take_parser_stream_dom_host();
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
@@ -3822,7 +3854,7 @@ fn parser_stream_runtime_dom_sinks_pump_preserves_runtime_mutation_effects() {
 #[test]
 fn parser_stream_runtime_dom_consumer_is_cleared_when_pump_unwinds() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut dom_host = stream.take_parser_stream_dom_host();
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
@@ -3919,7 +3951,7 @@ fn parser_stream_runtime_dom_sinks_routes_parser_state_writes_through_sink() {
 #[test]
 fn parser_stream_runtime_dom_sinks_routes_declarative_shadow_attach_through_sink() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut dom_host = stream.take_parser_stream_dom_host();
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
@@ -4011,7 +4043,7 @@ fn parser_stream_runtime_dom_sinks_routes_tree_adjacency_reads_through_sink() {
 #[test]
 fn parser_stream_runtime_dom_sinks_routes_script_planning_reads_through_sink() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut dom_host = stream.take_parser_stream_dom_host();
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
@@ -4075,7 +4107,7 @@ fn parser_stream_runtime_dom_sinks_routes_script_planning_reads_through_sink() {
 #[test]
 fn parser_stream_runtime_dom_sinks_routes_stylesheet_blocking_reads_through_sink() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut dom_host = stream.take_parser_stream_dom_host();
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
@@ -4122,7 +4154,7 @@ fn parser_stream_live_document_root_writes_detached_document() {
     let child_document = dom_host.create_detached_html_document_with_url(child_url.clone());
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
-    let mut stream = crate::DocumentStream::new_scripting_enabled_live_document_root_for_testing(
+    let stream = crate::DocumentStream::new_scripting_enabled_live_document_root_for_testing(
         child_url,
         child_document,
     );
@@ -4181,7 +4213,7 @@ fn parser_stream_live_fragment_root_writes_fragment() {
             effects: &mut effects,
             panic_on_mutation: false,
         };
-        let mut stream = crate::DocumentStream::new_live_fragment_root_for_testing(
+        let stream = crate::DocumentStream::new_live_fragment_root_for_testing(
             url,
             fragment,
             document,
@@ -4305,7 +4337,7 @@ fn live_fragment_parser_uses_template_contents_owner_document() {
 #[test]
 fn parser_stream_element_creation_sink_can_own_token_attributes() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut dom_host = stream.take_parser_stream_dom_host();
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
@@ -4351,7 +4383,7 @@ fn parser_stream_element_creation_sink_can_own_token_attributes() {
 #[test]
 fn parser_stream_element_creation_request_reports_intended_parent() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     let mut dom_host = stream.take_parser_stream_dom_host();
     let document = dom_host.document_handle();
     let ptr = &mut dom_host as *mut DomHost;
@@ -4438,7 +4470,7 @@ fn parser_stream_element_creation_sink_uses_live_document_root_handle() {
     let child_document = dom_host.create_detached_html_document_with_url(child_url.clone());
     let ptr = &mut dom_host as *mut DomHost;
     let mut effects = DomMutationEffects::default();
-    let mut stream = crate::DocumentStream::new_scripting_enabled_live_document_root_for_testing(
+    let stream = crate::DocumentStream::new_scripting_enabled_live_document_root_for_testing(
         child_url,
         child_document,
     );
@@ -4479,7 +4511,7 @@ fn parser_stream_element_creation_sink_uses_live_document_root_handle() {
 #[test]
 fn parser_stream_owned_bootstrap_builds_dom_without_mutation_owner() {
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let stream = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
 
     stream.feed(
         "<!doctype html><html><body><div id='a'></div><script src='/app.js'></script></body></html>",
@@ -4503,7 +4535,7 @@ fn parser_stream_owned_bootstrap_builds_dom_without_mutation_owner() {
 fn parser_stream_does_not_prefetch_whitespace_type_async_script() {
     let html = "<!doctype html><html><head><script async src=\"/data.js\" type=\"   \"></script></head><body></body></html>";
     let url = Url::parse("https://example.test/").expect("test url");
-    let mut live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
+    let live = crate::DocumentStream::new_scripting_enabled_parser_stream_for_testing(url);
     for chunk in html_chunks(html) {
         live.feed(chunk);
     }

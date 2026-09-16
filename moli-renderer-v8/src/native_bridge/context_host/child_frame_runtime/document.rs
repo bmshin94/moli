@@ -432,14 +432,6 @@ fn child_document_close_callback<'s>(
             rv.set_undefined();
             return;
         }
-        if host.child_document_parser_is_active(handle)
-            && host
-                .child_current_script_handle_for_document(document_handle)
-                .is_some()
-        {
-            rv.set_undefined();
-            return;
-        }
         let script_context = match unsafe { &mut *host_ptr }
             .ensure_prebootstrapped_child_default_context(scope, handle)
         {

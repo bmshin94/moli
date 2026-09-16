@@ -202,7 +202,7 @@ impl std::fmt::Debug for ParserInsertionController {
 }
 
 impl ParserInsertionController {
-    fn for_stream(stream: &ParserStreamHandle) -> Self {
+    pub(crate) fn for_stream(stream: &ParserStreamHandle) -> Self {
         let input_session = stream.borrow().script_input_session();
         Self {
             input_session,
@@ -224,18 +224,6 @@ impl ParserInsertionController {
             .expect("synchronous parser insertion permission outlived its parser session");
         let stream = stream.borrow();
         operation(&stream)
-    }
-
-    pub(crate) fn with_parser_stream_mut<R>(
-        &self,
-        operation: impl FnOnce(&mut crate::parser::DocumentStream) -> R,
-    ) -> R {
-        let stream = self
-            .parser_stream
-            .upgrade()
-            .expect("synchronous parser insertion permission outlived its parser session");
-        let mut stream = stream.borrow_mut();
-        operation(&mut stream)
     }
 }
 
@@ -2091,7 +2079,7 @@ mod tests {
     #[test]
     fn parser_roundtrip_through_live_runtime_keeps_style_import_text_before_later_script() {
         let parser = HtmlParser::SCRIPTING_ENABLED;
-        let mut stream = parser.start_document(Url::parse("https://example.com/").unwrap());
+        let stream = parser.start_document(Url::parse("https://example.com/").unwrap());
         let html = "<!doctype html><html><head><script>window.start = 1;</script><style>@import url('/slow.css');</style><script>window.afterStyle = 1;</script><script src='/blocking.js'></script></head><body><div id='late'>late</div></body></html>";
 
         let crate::parser::ParserPumpStep::Yield(crate::parser::ParserYield::Script(_)) =
@@ -2150,7 +2138,7 @@ mod tests {
     #[test]
     fn parser_roundtrip_after_live_dom_mutation_keeps_later_body_hidden() {
         let parser = HtmlParser::SCRIPTING_ENABLED;
-        let mut stream = parser.start_document(Url::parse("https://example.com/").unwrap());
+        let stream = parser.start_document(Url::parse("https://example.com/").unwrap());
         let html = "<!doctype html><html><head><script>window.start = 1;</script><script>window.after = 1;</script></head><body><div id='late'>late</div></body></html>";
 
         let crate::parser::ParserPumpStep::Yield(crate::parser::ParserYield::Script(_)) =
