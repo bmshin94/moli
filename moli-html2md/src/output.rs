@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 /// Finished Markdown fragments. Joining outputs moves their roots, not their
 /// text or descendant vectors. Both flattening and destruction are iterative.
 #[derive(Default)]
@@ -9,8 +11,7 @@ pub(crate) struct Output {
 }
 
 enum Part {
-    Text(String),
-    Literal(&'static str),
+    Text(Cow<'static, str>),
     Group(Output),
 }
 
@@ -37,7 +38,7 @@ impl Output {
         };
     }
 
-    pub(crate) fn push_text(&mut self, text: String) {
+    pub(crate) fn push_text(&mut self, text: Cow<'static, str>) {
         if let Some(last) = text.chars().next_back() {
             self.extend_tail(
                 text.len(),
@@ -45,17 +46,6 @@ impl Output {
                 text.len() - text.trim_end_matches('\n').len(),
             );
             self.parts.push(Part::Text(text));
-        }
-    }
-
-    pub(crate) fn push_literal(&mut self, text: &'static str) {
-        if let Some(last) = text.chars().next_back() {
-            self.extend_tail(
-                text.len(),
-                last,
-                text.len() - text.trim_end_matches('\n').len(),
-            );
-            self.parts.push(Part::Literal(text));
         }
     }
 
@@ -71,7 +61,7 @@ impl Output {
         // allocation instead of adding a copy to the common, non-table path.
         if self.parts.len() == 1 {
             match self.parts.pop().expect("one output fragment") {
-                Part::Text(text) => return text,
+                Part::Text(Cow::Owned(text)) => return text,
                 part => self.parts.push(part),
             }
         }
@@ -85,11 +75,6 @@ impl Output {
                     record_copy(fragment.len());
                     text.push_str(&fragment);
                 }
-                Part::Literal(fragment) => {
-                    #[cfg(test)]
-                    record_copy(fragment.len());
-                    text.push_str(fragment);
-                }
                 Part::Group(mut output) => pending.extend(output.parts.drain(..).rev()),
             }
         }
@@ -100,7 +85,15 @@ impl Output {
 impl From<String> for Output {
     fn from(text: String) -> Self {
         let mut output = Self::default();
-        output.push_text(text);
+        output.push_text(text.into());
+        output
+    }
+}
+
+impl From<&'static str> for Output {
+    fn from(text: &'static str) -> Self {
+        let mut output = Self::default();
+        output.push_text(text.into());
         output
     }
 }
@@ -124,7 +117,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn record_copy(bytes: usize) {
+fn record_copy(bytes: usize) {
     COPIED_BYTES.with(|count| count.set(count.get() + bytes));
 }
 

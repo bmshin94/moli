@@ -6,11 +6,11 @@ pub(crate) struct Cell<Id> {
 }
 
 pub(crate) struct Table<Id> {
-    pub(crate) captions: Vec<Cell<Id>>,
-    pub(crate) cells: std::vec::IntoIter<Cell<Id>>,
-    pub(crate) content: Vec<Output>,
-    pub(crate) in_cell: bool,
-    pub(crate) has_complex_content: bool,
+    captions: Vec<Cell<Id>>,
+    cells: std::vec::IntoIter<Cell<Id>>,
+    content: Vec<Output>,
+    in_cell: bool,
+    has_complex_content: bool,
     rows: Vec<usize>,
     separators: Vec<&'static str>,
     has_header: bool,
@@ -140,12 +140,55 @@ impl<Id: Copy> Table<Id> {
         Some(())
     }
 
+    pub(crate) fn take_captions(&mut self) -> Vec<Cell<Id>> {
+        std::mem::take(&mut self.captions)
+    }
+
+    pub(crate) fn next_cell(&mut self) -> Option<Cell<Id>> {
+        debug_assert!(
+            !self.in_cell,
+            "finish the current cell before starting another"
+        );
+        let cell = self.cells.next()?;
+        self.in_cell = true;
+        Some(cell)
+    }
+
+    pub(crate) fn finish_cell(&mut self, content: Output) {
+        debug_assert!(self.in_cell, "cell conversion must be active");
+        self.content.push(content);
+        self.in_cell = false;
+    }
+
+    pub(crate) fn visit_element(&mut self, tag: &str) {
+        if self.in_cell
+            && matches!(
+                tag,
+                "table"
+                    | "pre"
+                    | "blockquote"
+                    | "ul"
+                    | "ol"
+                    | "li"
+                    | "hr"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+            )
+        {
+            self.has_complex_content = true;
+        }
+    }
+
     pub(crate) fn finish(self) -> Output {
         if self.has_complex_content {
             let mut output = Output::default();
             for cell in self.content.into_iter().filter(|cell| !cell.is_empty()) {
                 if !output.is_empty() {
-                    output.push_literal("\n\n");
+                    output.push_text("\n\n".into());
                 }
                 output.append(cell);
             }

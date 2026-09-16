@@ -38,11 +38,11 @@ their children as ordinary content. Comments and doctypes produce no output.
   tasks. Raw code text uses the same iterative traversal with formatting disabled.
 - Tables inspect their direct sections, rows and cells before conversion. Nested
   content uses the task stack; eligibility checks never rescan cell descendants.
-- Finished table cells form an owned fragment tree. Fallback joins and writes to
-  parent buffers move fragment roots without copying descendant text; the final
-  output is flattened in one iterative pass. Fragment destruction is iterative
-  too. Quotes, headings and list items still materialize their captured text
-  when rewriting its lines.
+- Finished blocks and table cells form an owned fragment tree. Fallback joins
+  and writes to parent buffers move fragment roots without copying descendant
+  text; the final output is flattened in one iterative pass. Fragment destruction
+  is iterative too. Quotes, headings and list items still materialize their
+  captured text when rewriting its lines.
 - List spacing follows block boundaries recorded during conversion. Nested
   lists keep their own spacing; list items need no preliminary DOM scan.
 - Ordered lists use `start` followed by sequential numbers, like Turndown core.
@@ -102,8 +102,9 @@ Targeted regressions also cover empty elements, links, attributes in headings an
 tables, code whitespace and language names, list numbering, and loose lists.
 An operation-count regression checks nested table fallback at 64, 128 and 256
 levels with 256 text bytes per level, both with and without headers. It bounds
-bytes copied during fragment materialization and writes to parent buffers by
-output size, so a repeated flatten/copy regression fails without timing thresholds.
+bytes copied during fragment materialization by output size; completed blocks
+move into parent buffers without copying their text. A repeated flatten/copy
+regression fails without timing thresholds.
 Dropping 20,000 nested fragments is also tested on a 64 KiB thread stack.
 Emphasis tests cover adjacent links that can use Markdown delimiters and
 intraword link boundaries that still require inline HTML.

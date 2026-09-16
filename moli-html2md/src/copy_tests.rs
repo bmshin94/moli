@@ -30,8 +30,9 @@ fn nested_table_fallback_copies_text_linearly() {
                 support::rendered_html(&actual).matches("<table>").count(),
                 1
             );
-            // Count actual bytes copied when materializing fragments or writing
-            // strings back to a parent, not elapsed time or recursion depth.
+            // Count actual bytes copied when materializing fragments; completed
+            // blocks move into parents without copying their text. This measures
+            // work rather than elapsed time or recursion depth.
             assert!(
                 copied <= 2 * actual.len(),
                 "depth={depth}, output={}, copied={copied}",

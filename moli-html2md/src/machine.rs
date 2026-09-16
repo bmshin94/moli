@@ -82,14 +82,14 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                             quote.push_str(line);
                         }
                     }
-                    self.writer().block(&quote, 2, 2);
+                    self.writer().block(quote.into(), 2, 2);
                 }
                 Task::EndHeading(level) => {
                     let content = self.take_writer().into_string();
                     if !content.is_empty() {
                         let heading =
                             format!("{} {}", "#".repeat(level), content.replace('\n', " "));
-                        self.writer().block(&heading, 2, 2);
+                        self.writer().block(heading.into(), 2, 2);
                     } else {
                         self.writer().boundary(2);
                     }
@@ -98,7 +98,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     self.lists.pop();
                     let content = self.take_writer();
                     let has_blocks = self.writer().has_blocks;
-                    self.writer().block_output(content, before, 2);
+                    self.writer().block(content, before, 2);
                     if before == 1 {
                         // A nested list alone does not make its parent item loose.
                         self.writer().has_blocks = has_blocks;
@@ -127,7 +127,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     let list = self.lists.last_mut().expect("list item belongs to a list");
                     let separation = if loose || list.loose { 2 } else { 1 };
                     list.loose |= loose;
-                    self.writer().block(&item, separation, separation);
+                    self.writer().block(item.into(), separation, separation);
                 }
                 Task::RawChildren(Some(node), depth, inline) => self.raw_node(node, depth, inline),
                 Task::EndCode => {
@@ -140,8 +140,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                 Task::EndTableCell => {
                     let content = self.take_writer();
                     let table = self.tables.last_mut().expect("cell belongs to a table");
-                    table.content.push(content);
-                    table.in_cell = false;
+                    table.finish_cell(content);
                 }
             }
         }
@@ -193,26 +192,8 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
             NodeKind::Other => return,
             NodeKind::Element(tag) => tag,
         };
-        if let Some(table) = self.tables.last_mut()
-            && table.in_cell
-            && matches!(
-                tag,
-                "table"
-                    | "pre"
-                    | "blockquote"
-                    | "ul"
-                    | "ol"
-                    | "li"
-                    | "hr"
-                    | "h1"
-                    | "h2"
-                    | "h3"
-                    | "h4"
-                    | "h5"
-                    | "h6"
-            )
-        {
-            table.has_complex_content = true;
+        if let Some(table) = self.tables.last_mut() {
+            table.visit_element(tag);
         }
         match tag {
             "head" | "script" | "style" | "noscript" | "template" => return,
@@ -221,7 +202,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                 return;
             }
             "hr" => {
-                self.writer().block("---", 2, 2);
+                self.writer().block("---".into(), 2, 2);
                 return;
             }
             "strong" | "b" => self.style(Style::Strong),
@@ -290,7 +271,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                 if let Some(mut table) =
                     Table::from_dom(self.dom, node, depth, self.options.max_depth)
                 {
-                    let captions = std::mem::take(&mut table.captions);
+                    let captions = table.take_captions();
                     self.tables.push(table);
                     self.tasks.push(Task::TableCell);
                     for caption in captions.into_iter().rev() {
@@ -312,8 +293,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
 
     fn table_cell(&mut self) {
         let table = self.tables.last_mut().expect("table conversion is active");
-        if let Some(cell) = table.cells.next() {
-            table.in_cell = true;
+        if let Some(cell) = table.next_cell() {
             self.capture();
             self.writer().table_cell();
             self.tasks.push(Task::TableCell);
@@ -321,7 +301,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
             self.children(cell.node, cell.depth + 1);
         } else {
             let table = self.tables.pop().expect("table conversion is active");
-            self.writer().block_output(table.finish(), 2, 2);
+            self.writer().block(table.finish(), 2, 2);
         }
     }
 
@@ -444,7 +424,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
             block.push('\n');
         }
         block.push_str(&fence);
-        self.writer().block(&block, 2, 2);
+        self.writer().block(block.into(), 2, 2);
     }
 }
 

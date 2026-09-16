@@ -244,21 +244,7 @@ impl<'a> Writer<'a> {
         self.line_digits = Some(0);
     }
 
-    pub(crate) fn block(&mut self, text: &str, before: usize, after: usize) {
-        if text.is_empty() {
-            self.boundary(before.max(after));
-            return;
-        }
-        self.boundary(before);
-        self.flush_breaks();
-        #[cfg(test)]
-        crate::output::record_copy(text.len());
-        self.output.push_str(text);
-        self.line_digits = None;
-        self.boundary(after);
-    }
-
-    pub(crate) fn block_output(&mut self, output: Output, before: usize, after: usize) {
+    pub(crate) fn block(&mut self, output: Output, before: usize, after: usize) {
         if output.is_empty() {
             self.boundary(before.max(after));
             return;
@@ -267,7 +253,8 @@ impl<'a> Writer<'a> {
         // offsets local to the current String, never inside a finished block.
         self.boundary(before);
         self.flush_breaks();
-        self.prefix.push_text(std::mem::take(&mut self.output));
+        self.prefix
+            .push_text(std::mem::take(&mut self.output).into());
         self.prefix.append(output);
         self.line_digits = None;
         self.boundary(after);
@@ -279,7 +266,7 @@ impl<'a> Writer<'a> {
         self.flush_spaces(false);
         let end = self.output.trim_end_matches(is_space).len();
         self.output.truncate(end);
-        self.prefix.push_text(self.output);
+        self.prefix.push_text(self.output.into());
         self.prefix
     }
 
