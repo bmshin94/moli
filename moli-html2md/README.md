@@ -64,13 +64,15 @@ and cell line breaks and paragraph boundaries use inline `<br>` tags. Attribute
 newlines are encoded or normalized so they cannot break a table row. GFM supplies
 missing trailing cells in short rows; the converter does not allocate a padded grid.
 
-Complex tables retain Turndown core's ordinary block expansion, in DOM order with
-blank lines between cells. This includes non-unit spans, multiple `thead` rows,
-rows wider than an explicit header, or cells containing nested tables, lists,
-headings, quotes or preformatted blocks. Inner simple tables can still produce
-GFM when their containing layout table is expanded. Roles, borders and CSS do
-not select another conversion path, so structurally simple layout tables also
-produce GFM. Complex layouts remain readable blocks instead of raw HTML tables.
+Tables with `role="presentation"` or `role="none"` retain ordinary block expansion,
+in DOM order with blank lines between cells, even when structurally simple. Role
+matching ignores ASCII case and surrounding HTML whitespace. The same fallback
+applies to complex tables: non-unit spans, multiple `thead` rows, rows wider than
+an explicit header, or cells containing nested tables, lists, headings, quotes
+or preformatted blocks. Inner simple tables can still produce GFM when their
+containing layout table is expanded. Other roles, borders and CSS do not select
+another conversion path. Complex layouts remain readable blocks instead of raw
+HTML tables.
 
 Supported output includes headings, paragraphs, emphasis, strikethrough, links,
 images, lists, blockquotes, hard breaks, and fenced code. Inline HTML is used when

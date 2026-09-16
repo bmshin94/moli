@@ -55,14 +55,55 @@ fn wrapping_a_table_preserves_its_content() {
 }
 
 #[test]
-fn table_roles_do_not_change_conversion() {
+fn presentational_tables_expand_into_blocks() {
+    for role in ["presentation", "none", " PRESENTATION ", "\tNoNe\r\n"] {
+        for header in [
+            "",
+            "<tr><th>Name</th><th>Value</th></tr>",
+            "<thead><tr><td>Name</td><td>Value</td></tr></thead>",
+        ] {
+            let html = format!(
+                "<table role='{role}'><caption><strong>Title</strong></caption>{header}<tbody><tr><td><a href='/one'>one</a></td><td><code>two|three</code></td></tr></tbody><tfoot><tr><td>end</td></tr></tfoot></table>"
+            );
+            let heading = if header.is_empty() {
+                ""
+            } else {
+                "Name\n\nValue\n\n"
+            };
+            assert_eq!(
+                markdown(&html),
+                format!("**Title**\n\n{heading}[one](/one)\n\n`two|three`\n\nend"),
+                "{html}"
+            );
+        }
+    }
+}
+
+#[test]
+fn presentational_table_roles_do_not_propagate_to_nested_tables() {
+    for role in ["presentation", "none"] {
+        let inner =
+            "<table><tr><th>Name</th><th>Value</th></tr><tr><td>one</td><td>two</td></tr></table>";
+        let html = format!(
+            "<table role='{role}'><tr><td>before</td><td>{inner}</td><td>after</td></tr></table>"
+        );
+        assert_eq!(
+            markdown(&html),
+            "before\n\n| Name | Value |\n| --- | --- |\n| one | two |\n\nafter",
+            "{html}"
+        );
+    }
+}
+
+#[test]
+fn other_table_roles_do_not_change_conversion() {
     for role in [
         "",
-        "presentation",
-        "none",
-        " PRESENTATION ",
         "table",
         "grid",
+        "treegrid",
+        "presentationish",
+        "none-other",
     ] {
         let html = format!(
             "<table role='{role}'><tr><th>Name</th><th>Value</th></tr><tr><td>one</td><td>two</td></tr></table>"

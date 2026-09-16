@@ -26,6 +26,12 @@ impl<Id: Copy> Table<Id> {
         depth: usize,
         max_depth: usize,
     ) -> Option<Self> {
+        if dom.attribute(node, "role").is_some_and(|role| {
+            let role = role.trim_matches(is_space);
+            role.eq_ignore_ascii_case("presentation") || role.eq_ignore_ascii_case("none")
+        }) {
+            return None;
+        }
         let mut table = Self {
             captions: Vec::new(),
             cells: Vec::new().into_iter(),
