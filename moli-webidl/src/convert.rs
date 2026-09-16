@@ -1207,7 +1207,13 @@ fn own_property_names<'s>(
 ) -> Result<v8::Local<'s, v8::Array>, WebIdlError> {
     let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
     let mut scope = try_catch.init();
-    match object.get_own_property_names(&scope, v8::GetPropertyNamesArgs::default()) {
+    // WebIDL record conversion starts with [[OwnPropertyKeys]], including symbols,
+    // and then considers only enumerable properties. V8's default arguments skip
+    // symbols, which would bypass the record key conversion that rejects them.
+    let property_names_args = v8::GetPropertyNamesArgsBuilder::new()
+        .property_filter(v8::PropertyFilter::ONLY_ENUMERABLE)
+        .build();
+    match object.get_own_property_names(&scope, property_names_args) {
         Some(properties) => Ok(properties),
         None if scope.has_caught() => {
             let _ = scope.rethrow();

@@ -6773,6 +6773,45 @@ fn webidl_initializer_unions_observe_iterators_on_platform_objects() {
 }
 
 #[test]
+fn webidl_initializer_records_reject_enumerable_symbol_keys() {
+    let mut vm = new_storage_test_vm("https://initializer-symbol-record.test/");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const consumers = [
+    ['Headers', input => new Headers(input)],
+    ['URLSearchParams', input => new URLSearchParams(input)],
+    ['Request', input => new Request('https://initializer-symbol-record.test/', {headers: input})],
+    ['Response', input => new Response(null, {headers: input})],
+  ];
+  const symbols = [
+    ['Symbol.iterator', Symbol.iterator],
+    ['ordinary symbol', Symbol('x')],
+  ];
+  for (const [target, create] of consumers) {
+    for (const [description, symbol] of symbols) {
+      const input = {};
+      Object.defineProperty(input, symbol, {
+        enumerable: true,
+        value: undefined,
+      });
+      let caught;
+      try { create(input); } catch (error) { caught = error; }
+      if (!(caught instanceof TypeError)) {
+        throw new Error(target + ' must convert its enumerable ' + description + ' record key');
+      }
+    }
+  }
+  return 'ok';
+})()
+"#,
+        )
+        .unwrap();
+    assert_eq!(result, "ok");
+}
+
+#[test]
 fn webidl_initializer_unions_convert_url_objects_as_records() {
     let mut vm = new_storage_test_vm("https://initializer-record.test/");
     let result = vm

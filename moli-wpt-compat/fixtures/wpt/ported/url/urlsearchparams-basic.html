@@ -665,7 +665,10 @@ test(function () {
 test(function () {
   const record = { visible: "yes" };
   const symbolKey = Symbol("hidden");
-  record[symbolKey] = "symbol";
+  Object.defineProperty(record, symbolKey, {
+    value: "symbol",
+    enumerable: false,
+  });
   Object.defineProperty(record, "hidden", {
     value: "no",
     enumerable: false,
@@ -674,7 +677,15 @@ test(function () {
   assert_equals(params.toString(), "visible=yes");
   assert_false(params.has("hidden"));
   assert_false(params.has("Symbol(hidden)"));
-}, "URLSearchParams constructor ignores non-enumerable and symbol record properties");
+}, "URLSearchParams constructor ignores non-enumerable record properties");
+
+test(function () {
+  const record = {};
+  record[Symbol("key")] = "value";
+  assert_throws_name("TypeError", function () {
+    new URLSearchParams(record);
+  }, "enumerable symbol record keys should be converted");
+}, "URLSearchParams constructor rejects enumerable symbol record keys");
 
 test(function () {
   const sequence = new URLSearchParams([
