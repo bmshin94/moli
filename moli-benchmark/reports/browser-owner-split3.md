@@ -1,8 +1,10 @@
 # Browser owner acceptance measurements, 2026-09-16
 
-Acceptance remains open. The frozen candidate has a reproducible ServiceWorker
-fallback panic, output retention grows with history, and local navigation is
-slower than main. Passing unit tests alone did not expose these outcomes.
+Acceptance remains open. The original frozen candidate below exposed a
+ServiceWorker fallback panic, growing output history and slower local navigation
+than main. The fallback was fixed in `7fa476059`; the subsequent retention
+measurements below cover bounded history. Burst throughput and the overall
+performance comparison remain open.
 
 ## Revisions and scope
 
@@ -107,6 +109,54 @@ unmodified revisions. Candidate instrumentation recorded 67,081,892 queued bytes
 plus a 33,914-byte record exceeding the existing 64 MiB transport budget.
 Instrumentation sometimes changed overload outcomes. The original failures and
 the first, overly expensive unbuffered trace measurements remain preserved.
+
+## Retention follow-up
+
+The follow-up release, built on `7fa476059`, has SHA-256
+`1913896db3fc11c934e477fd35496acc637b19fd88852bebb11e8dbda1be4ccd`.
+It applies the Worker replay policy to Page diagnostics and script reports,
+removes the duplicate context-slot console buffers and unused snapshot command,
+and stores protocol deltas without cloning the whole history for every event.
+Eviction preserves consumer positions and report revisions. Live delivery and
+late replay retain separate cursors, including Console and Log errors.
+
+The unchanged steady workload (108 navigations, 256 history reads, then
+24 batches of 512 eight-KiB logs) produced these process PSS measurements:
+
+| Output records | `7fa476059` baseline | Retention follow-up |
+| --- | ---: | ---: |
+| 0 | 68.21 MiB | 68.38 MiB |
+| 4,096 | 340.64 MiB | 123.65 MiB |
+| 8,192 | 616.35 MiB | 121.26 MiB |
+| 12,288 | 894.00 MiB | 122.61 MiB |
+| Observer attached, after GC | 912.93 MiB | 119.36 MiB |
+| Creator page closed | 70.91 MiB | 68.39 MiB |
+
+Both runs replayed the final 312 Worker records in order and delivered all
+256 subsequent live records. These are process measurements, not just the size
+of the Worker replay container. Raw results are `retention-current-baseline/`
+and `retention-steady/` in the artifact directory above.
+
+A separate Window probe alternated the default and isolated realms for the same
+24-by-512 workload. The old binary timed out on the sixth batch at the unchanged
+20-second command deadline, both during Clippy and again without compilation.
+The follow-up completed in 2.156 seconds; PSS at 4,096/8,192/12,288 records was
+128.18/128.25/128.55 MiB. Its replay contained 636 unique records with contiguous
+tails per realm, and all 256 subsequent live records arrived in order. After
+context disposal PSS was 59.70 MiB. The probe, raw wire data and both failed
+baselines are retained under `probe-window-retention.py`, `retention-window/`,
+`retention-window-baseline/` and `retention-window-baseline-idle/`.
+
+The distinct 512/1,536/2,048/4,096/4,096 burst still disconnected during its first
+4,096-record batch. `retention-burst/` retains that failure. The transport budget
+and workload were unchanged; this result does not pass throughput acceptance.
+
+For this release, fmt, strict workspace/all-targets/all-features Clippy,
+265 focused tests, 46 CDP groups / 487 scenarios, 165 WebDriver cases and the
+three shared-page lifecycle probes passed. The final full nextest run passed
+18,507 tests with 13 existing configured skips; all 91 expected panic messages
+matched the previous accepted run. See `retention-acceptance.json` for the source
+and binary checks and the separately recorded burst failure.
 
 ## Reproduction
 

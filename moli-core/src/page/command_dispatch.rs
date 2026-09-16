@@ -273,7 +273,6 @@ impl Page {
             RendererPageReply::RuntimeInspectorProtocolMessages(_) => {
                 "runtime inspector protocol messages"
             }
-            RendererPageReply::RuntimeConsoleMessageSnapshots(_) => "runtime console snapshots",
             RendererPageReply::RuntimeHeapUsage(_) => "runtime heap usage",
             RendererPageReply::DomDebuggerEventListeners(_) => {
                 "a DOMDebugger event listeners resolution"
