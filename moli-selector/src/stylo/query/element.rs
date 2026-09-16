@@ -154,7 +154,8 @@ impl<'a> TElement for QueryElement<'a> {
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
         let children = self
             .host
-            .child_handles(self.handle)
+            .flat_tree_children(self.handle)
+            .into_iter()
             .map(|handle| QueryNode {
                 host: self.host,
                 handle,
@@ -164,6 +165,10 @@ impl<'a> TElement for QueryElement<'a> {
             })
             .collect::<Vec<_>>();
         LayoutIterator(children.into_iter())
+    }
+
+    fn inheritance_parent(&self) -> Option<Self> {
+        self.as_node().traversal_parent()
     }
 
     fn is_html_element(&self) -> bool {

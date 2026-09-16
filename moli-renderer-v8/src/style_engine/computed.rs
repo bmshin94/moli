@@ -1350,14 +1350,14 @@ fn populate_inline_style_attributes_for_resolution(
     while let Some(node) = current {
         let world = engine.owner_document_world(host, node);
         let Some(world) = world else {
-            current = inherited_style_parent(host, node);
+            current = host.flat_tree_parent(node);
             continue;
         };
         if world.inline_style_metadata.csp_state(node)
             == super::InlineStyleCspState::BlockedAttribute
         {
             engine.dom_adapter.clear_inline_style_attribute(node);
-            current = inherited_style_parent(host, node);
+            current = host.flat_tree_parent(node);
             continue;
         }
         if let Some(style_attribute) = world
@@ -1381,7 +1381,7 @@ fn populate_inline_style_attributes_for_resolution(
                 .dom_adapter
                 .set_inline_style_attribute(node, ServoArc::new(shared_lock.wrap(declarations)));
         }
-        current = inherited_style_parent(host, node);
+        current = host.flat_tree_parent(node);
     }
 }
 
@@ -1510,19 +1510,6 @@ fn serialize_computed_custom_property(style: &ComputedValues, property: &str) ->
         return Some(" ".to_owned());
     }
     Some(serialized)
-}
-
-fn inherited_style_parent(host: &DomHost, handle: DomHandle) -> Option<DomHandle> {
-    if host.is_shadow_root(handle) {
-        return host.shadow_root_host(handle);
-    }
-    let parent = host
-        .node(handle)
-        .and_then(crate::dom::native::Node::parent_node)?;
-    if host.is_shadow_root(parent) {
-        return host.shadow_root_host(parent);
-    }
-    Some(parent)
 }
 
 struct EmptyRegisteredSpeculativePainters;

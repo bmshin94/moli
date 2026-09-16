@@ -7,6 +7,8 @@ use indexmap::IndexSet;
 
 use crate::{document_runtime::DomHandle, dom::native::DomHost};
 
+use super::invalidation::style_invalidation_parent;
+
 /// Bounds sparse invalidation-root history without requiring a scan of
 /// published element styles to retire individual generations.
 const MAX_RETAINED_INVALIDATION_ROOTS: usize = 1_024;
@@ -120,9 +122,7 @@ impl LazyStyleInvalidationRoots {
                 break;
             }
             unstamped_path.push(handle);
-            current = host
-                .parent_node(handle)
-                .or_else(|| host.shadow_root_host(handle));
+            current = style_invalidation_parent(host, handle);
         }
 
         unstamped_path.reverse();

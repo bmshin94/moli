@@ -1821,11 +1821,8 @@ impl<'a> TNode for StyleNode<'a> {
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        let parent = self.parent_node()?;
-        if let Some(element) = parent.as_element() {
-            return Some(element);
-        }
-        parent.as_shadow_root().map(|root| root.host())
+        let parent = self.host().flat_tree_parent(self.handle())?;
+        StyleElement::from_handle(self.style_state(), parent)
     }
 
     fn opaque(&self) -> OpaqueNode {
@@ -1894,7 +1891,8 @@ impl<'a> TElement for StyleElement<'a> {
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
         let children = self
             .host()
-            .child_handles(self.handle())
+            .flat_tree_children(self.handle())
+            .into_iter()
             .map(|handle| {
                 StyleNode(
                     self.style_state().node_data(handle, self.document()),
@@ -1903,6 +1901,10 @@ impl<'a> TElement for StyleElement<'a> {
             })
             .collect::<Vec<_>>();
         LayoutIterator(children.into_iter())
+    }
+
+    fn inheritance_parent(&self) -> Option<Self> {
+        self.as_node().traversal_parent()
     }
 
     fn is_html_element(&self) -> bool {

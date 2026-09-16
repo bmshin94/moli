@@ -359,11 +359,15 @@ impl<'a> TNode for QueryNode<'a> {
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        let parent = self.parent_node()?;
-        if let Some(element) = parent.as_element() {
-            return Some(element);
-        }
-        parent.as_shadow_root().map(|root| root.host())
+        let parent = self.host.flat_tree_parent(self.handle)?;
+        Self::new(
+            self.host,
+            parent,
+            self.shared_lock,
+            self.style_data,
+            self.atom_cache,
+        )
+        .as_element()
     }
 
     fn opaque(&self) -> OpaqueNode {

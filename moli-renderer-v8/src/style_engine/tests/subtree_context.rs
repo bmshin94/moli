@@ -381,6 +381,51 @@ fn style_subtree_membership_crosses_shadow_root_to_host_without_crossing_sibling
     assert!(!handle_is_in_style_subtrees(&host, parent, &shadow_roots));
 }
 #[test]
+fn style_subtree_membership_covers_assigned_slot_ancestry_only() {
+    let mut host = test_host();
+    let owner = host.create_element("div");
+    let shadow = host.attach_shadow_root(owner, "open").unwrap();
+    let slot = host.create_element("slot");
+    let other_slot = host.create_element("slot");
+    let assigned = host.create_element("span");
+    let descendant = host.create_element("span");
+    let unrelated = host.create_element("span");
+    assert!(host.set_attribute(other_slot, "name", "other"));
+    assert!(host.set_attribute(unrelated, "slot", "other"));
+    assert!(host.append_child(host.document_handle(), owner));
+    assert!(host.append_child(shadow, slot));
+    assert!(host.append_child(shadow, other_slot));
+    assert!(host.append_child(owner, assigned));
+    assert!(host.append_child(assigned, descendant));
+    assert!(host.append_child(owner, unrelated));
+
+    for root in [slot, shadow, owner] {
+        let roots = HashSet::from([root]);
+        for node in [assigned, descendant] {
+            assert!(handle_is_in_style_subtrees(&host, node, &roots));
+        }
+    }
+    for root in [slot, assigned] {
+        let roots = HashSet::from([root]);
+        for node in [unrelated, other_slot, owner] {
+            assert!(!handle_is_in_style_subtrees(&host, node, &roots));
+        }
+    }
+    // A reassigned descendant now inherits only from its new slot.
+    assert!(host.set_attribute(assigned, "slot", "other"));
+    assert!(!handle_is_in_style_subtrees(
+        &host,
+        descendant,
+        &HashSet::from([slot])
+    ));
+    assert!(handle_is_in_style_subtrees(
+        &host,
+        descendant,
+        &HashSet::from([other_slot])
+    ));
+}
+
+#[test]
 fn source_metadata_requires_registered_style_source_metadata() {
     let mut host = test_host();
     let style = host.create_element("style");

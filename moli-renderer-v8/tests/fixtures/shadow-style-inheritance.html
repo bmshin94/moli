@@ -1,0 +1,96 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  html,body { margin:0; padding:0; font:10px/1 sans-serif; }
+  #owner > .box { outline-color:rgb(21,22,23); }
+</style>
+<body>
+<script>
+  const A = ['rgb(100, 20, 30)', '12px', '20px', 'rtl'];
+  const A2 = ['rgb(30, 40, 100)', '16px', '30px', 'ltr'];
+  const B = ['rgb(10, 80, 30)', '14px', '40px', 'ltr'];
+  const X = ['rgb(7, 8, 9)', '18px', '50px', 'rtl'];
+  const Y = ['rgb(13, 14, 15)', '22px', '60px', 'ltr'];
+  let slotStylePhase = 0;
+  const slotStyleChecks = [];
+  function styleSlot(slot, values) {
+    slot.style.cssText = `color:${values[0]};font-size:${values[1]};--extent:${values[2]};direction:${values[3]}`;
+  }
+  function box(parent, name) {
+    const element = document.createElement('div');
+    element.className = 'box';
+    if (name !== undefined) element.slot = name;
+    element.style.cssText = 'width:var(--extent);height:1em;background:currentColor';
+    parent.append(element);
+    return element;
+  }
+  function add(id, element, states) { slotStyleChecks.push({id,element,states}); }
+  const owner = document.createElement('div');
+  owner.id = 'owner';
+  owner.style.cssText = 'color:rgb(200,0,0);font-size:32px;--extent:70px;direction:ltr';
+  document.body.append(owner);
+  const shadow = owner.attachShadow({mode:'open'});
+  const rules = document.createElement('style');
+  rules.textContent = 'slot > .box { outline-color:rgb(250,0,250) }';
+  shadow.append(rules);
+  const slotA = document.createElement('slot'), slotB = document.createElement('slot');
+  slotA.name = 'a'; slotB.name = 'b';
+  styleSlot(slotA,A); styleSlot(slotB,B);
+  shadow.append(slotA,slotB);
+  const fallbackA = box(slotA), fallbackB = box(slotB);
+  const assigned = box(owner,'a');
+  const nested = document.createElement('div');
+  nested.slot = 'a';
+  owner.append(nested);
+  const nestedRoot = nested.attachShadow({mode:'open'});
+  nestedRoot.append(document.createElement('slot'));
+  const nestedChild = box(nested);
+  const missing = box(owner,'missing');
+
+  add('assigned',assigned,[A,A2,B,null,A2]);
+  // The nested host keeps slot a assigned throughout the named-slot moves.
+  add('fallback-a',fallbackA,[null,null,null,null,null]);
+  add('fallback-b',fallbackB,[B,B,null,B,B]);
+  add('nested-slot-inheritance',nestedChild,[A,A2,A2,A2,A2]);
+  add('unassigned',missing,[null,null,null,null,null]);
+
+  const manualOwner = document.createElement('div');
+  document.body.append(manualOwner);
+  const manualRoot = manualOwner.attachShadow({mode:'open',slotAssignment:'manual'});
+  const slotX = document.createElement('slot'), slotY = document.createElement('slot');
+  styleSlot(slotX,X); styleSlot(slotY,Y);
+  manualRoot.append(slotX,slotY);
+  const fallbackX = box(slotX), fallbackY = box(slotY);
+  const manualChild = box(manualOwner);
+  slotX.assign(manualChild);
+  add('manual-assigned',manualChild,[X,Y,null,X,X]);
+  add('manual-fallback-x',fallbackX,[null,X,X,null,null]);
+  add('manual-fallback-y',fallbackY,[Y,null,Y,Y,Y]);
+
+  function setSlotStylePhase(phase) {
+    slotStylePhase = phase;
+    if (phase === 1) { styleSlot(slotA,A2); slotY.assign(manualChild); }
+    if (phase === 2) { assigned.slot = 'b'; slotY.assign(); }
+    if (phase === 3) { assigned.slot = 'missing'; slotX.assign(manualChild); }
+    if (phase === 4) { assigned.slot = 'a'; owner.style.color = 'rgb(0,200,0)'; }
+  }
+  function collectSlotStyleChecks(geometry) {
+    const checks = [];
+    for (const {id,element,states} of slotStyleChecks) {
+      const expected = states[slotStylePhase];
+      if (expected) {
+        // Read the demanded descendant first, without warming any slot style.
+        const css = getComputedStyle(element);
+        checks.push({id:id+'-style',actual:[css.color,css.fontSize,css.getPropertyValue('--extent'),css.direction],expected});
+      }
+      if (geometry) {
+        const rect = element.getBoundingClientRect();
+        checks.push({id:id+'-geometry',actual:[element.getClientRects().length,rect.width,rect.height],
+          expected:expected ? [1,parseFloat(expected[2]),parseFloat(expected[1])] : [0,0,0]});
+      }
+    }
+    checks.push({id:'selector-dom-parent',actual:[assigned.parentNode===owner,assigned.matches('#owner > .box'),assigned.matches('slot > .box')],expected:[true,true,false]});
+    if (slotStylePhase !== 3) checks.push({id:'selector-cascade',actual:getComputedStyle(assigned).outlineColor,expected:'rgb(21, 22, 23)'});
+    return checks;
+  }
+</script>

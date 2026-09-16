@@ -360,21 +360,9 @@ fn collapsed_text_selection(
 }
 
 fn native_flat_children(host: &DomHost, root: DomHandle, node: DomHandle) -> Vec<DomHandle> {
-    let candidates = if let Some(shadow_root) = host.shadow_root_handle(node) {
-        host.child_handles(shadow_root).collect::<Vec<_>>()
-    } else if host.is_html_element_named(node, "slot") {
-        let assigned = host.assigned_nodes_for_slot_with_options(node, false);
-        if assigned.is_empty() {
-            host.child_handles(node).collect::<Vec<_>>()
-        } else {
-            assigned
-        }
-    } else {
-        host.child_handles(node).collect::<Vec<_>>()
-    };
-    candidates
+    host.flat_tree_children(node)
         .into_iter()
-        .filter(|child| native_flat_parent(host, root, *child) == Some(node))
+        .filter(|child| *child != root)
         .collect()
 }
 
@@ -382,29 +370,7 @@ fn native_flat_parent(host: &DomHost, root: DomHandle, node: DomHandle) -> Optio
     if node == root {
         return None;
     }
-    if let Some(slot) = host.assigned_slot_for_node(node) {
-        return Some(slot);
-    }
-    let parent = host.node(node).and_then(Node::parent_node)?;
-    if host.is_shadow_root(parent) {
-        return host.shadow_root_host(parent);
-    }
-    if host.is_html_element_named(parent, "slot")
-        && !host
-            .assigned_nodes_for_slot_with_options(parent, false)
-            .is_empty()
-    {
-        return None;
-    }
-    if host.shadow_root_handle(parent).is_some() && native_node_is_slotable(host, node) {
-        return None;
-    }
-    Some(parent)
-}
-
-fn native_node_is_slotable(host: &DomHost, node: DomHandle) -> bool {
-    host.node(node)
-        .is_some_and(|node| node.is_element() || node.is_text())
+    host.flat_tree_parent(node)
 }
 
 fn layout_element_semantics(element: &crate::dom::native::Element) -> LayoutElementSemantics {
