@@ -1,6 +1,8 @@
 use super::*;
 use crate::custom_elements::CustomElementRegistryKey;
 
+mod parser;
+
 #[tokio::test]
 async fn popup_classic_script_custom_element_microtasks_wait_for_outer_javascript() {
     assert_popup_custom_element_microtask_order(false).await;

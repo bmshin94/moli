@@ -332,69 +332,74 @@ fn child_document_write_or_writeln_callback<'s>(
     mut rv: v8::ReturnValue<'_, v8::Value>,
     append_newline: bool,
 ) {
-    let Some(handle) = child_document_handle_from_callback_data(scope, args.data()) else {
-        rv.set_undefined();
-        return;
-    };
-    let document = args.this();
-    if child_document_has_throw_on_dynamic_markup_insertion_counter(scope, document) {
-        throw_dynamic_markup_invalid_state(scope);
-        return;
-    }
-    let mut chunk = String::new();
-    for index in 0..args.length() {
-        let Some(value) = args.get(index).to_string(scope) else {
-            return;
-        };
-        chunk.push_str(&value.to_rust_string_lossy(scope));
-    }
-    if append_newline {
-        chunk.push('\n');
-    }
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         rv.set_undefined();
         return;
     };
-    let host = unsafe { &mut *host_ptr };
-    if host.child_document_stream_is_blocked_by_navigation(handle) {
-        rv.set_undefined();
-        return;
-    }
-    let script_context = if host.child_document_parser_is_active(handle) {
-        match unsafe { &mut *host_ptr }.ensure_prebootstrapped_child_default_context(scope, handle)
-        {
-            Ok(context) => context,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    child_handle = handle.index(),
-                    "failed to enter the child LocalWindow context for document.write"
-                );
-                rv.set_undefined();
-                return;
-            }
-        }
-    } else {
-        let Some(context) = begin_child_document_stream_replacement(scope, handle, document) else {
+    crate::custom_elements::with_custom_element_reaction_scope(scope, host_ptr, |scope| {
+        let Some(handle) = child_document_handle_from_callback_data(scope, args.data()) else {
             rv.set_undefined();
             return;
         };
-        context
-    };
-    let Some(document_handle) = child_document_native_handle_for_runtime(scope, host_ptr, document)
-    else {
+        let document = args.this();
+        if child_document_has_throw_on_dynamic_markup_insertion_counter(scope, document) {
+            throw_dynamic_markup_invalid_state(scope);
+            return;
+        }
+        let mut chunk = String::new();
+        for index in 0..args.length() {
+            let Some(value) = args.get(index).to_string(scope) else {
+                return;
+            };
+            chunk.push_str(&value.to_rust_string_lossy(scope));
+        }
+        if append_newline {
+            chunk.push('\n');
+        }
+        let host = unsafe { &mut *host_ptr };
+        if host.child_document_stream_is_blocked_by_navigation(handle) {
+            rv.set_undefined();
+            return;
+        }
+        let script_context = if host.child_document_parser_is_active(handle) {
+            match unsafe { &mut *host_ptr }
+                .ensure_prebootstrapped_child_default_context(scope, handle)
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        child_handle = handle.index(),
+                        "failed to enter the child LocalWindow context for document.write"
+                    );
+                    rv.set_undefined();
+                    return;
+                }
+            }
+        } else {
+            let Some(context) = begin_child_document_stream_replacement(scope, handle, document)
+            else {
+                rv.set_undefined();
+                return;
+            };
+            context
+        };
+        let Some(document_handle) =
+            child_document_native_handle_for_runtime(scope, host_ptr, document)
+        else {
+            rv.set_undefined();
+            return;
+        };
+        let _ = unsafe { &mut *host_ptr }.pump_child_document_write_parser(
+            scope,
+            script_context,
+            handle,
+            document_handle,
+            Some(chunk),
+            false,
+        );
         rv.set_undefined();
-        return;
-    };
-    let _ = unsafe { &mut *host_ptr }.pump_child_document_write_parser(
-        scope,
-        script_context,
-        handle,
-        document_handle,
-        Some(chunk),
-        false,
-    );
-    rv.set_undefined();
+    });
 }
 
 fn child_document_close_callback<'s>(
@@ -402,60 +407,63 @@ fn child_document_close_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(handle) = child_document_handle_from_callback_data(scope, args.data()) else {
-        rv.set_undefined();
-        return;
-    };
-    let document = args.this();
-    if child_document_has_throw_on_dynamic_markup_insertion_counter(scope, document) {
-        throw_dynamic_markup_invalid_state(scope);
-        return;
-    }
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         rv.set_undefined();
         return;
     };
-    let Some(document_handle) = child_document_native_handle_for_runtime(scope, host_ptr, document)
-    else {
-        rv.set_undefined();
-        return;
-    };
-    let host = unsafe { &mut *host_ptr };
-    if host.child_document_stream_is_blocked_by_navigation(handle) {
-        rv.set_undefined();
-        return;
-    }
-    if host.child_document_parser_is_active(handle)
-        && host
-            .child_current_script_handle_for_document(document_handle)
-            .is_some()
-    {
-        rv.set_undefined();
-        return;
-    }
-    let script_context = match unsafe { &mut *host_ptr }
-        .ensure_prebootstrapped_child_default_context(scope, handle)
-    {
-        Ok(context) => context,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                child_handle = handle.index(),
-                "failed to enter the child LocalWindow context for document.close"
-            );
+    crate::custom_elements::with_custom_element_reaction_scope(scope, host_ptr, |scope| {
+        let Some(handle) = child_document_handle_from_callback_data(scope, args.data()) else {
+            rv.set_undefined();
+            return;
+        };
+        let document = args.this();
+        if child_document_has_throw_on_dynamic_markup_insertion_counter(scope, document) {
+            throw_dynamic_markup_invalid_state(scope);
+            return;
+        }
+        let Some(document_handle) =
+            child_document_native_handle_for_runtime(scope, host_ptr, document)
+        else {
+            rv.set_undefined();
+            return;
+        };
+        let host = unsafe { &mut *host_ptr };
+        if host.child_document_stream_is_blocked_by_navigation(handle) {
             rv.set_undefined();
             return;
         }
-    };
-    let _ = unsafe { &mut *host_ptr }.pump_child_document_write_parser(
-        scope,
-        script_context,
-        handle,
-        document_handle,
-        None,
-        true,
-    );
-    rv.set_undefined();
+        if host.child_document_parser_is_active(handle)
+            && host
+                .child_current_script_handle_for_document(document_handle)
+                .is_some()
+        {
+            rv.set_undefined();
+            return;
+        }
+        let script_context = match unsafe { &mut *host_ptr }
+            .ensure_prebootstrapped_child_default_context(scope, handle)
+        {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    child_handle = handle.index(),
+                    "failed to enter the child LocalWindow context for document.close"
+                );
+                rv.set_undefined();
+                return;
+            }
+        };
+        let _ = unsafe { &mut *host_ptr }.pump_child_document_write_parser(
+            scope,
+            script_context,
+            handle,
+            document_handle,
+            None,
+            true,
+        );
+        rv.set_undefined();
+    });
 }
 
 fn redirect_child_document_open_to_window_open<'s>(

@@ -2,6 +2,7 @@ use super::super::{ChildParserClassicScriptCandidate, JsContextHost};
 use crate::{
     StylesheetBlockingReadView, StylesheetElementRead,
     content_security_policy::ContentSecurityPolicyScriptElementRequest,
+    custom_elements,
     document_runtime::DomHandle,
     document_script_scheduler::FrameDocumentClassicScriptSchedulerWork,
     dom::native::{Attribute, DomMutationEffects, Node},
@@ -72,13 +73,32 @@ impl<'a, 'scope, 'pin> ChildFrameLiveParserOwner<'a, 'scope, 'pin> {
         }
     }
 
-    fn sync_child_parser_side_effects(&mut self, effects: Option<&DomMutationEffects>) {
-        if effects.is_none_or(|effects| effects.did_change()) {
-            self.host
-                .sync_owner_style_sheet_texts_for_document_tree_scopes(self.child_document_handle);
-            self.host
-                .sync_child_browsing_context_subtree(self.scope, self.child_document_handle);
+    fn apply_child_parser_mutation_effects(&mut self, effects: &DomMutationEffects) {
+        if !effects.did_change() {
+            return;
         }
+        let host_ptr = self.host as *mut JsContextHost;
+        crate::observer_runtime::queue_mutation_records(
+            self.scope,
+            host_ptr,
+            self.host.dom_host(),
+            effects,
+        );
+        // Parser insertions enqueue reactions without introducing a checkpoint.
+        // document.write/close own their CEReactions scope; otherwise the backup
+        // queue runs at the next script or custom-element construction boundary.
+        for &root in effects.tree().disconnected_roots() {
+            custom_elements::enqueue_disconnected_callbacks_for_subtree(self.scope, host_ptr, root);
+        }
+        custom_elements::enqueue_connected_and_form_callbacks_for_already_upgraded_subtrees(
+            self.scope,
+            host_ptr,
+            effects.tree().connected_roots(),
+        );
+        self.host
+            .sync_owner_style_sheet_texts_for_document_tree_scopes(self.child_document_handle);
+        self.host
+            .sync_child_browsing_context_subtree(self.scope, self.child_document_handle);
     }
 }
 
@@ -134,7 +154,7 @@ impl StylesheetBlockingReadView for ChildFrameLiveParserOwner<'_, '_, '_> {
 
 impl ParserMutationEffectConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
     fn consume_parser_mutation_effects(&mut self, effects: DomMutationEffects) {
-        self.sync_child_parser_side_effects(Some(&effects));
+        self.apply_child_parser_mutation_effects(&effects);
     }
 }
 
@@ -258,7 +278,7 @@ impl ParserDomReadConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
 impl ParserDomMutationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
     fn apply_parser_dom_mutation(&mut self, mutation: ParserDomMutation) {
         let effects = mutation.apply_to_dom_host(self.host.dom_host_mut());
-        self.sync_child_parser_side_effects(Some(&effects));
+        self.apply_child_parser_mutation_effects(&effects);
     }
 
     fn create_parser_element_without_attributes(
@@ -416,9 +436,42 @@ impl ParserDomMutationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
 impl ParserElementCreationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
     fn create_parser_element(
         &mut self,
-        _request: ParserElementCreationRequest<'_>,
+        request: ParserElementCreationRequest<'_>,
     ) -> Option<DomHandle> {
-        None
+        let document_has_body = self
+            .document_body_handle_for_document(request.document_handle)
+            .is_some();
+        let child_handle = self
+            .host
+            .child_browsing_context_host_for_document_handle(request.document_handle)?;
+        // A child with a registered definition already has a realm. Keep the
+        // initial parser lazy, and create wrappers in that realm once it exists.
+        let context = self
+            .host
+            .child_browsing_context_relevant_context(self.scope, child_handle)?;
+        let scope = &mut v8::ContextScope::new(self.scope, context);
+        let host_ptr = self.host as *mut JsContextHost;
+        custom_elements::create_and_construct_parser_custom_element_direct_for_document(
+            scope,
+            host_ptr,
+            request.document_handle,
+            document_has_body,
+            request.local_name,
+            request.namespace,
+            request.prefix,
+            request.attributes,
+            request.intended_parent,
+            |document_handle, local_name, namespace, prefix| {
+                self.host
+                    .dom_host_mut()
+                    .create_parser_element_without_attributes_for_document(
+                        document_handle,
+                        local_name,
+                        namespace,
+                        prefix,
+                    )
+            },
+        )
     }
 }
 
