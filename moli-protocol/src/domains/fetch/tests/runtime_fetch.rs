@@ -13,6 +13,124 @@ use crate::testing::{
     protocol_events_into_internal_messages, wait_until_scheduler_message,
 };
 
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_local_fetch_and_xhr_bypass_request_and_response_interception() {
+    for request_stage in ["Request", "Response"] {
+        let mut ctx = TestContext::new();
+        with_loaded_http_document(
+            &mut ctx,
+            "data:text/html,<html><body>ready</body></html>",
+            "SID-1",
+            "TID-1",
+        )
+        .await;
+        enable_runtime_async(&mut ctx, "SID-1", 1).await;
+        ctx.process_async(json!({
+            "id": 2,
+            "method": "Fetch.enable",
+            "sessionId": "SID-1",
+            "params": { "patterns": [{ "urlPattern": "*", "requestStage": request_stage }] }
+        }))
+        .await;
+        ctx.expect_result(2, json!({}), Some("SID-1"));
+
+        ctx.process_async(json!({
+            "id": 3,
+            "method": "Runtime.evaluate",
+            "sessionId": "SID-1",
+            "params": {
+                "expression": r#"
+globalThis.__localInterceptionResult = 'pending';
+(async () => {
+  const check = (value, message) => { if (!value) throw new Error(message); };
+  const blob = URL.createObjectURL(new Blob(['payload'], {type: 'text/plain'}));
+  const revoked = URL.createObjectURL(new Blob(['revoked']));
+  URL.revokeObjectURL(revoked);
+  try {
+    for (const [url, method, success] of [
+      [blob + '#fragment', 'GET', true],
+      [blob, 'POST', false],
+      ['data:text/plain,payload', 'POST', true],
+      [revoked, 'GET', false],
+      ['data:invalid', 'GET', false],
+    ]) {
+      let response;
+      try { response = await fetch(url, {method}); }
+      catch (error) {
+        check(!success && error instanceof TypeError, 'fetch rejection: ' + error);
+      }
+      check(Boolean(response) === success, 'fetch outcome: ' + url);
+      if (response) {
+        check(response.status === 200 && await response.text() === 'payload', 'fetch response');
+      }
+      for (const async of [true, false]) {
+        const xhr = new XMLHttpRequest();
+        xhr.open(method, url, async);
+        const label = [url, method, async].join(':');
+        if (async) {
+          await new Promise((resolve, reject) => {
+            let returned = false;
+            const events = [];
+            xhr.onload = () => events.push('load');
+            xhr.onerror = () => events.push('error');
+            xhr.onloadend = () => {
+              try {
+                check(returned, label + ': completion during send');
+                check(events.join(',') === (success ? 'load' : 'error'), label + ': events');
+                resolve();
+              } catch (error) { reject(error); }
+            };
+            xhr.send();
+            returned = true;
+          });
+        } else {
+          let failure;
+          try { xhr.send(); } catch (error) { failure = error; }
+          check(success ? failure === undefined : failure instanceof DOMException && failure.name === 'NetworkError', label + ': exception');
+        }
+        check(xhr.readyState === 4 && xhr.status === (success ? 200 : 0), label + ': state/status');
+        check(xhr.responseText === (success ? 'payload' : ''), label + ': body');
+      }
+    }
+  } finally { URL.revokeObjectURL(blob); }
+})().then(
+  () => { globalThis.__localInterceptionResult = 'ok'; },
+  error => { globalThis.__localInterceptionResult = String(error); },
+);
+'scheduled'
+"#
+            }
+        }))
+        .await;
+        let scheduled = take_response_by_id(&mut ctx, 3);
+        assert_eq!(scheduled["result"]["result"]["value"], "scheduled");
+        assert!(
+            ctx.sent
+                .iter()
+                .all(|message| message["method"] != "Fetch.requestPaused"),
+            "local requests must bypass {request_stage} interception: {:?}",
+            ctx.sent
+        );
+
+        evaluate_until_value_async(
+            &mut ctx,
+            "SID-1",
+            4,
+            "globalThis.__localInterceptionResult",
+            &json!("ok"),
+            "local fetch and XHR completion with Fetch enabled",
+        )
+        .await;
+        assert!(
+            ctx.sent
+                .iter()
+                .all(|message| message["method"] != "Fetch.requestPaused"),
+            "local responses and errors must bypass {request_stage} interception: {:?}",
+            ctx.sent
+        );
+    }
+}
+
 async fn wait_for_request_paused(ctx: &mut TestContext, url: &str, description: &str) -> Value {
     wait_for_request_paused_on_session(ctx, "SID-1", url, None, description).await
 }

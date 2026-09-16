@@ -164,23 +164,7 @@ pub(super) fn xhr_send_callback<'s>(
         return;
     }
 
-    if host.should_intercept_subresource(SubresourceResourceType::Xhr) {
-        if !async_request {
-            record_synchronous_xhr_failure(
-                scope,
-                host,
-                xhr,
-                prepared,
-                "Synchronous XMLHttpRequest interception is not supported".to_owned(),
-            );
-            return;
-        }
-        let internal_id = record_intercepted_xhr(scope, host, xhr, prepared);
-        set_xhr_state_number(scope, xhr, XHR_ACTIVE_INTERNAL_ID_SLOT, internal_id as f64);
-        schedule_xhr_timeout(scope, host, xhr, internal_id);
-        return;
-    }
-
+    // Renderer-owned URLs, including local errors, bypass network interception.
     if let Some(result) = local_url_response_result(&prepared.resolved_url, &prepared.method) {
         match result {
             Ok(response) if async_request => {
@@ -197,6 +181,23 @@ pub(super) fn xhr_send_callback<'s>(
                 record_synchronous_xhr_failure(scope, host, xhr, prepared, message);
             }
         }
+        return;
+    }
+
+    if host.should_intercept_subresource(SubresourceResourceType::Xhr) {
+        if !async_request {
+            record_synchronous_xhr_failure(
+                scope,
+                host,
+                xhr,
+                prepared,
+                "Synchronous XMLHttpRequest interception is not supported".to_owned(),
+            );
+            return;
+        }
+        let internal_id = record_intercepted_xhr(scope, host, xhr, prepared);
+        set_xhr_state_number(scope, xhr, XHR_ACTIVE_INTERNAL_ID_SLOT, internal_id as f64);
+        schedule_xhr_timeout(scope, host, xhr, internal_id);
         return;
     }
 

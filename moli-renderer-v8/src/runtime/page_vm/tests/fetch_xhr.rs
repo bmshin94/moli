@@ -4002,7 +4002,18 @@ async fn window_fetch_file_url_rejects_before_interception_or_transport() {
 
 #[tokio::test]
 async fn blob_fetch_and_xhr_reject_non_get_methods_in_window_and_worker() {
-    run_page_vm_async_test(async move {
+    check_blob_fetch_and_xhr_methods_in_window_and_worker(false).await;
+}
+
+#[tokio::test]
+async fn blob_fetch_and_xhr_bypass_interception_in_window_and_worker() {
+    check_blob_fetch_and_xhr_methods_in_window_and_worker(true).await;
+}
+
+fn check_blob_fetch_and_xhr_methods_in_window_and_worker(
+    interception: bool,
+) -> impl std::future::Future<Output = ()> {
+    Box::pin(run_page_vm_async_test(async move {
         for worker in [false, true] {
             let mut page_vm = test_page_vm();
             let local_executor = page_vm.local_executor.clone();
@@ -4096,8 +4107,11 @@ async fn blob_fetch_and_xhr_reject_non_get_methods_in_window_and_worker() {
                     "globalThis.__blobMethodResult = 'pending'; {probe}.then(() => {{ globalThis.__blobMethodResult = 'ok'; }}, error => {{ globalThis.__blobMethodResult = String(error); }})"
                 )
             };
-            let (result, network_output) = local_executor
+            let (result, pending_count, network_output) = local_executor
                 .run(async move {
+                    page_vm
+                        .vm_mut()
+                        .set_fetch_subresource_interception(interception, None);
                     page_vm.vm_mut().eval(&script)?;
                     drive_websocket_until_done(
                         &mut page_vm,
@@ -4106,21 +4120,37 @@ async fn blob_fetch_and_xhr_reject_non_get_methods_in_window_and_worker() {
                     )
                     .await?;
                     let result = page_vm.vm_mut().eval("globalThis.__blobMethodResult")?;
-                    Ok::<_, anyhow::Error>((result, page_vm.vm_mut().take_network_output()))
+                    let pending_count = page_vm
+                        .vm_mut()
+                        .take_pending_subresource_fetch_infos()
+                        .len();
+                    Ok::<_, anyhow::Error>((
+                        result,
+                        pending_count,
+                        page_vm.vm_mut().take_network_output(),
+                    ))
                 })
                 .await
                 .expect("blob method probe should run on owner lane");
             assert_eq!(result, "ok", "worker={worker}");
+            assert_eq!(
+                pending_count, 0,
+                "local fetch and XHR must bypass interception; worker={worker}"
+            );
             let (records, _, _) = split_network_output_items(network_output);
             let failures = records
                 .iter()
-                .filter(|record| matches!(record.outcome(), SubresourceNetworkOutcome::Failure { error_text }
-                    if error_text.contains("blob URL fetch requires GET")))
+                .filter(|record| {
+                    matches!(record.outcome(), SubresourceNetworkOutcome::Failure { error_text }
+                    if error_text.contains("blob URL fetch requires GET"))
+                })
                 .count();
-            assert_eq!(failures, 56, "each rejected request must record a local network error; worker={worker}");
+            assert_eq!(
+                failures, 56,
+                "each rejected request must record a local network error; worker={worker}"
+            );
         }
-    })
-    .await;
+    }))
 }
 
 #[tokio::test]

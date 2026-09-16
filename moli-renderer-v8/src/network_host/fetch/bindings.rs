@@ -281,6 +281,30 @@ fn window_fetch_callback_in_relevant_realm<'s>(
         return;
     }
 
+    // Renderer-owned URLs, including local errors, bypass network interception.
+    match resolve_local_fetch(host, &prepared) {
+        Ok(Some(response)) => {
+            let response_obj = build_fetch_response_object_for_request_mode(
+                scope,
+                &prepared.request_origin,
+                prepared.request_mode,
+                response,
+            );
+            resolver.resolve(scope, response_obj.into());
+            rv.set(promise.into());
+            return;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            let exception = v8_string(scope, &message)
+                .map(|message| v8::Exception::type_error(scope, message))
+                .unwrap_or_else(|| v8::undefined(scope).into());
+            resolver.reject(scope, exception);
+            rv.set(promise.into());
+            return;
+        }
+    }
+
     if host.should_intercept_subresource(SubresourceResourceType::Fetch) {
         record_intercepted_fetch(scope, host, resolver, prepared);
         rv.set(promise.into());
@@ -304,29 +328,6 @@ fn window_fetch_callback_in_relevant_realm<'s>(
         Ok(None) => {}
         Err(message) => {
             rv.set(make_rejected_promise(scope, &message).into());
-            return;
-        }
-    }
-
-    match resolve_local_fetch(host, &prepared) {
-        Ok(Some(response)) => {
-            let response_obj = build_fetch_response_object_for_request_mode(
-                scope,
-                &prepared.request_origin,
-                prepared.request_mode,
-                response,
-            );
-            resolver.resolve(scope, response_obj.into());
-            rv.set(promise.into());
-            return;
-        }
-        Ok(None) => {}
-        Err(message) => {
-            let exception = v8_string(scope, &message)
-                .map(|message| v8::Exception::type_error(scope, message))
-                .unwrap_or_else(|| v8::undefined(scope).into());
-            resolver.reject(scope, exception);
-            rv.set(promise.into());
             return;
         }
     }

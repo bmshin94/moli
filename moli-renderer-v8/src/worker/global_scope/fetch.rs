@@ -2083,7 +2083,9 @@ pub(in crate::worker) fn worker_fetch_callback<'s>(
         return;
     }
 
-    if fetch_subresource_interception_enabled
+    // Local URLs are resolved by the worker fetch task without interception.
+    if !matches!(resolved_url.scheme(), "blob" | "data")
+        && fetch_subresource_interception_enabled
         && fetch_subresource_interception_resource_type.is_none_or(|expected| {
             expected.has_same_cdp_fetch_interception_type(SubresourceResourceType::Fetch)
         })
