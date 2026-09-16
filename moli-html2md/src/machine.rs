@@ -1,3 +1,5 @@
+use crate::output::Output;
+use crate::table::Table;
 use crate::writer::{Style, Writer, longest_run};
 use crate::{Dom, NodeKind, Options};
 
@@ -14,6 +16,8 @@ enum Task<'a, Id> {
     RawChildren(Option<Id>, usize, bool),
     EndCode,
     EndPre(Option<&'a str>),
+    TableCell,
+    EndTableCell,
 }
 
 struct List {
@@ -29,6 +33,7 @@ struct Machine<'a, D: Dom + ?Sized> {
     tasks: Vec<Task<'a, D::NodeId>>,
     writers: Vec<Writer<'a>>,
     lists: Vec<List>,
+    tables: Vec<Table<D::NodeId>>,
     raw: String,
     serial: usize,
 }
@@ -40,11 +45,12 @@ pub(crate) fn convert<D: Dom + ?Sized>(dom: &D, root: D::NodeId, options: &Optio
         tasks: vec![Task::Visit(root, 0)],
         writers: vec![Writer::default()],
         lists: Vec::new(),
+        tables: Vec::new(),
         raw: String::new(),
         serial: 0,
     };
     machine.run();
-    machine.take_writer()
+    machine.take_writer().into_string()
 }
 
 impl<'a, D: Dom + ?Sized> Machine<'a, D> {
@@ -64,7 +70,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                 Task::PopStyle => self.writer().pop_style(),
                 Task::EndLink(serial) => self.writer().end_link(serial),
                 Task::EndQuote => {
-                    let content = self.take_writer();
+                    let content = self.take_writer().into_string();
                     let mut quote = String::new();
                     for line in content.lines() {
                         if !quote.is_empty() {
@@ -79,7 +85,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     self.writer().block(&quote, 2, 2);
                 }
                 Task::EndHeading(level) => {
-                    let content = self.take_writer();
+                    let content = self.take_writer().into_string();
                     if !content.is_empty() {
                         let heading =
                             format!("{} {}", "#".repeat(level), content.replace('\n', " "));
@@ -92,7 +98,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     self.lists.pop();
                     let content = self.take_writer();
                     let has_blocks = self.writer().has_blocks;
-                    self.writer().block(&content, before, 2);
+                    self.writer().block_output(content, before, 2);
                     if before == 1 {
                         // A nested list alone does not make its parent item loose.
                         self.writer().has_blocks = has_blocks;
@@ -100,7 +106,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                 }
                 Task::EndItem(marker) => {
                     let loose = self.writer().has_blocks;
-                    let content = self.take_writer();
+                    let content = self.take_writer().into_string();
                     if content.is_empty() {
                         continue;
                     }
@@ -130,6 +136,13 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     self.writer().code_with_edges(&text, preformatted);
                 }
                 Task::EndPre(language) => self.end_pre(language),
+                Task::TableCell => self.table_cell(),
+                Task::EndTableCell => {
+                    let content = self.take_writer();
+                    let table = self.tables.last_mut().expect("cell belongs to a table");
+                    table.content.push(content);
+                    table.in_cell = false;
+                }
             }
         }
     }
@@ -143,7 +156,7 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
         self.writers.push(writer);
     }
 
-    fn take_writer(&mut self) -> String {
+    fn take_writer(&mut self) -> Output {
         let writer = self.writers.pop().expect("capture has an output");
         if let Some(parent) = self.writers.last_mut() {
             parent.last_link = parent.last_link.max(writer.last_link);
@@ -180,6 +193,27 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
             NodeKind::Other => return,
             NodeKind::Element(tag) => tag,
         };
+        if let Some(table) = self.tables.last_mut()
+            && table.in_cell
+            && matches!(
+                tag,
+                "table"
+                    | "pre"
+                    | "blockquote"
+                    | "ul"
+                    | "ol"
+                    | "li"
+                    | "hr"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+            )
+        {
+            table.has_complex_content = true;
+        }
         match tag {
             "head" | "script" | "style" | "noscript" | "template" => return,
             "br" => {
@@ -252,6 +286,21 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
             }
             "ul" | "ol" => self.start_list(node, tag == "ol"),
             "li" => self.start_item(),
+            "table" => {
+                if let Some(mut table) =
+                    Table::from_dom(self.dom, node, depth, self.options.max_depth)
+                {
+                    let captions = std::mem::take(&mut table.captions);
+                    self.tables.push(table);
+                    self.tasks.push(Task::TableCell);
+                    for caption in captions.into_iter().rev() {
+                        self.tasks.push(Task::Visit(caption.node, caption.depth));
+                    }
+                    return;
+                }
+                self.writer().boundary(2);
+                self.tasks.push(Task::Boundary);
+            }
             _ if is_block(tag) => {
                 self.writer().boundary(2);
                 self.tasks.push(Task::Boundary);
@@ -259,6 +308,21 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
             _ => {}
         }
         self.children(node, depth + 1);
+    }
+
+    fn table_cell(&mut self) {
+        let table = self.tables.last_mut().expect("table conversion is active");
+        if let Some(cell) = table.cells.next() {
+            table.in_cell = true;
+            self.capture();
+            self.writer().table_cell();
+            self.tasks.push(Task::TableCell);
+            self.tasks.push(Task::EndTableCell);
+            self.children(cell.node, cell.depth + 1);
+        } else {
+            let table = self.tables.pop().expect("table conversion is active");
+            self.writer().block_output(table.finish(), 2, 2);
+        }
     }
 
     fn start_list(&mut self, node: D::NodeId, ordered: bool) {

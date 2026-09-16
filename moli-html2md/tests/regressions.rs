@@ -181,7 +181,16 @@ fn table_attributes_keep_the_same_meaning_as_attributes_outside_tables() {
     ] {
         let inline = rendered_html(&markdown(content, false));
         let html = format!("<table><tr><th>{content}</th></tr></table>");
-        assert_eq!(rendered_html(&markdown(&html, false)), inline, "{html}",);
+        let inline = inline
+            .strip_prefix("<p>")
+            .unwrap()
+            .strip_suffix("</p>\n")
+            .unwrap();
+        assert_eq!(
+            rendered_html(&markdown(&html, false)),
+            format!("<table><thead><tr><th>{inline}</th></tr></thead><tbody>\n</tbody></table>\n"),
+            "{html}"
+        );
     }
 }
 

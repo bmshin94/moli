@@ -205,13 +205,13 @@ fn supports_headings_images_and_non_content_elements() {
 }
 
 #[test]
-fn expands_headerless_table_cells_as_blocks() {
+fn adds_empty_headers_to_headerless_tables() {
     let mut dom = Tree::new();
     let table = dom.element(0, "table");
     let row = dom.element(table, "tr");
     dom.leaf(row, "td", "one");
     dom.leaf(row, "td", "two");
-    assert_eq!(convert(&dom, 0), "one\n\ntwo");
+    assert_eq!(convert(&dom, 0), "|  |  |\n| --- | --- |\n| one | two |");
 }
 
 #[test]
@@ -226,7 +226,7 @@ fn preserves_table_cell_boundaries_hard_breaks_and_literal_pipes() {
     dom.text(cell, "a|b");
     dom.element(cell, "br");
     dom.text(cell, "c");
-    assert_eq!(convert(&dom, 0), "Key\n\na|b  \nc");
+    assert_eq!(convert(&dom, 0), "| Key |\n| ---: |\n| a\\|b<br>c |");
 }
 
 #[test]
@@ -317,11 +317,40 @@ fn converts_deep_tables_on_a_small_thread_stack() {
                 max_depth: usize::MAX,
                 ..Options::default()
             });
-            assert_eq!(converter.convert(&dom, 0), "deep");
+            assert_eq!(converter.convert(&dom, 0), "|  |\n| --- |\n| deep |");
         })
         .expect("spawn small-stack test")
         .join()
         .expect("nested tables should not recurse");
+}
+
+#[test]
+fn converts_nested_header_tables_on_a_small_thread_stack() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .spawn(|| {
+            let mut dom = Tree::new();
+            let mut node = 0;
+            for _ in 0..1_000 {
+                let table = dom.element(node, "table");
+                let row = dom.element(table, "tr");
+                dom.leaf(row, "th", "Header");
+                let row = dom.element(table, "tr");
+                node = dom.element(row, "td");
+            }
+            dom.text(node, "deep");
+            let converter = Converter::new(Options {
+                max_depth: usize::MAX,
+                ..Options::default()
+            });
+            let actual = converter.convert(&dom, 0);
+            assert_eq!(actual.matches("Header").count(), 1_000);
+            assert_eq!(actual.matches("| --- |").count(), 1);
+            assert!(actual.ends_with("| deep |"));
+        })
+        .expect("spawn small-stack test")
+        .join()
+        .expect("header table conversion should not recurse");
 }
 
 #[test]

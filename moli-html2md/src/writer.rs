@@ -1,3 +1,5 @@
+use crate::output::Output;
+
 // Formatting is delayed until visible content arrives. This keeps whitespace
 // outside newly opened/closed marks and coalesces adjacent identical styles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +24,8 @@ struct OpenStyle<'a> {
 
 #[derive(Default)]
 pub(crate) struct Writer<'a> {
+    // Blocks are immutable fragments; inline edits only touch the local tail.
+    prefix: Output,
     output: String,
     desired: Vec<Style<'a>>,
     emitted: Vec<OpenStyle<'a>>,
@@ -52,6 +56,11 @@ impl<'a> Writer<'a> {
 
     pub(crate) fn heading(&mut self) {
         self.heading = true;
+        self.single_line_attributes = true;
+    }
+
+    pub(crate) fn table_cell(&mut self) {
+        // Literal attribute newlines must not split a Markdown table row.
         self.single_line_attributes = true;
     }
 
@@ -102,7 +111,7 @@ impl<'a> Writer<'a> {
                 continue;
             }
             self.prepare_inline(ch);
-            let line_start = self.output.is_empty() || self.output.ends_with('\n');
+            let line_start = self.is_empty() || self.last_char() == Some('\n');
             if line_start {
                 self.line_digits = Some(0);
             }
@@ -242,18 +251,44 @@ impl<'a> Writer<'a> {
         }
         self.boundary(before);
         self.flush_breaks();
+        #[cfg(test)]
+        crate::output::record_copy(text.len());
         self.output.push_str(text);
         self.line_digits = None;
         self.boundary(after);
     }
 
-    pub(crate) fn finish(mut self) -> String {
+    pub(crate) fn block_output(&mut self, output: Output, before: usize, after: usize) {
+        if output.is_empty() {
+            self.boundary(before.max(after));
+            return;
+        }
+        // Closing styles before detaching the tail keeps all inline edit
+        // offsets local to the current String, never inside a finished block.
+        self.boundary(before);
+        self.flush_breaks();
+        self.prefix.push_text(std::mem::take(&mut self.output));
+        self.prefix.append(output);
+        self.line_digits = None;
+        self.boundary(after);
+    }
+
+    pub(crate) fn finish(mut self) -> Output {
         self.flush_code();
         self.close_to(0, None);
         self.flush_spaces(false);
         let end = self.output.trim_end_matches(is_space).len();
         self.output.truncate(end);
-        self.output
+        self.prefix.push_text(self.output);
+        self.prefix
+    }
+
+    fn is_empty(&self) -> bool {
+        self.output.is_empty() && self.prefix.is_empty()
+    }
+
+    fn last_char(&self) -> Option<char> {
+        self.output.chars().next_back().or(self.prefix.last_char())
     }
 
     fn prepare_inline(&mut self, next: char) {
@@ -289,12 +324,7 @@ impl<'a> Writer<'a> {
             } else {
                 next
             };
-            let html = is_punctuation(first)
-                && self
-                    .output
-                    .chars()
-                    .next_back()
-                    .is_some_and(char::is_alphanumeric);
+            let html = is_punctuation(first) && self.last_char().is_some_and(char::is_alphanumeric);
             match style {
                 Style::Strong => self.output.push_str(if html { "<strong>" } else { "**" }),
                 Style::Emphasis => self.output.push_str(if html { "<em>" } else { "*" }),
@@ -320,7 +350,7 @@ impl<'a> Writer<'a> {
         if !self.preserved_spaces.is_empty() {
             // Materialize any block boundary before preserving Unicode space.
             self.flush_breaks();
-            let text = if self.output.is_empty() || self.output.ends_with('\n') {
+            let text = if self.is_empty() || self.last_char() == Some('\n') {
                 self.preserved_spaces.trim_start_matches(' ')
             } else {
                 &self.preserved_spaces
@@ -329,7 +359,7 @@ impl<'a> Writer<'a> {
             self.preserved_spaces.clear();
             self.line_digits = None;
         }
-        if trailing_ascii && self.space && !self.output.is_empty() && !self.output.ends_with('\n') {
+        if trailing_ascii && self.space && !self.is_empty() && self.last_char() != Some('\n') {
             self.output.push(' ');
             self.line_digits = None;
         }
@@ -365,7 +395,7 @@ impl<'a> Writer<'a> {
                     {
                         preceding
                     }
-                    _ => self.output.chars().next_back(),
+                    _ => self.last_char(),
                 };
                 let closing_needs_html = next.is_some_and(char::is_alphanumeric)
                     && preceding.is_some_and(is_punctuation);
@@ -397,8 +427,11 @@ impl<'a> Writer<'a> {
 
     fn flush_breaks(&mut self) {
         if self.breaks > 0 {
-            if !self.output.is_empty() {
-                let existing = self.output.len() - self.output.trim_end_matches('\n').len();
+            if !self.is_empty() {
+                let mut existing = self.output.len() - self.output.trim_end_matches('\n').len();
+                if existing == self.output.len() {
+                    existing += self.prefix.trailing_newlines();
+                }
                 for _ in existing..self.breaks {
                     self.output.push('\n');
                 }

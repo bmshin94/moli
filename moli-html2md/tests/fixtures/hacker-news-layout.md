@@ -1,8 +1,6 @@
-**[News](news)**
-
-[new](newest) | [past](front)
-
-[login](login?goto=news)
+|  |  |  |
+| --- | --- | --- |
+| **[News](news)** | [new](newest) \| [past](front) | [login](login?goto=news) |
 
 1\.
 

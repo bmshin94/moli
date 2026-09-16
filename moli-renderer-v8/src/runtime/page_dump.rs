@@ -373,17 +373,23 @@ mod tests {
     }
 
     #[test]
-    fn markdown_renderer_expands_table_cells() {
+    fn markdown_renderer_outputs_gfm_tables() {
         assert_eq!(
             markdown_from_html(
                 "<table><tr><th>Name</th><th>Count</th></tr><tr><td>moli</td><td>2</td></tr></table>"
             ),
-            "Name\n\nCount\n\nmoli\n\n2"
+            "| Name | Count |\n| --- | --- |\n| moli | 2 |"
+        );
+        assert_eq!(
+            markdown_from_html(
+                "<table><tr><td>苹果</td><td>5 元</td></tr><tr><td>香蕉</td><td>3 元</td></tr></table>"
+            ),
+            "|  |  |\n| --- | --- |\n| 苹果 | 5 元 |\n| 香蕉 | 3 元 |"
         );
     }
 
     #[test]
-    fn markdown_renderer_flattens_hacker_news_layout_tables() {
+    fn markdown_renderer_preserves_hacker_news_layout_content() {
         let dom = HtmlParser::SCRIPTING_DISABLED.parse(
             test_url(),
             include_str!("../../../moli-html2md/tests/fixtures/hacker-news-layout.html").to_owned(),
