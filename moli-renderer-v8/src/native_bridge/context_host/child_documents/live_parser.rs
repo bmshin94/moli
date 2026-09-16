@@ -413,30 +413,28 @@ impl ParserDomMutationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
         )
     }
 
-    fn prepend_text_to_text_node(&mut self, node_id: DomHandle, text: String) {
-        if let Some(text_node) = self
-            .host
-            .dom_host_mut()
-            .node_mut(node_id)
-            .and_then(|node| node.data_mut().as_text_mut())
-        {
-            let mut merged = text;
-            merged.push_str(text_node.data());
-            text_node.set_data(merged);
-        }
+    fn prepend_text_to_text_node(
+        &mut self,
+        node_id: DomHandle,
+        text: String,
+    ) -> DomMutationEffects {
+        let host = self.host.dom_host_mut();
+        let Some(previous) = host.node(node_id).and_then(Node::as_text) else {
+            return DomMutationEffects::default();
+        };
+        let mut merged = text;
+        merged.push_str(previous.data());
+        host.set_text_content_effects(node_id, &merged)
     }
 
-    fn append_text_to_text_node(&mut self, node_id: DomHandle, text: String) {
-        if let Some(text_node) = self
-            .host
-            .dom_host_mut()
-            .node_mut(node_id)
-            .and_then(|node| node.data_mut().as_text_mut())
-        {
-            let mut merged = text_node.data().to_owned();
-            merged.push_str(&text);
-            text_node.set_data(merged);
-        }
+    fn append_text_to_text_node(&mut self, node_id: DomHandle, text: String) -> DomMutationEffects {
+        let host = self.host.dom_host_mut();
+        let Some(previous) = host.node(node_id).and_then(Node::as_text) else {
+            return DomMutationEffects::default();
+        };
+        let mut merged = previous.data().to_owned();
+        merged.push_str(&text);
+        host.set_text_content_effects(node_id, &merged)
     }
 
     fn push_parse_error(&mut self, error: String) {

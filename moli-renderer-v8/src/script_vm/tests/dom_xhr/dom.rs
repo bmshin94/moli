@@ -2350,6 +2350,77 @@ fn document_point_queries_use_real_paint_order_geometry() {
         r#"{"element":"div","elements":["div","body","html"]}"#
     );
 }
+
+#[test]
+fn parser_coalesced_style_text_updates_main_and_child_hit_tests() {
+    let mut vm = new_parsed_test_vm(
+        "https://parser-style-hit-test.test/",
+        "<!doctype html><body></body>",
+    );
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  function exercise(w) {
+    const d = w.document;
+    d.open();
+    d.write('<!doctype html><style>\n');
+    d.write('html, body {margin:0;padding:0} #target {width:100px;height:100px}');
+    d.write('</style><body><div id=target></div>');
+    const rect = d.getElementById('target').getBoundingClientRect();
+    const result = {rect:[rect.x,rect.y,rect.width,rect.height],
+      hits:d.elementsFromPoint(1,1).map(e => e.id || e.localName)};
+    d.close();
+    return result;
+  }
+  const main = exercise(window);
+  const frame = document.body.appendChild(document.createElement('iframe'));
+  const child = exercise(frame.contentWindow);
+  return JSON.stringify([main,child]);
+})()
+"#,
+        )
+        .expect("coalesced parser text must update its stylesheet before layout queries");
+    let expected = serde_json::json!({"rect":[0,0,100,100], "hits":["target","body","html"]});
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!([expected, expected]),
+    );
+}
+
+#[test]
+fn parser_coalesced_text_notifies_main_and_child_mutation_observers() {
+    let mut vm = new_parsed_test_vm(
+        "https://parser-text-observer.test/",
+        "<!doctype html><body></body>",
+    );
+    let result = vm.eval(r#"
+(() => {
+  function exercise(w) {
+    const d = w.document;
+    d.open(); d.write('<!doctype html><body><p>a');
+    const p = d.querySelector('p'), text = p.firstChild;
+    const observer = new w.MutationObserver(() => {});
+    observer.observe(p, {subtree:true,childList:true,characterData:true,characterDataOldValue:true});
+    d.write('bc');
+    const result = {sameText:p.firstChild === text, children:p.childNodes.length,
+      records:observer.takeRecords().map(r => [r.type,r.target === text,r.oldValue,r.target.data])};
+    observer.disconnect();
+    d.write('</p>'); d.close();
+    return result;
+  }
+  const main = exercise(window);
+  const frame = document.body.appendChild(document.createElement('iframe'));
+  return JSON.stringify([main,exercise(frame.contentWindow)]);
+})()
+"#).expect("parser text coalescing must report characterData without replacing the Text node");
+    let expected = serde_json::json!({"sameText":true,"children":1,
+        "records":[["characterData",true,"a","abc"]]});
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!([expected, expected]),
+    );
+}
 #[test]
 fn document_point_queries_parse_webidl_coordinates() {
     let mut vm = new_parsed_test_vm(

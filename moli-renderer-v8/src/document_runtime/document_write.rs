@@ -276,14 +276,18 @@ impl ParserDomMutationConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> 
             .create_document_type_for_document(document_handle, &name, &public_id, &system_id)
     }
 
-    fn prepend_text_to_text_node(&mut self, node_id: DomHandle, text: String) {
+    fn prepend_text_to_text_node(
+        &mut self,
+        node_id: DomHandle,
+        text: String,
+    ) -> DomMutationEffects {
         self.runtime
-            .prepend_text_to_text_node_in_live_dom_host(node_id, text);
+            .prepend_text_to_text_node_in_live_dom_host(node_id, text)
     }
 
-    fn append_text_to_text_node(&mut self, node_id: DomHandle, text: String) {
+    fn append_text_to_text_node(&mut self, node_id: DomHandle, text: String) -> DomMutationEffects {
         self.runtime
-            .append_text_to_text_node_in_live_dom_host(node_id, text);
+            .append_text_to_text_node_in_live_dom_host(node_id, text)
     }
 
     fn push_parse_error(&mut self, error: String) {

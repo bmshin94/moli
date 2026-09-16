@@ -292,16 +292,24 @@ impl ParserDomMutationConsumer for PhaseOneParserOwner<'_> {
             )
     }
 
-    fn prepend_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn prepend_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         self.vm
             .document_runtime
-            .prepend_text_to_text_node_in_live_dom_host(node_id, text);
+            .prepend_text_to_text_node_in_live_dom_host(node_id, text)
     }
 
-    fn append_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn append_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         self.vm
             .document_runtime
-            .append_text_to_text_node_in_live_dom_host(node_id, text);
+            .append_text_to_text_node_in_live_dom_host(node_id, text)
     }
 
     fn push_parse_error(&mut self, error: String) {

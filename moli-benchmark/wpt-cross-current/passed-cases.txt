@@ -2896,6 +2896,7 @@ css/cssom-view/elementFromPoint-subpixel.html
 css/cssom-view/elementFromPoint-visibility-hidden-resizer.html
 css/cssom-view/elementScroll-002.html
 css/cssom-view/elementScroll.html
+css/cssom-view/elementsFromPoint-iframes.html
 css/cssom-view/elementsFromPoint-inline-htb-ltr.html
 css/cssom-view/elementsFromPoint-inline-nested.html
 css/cssom-view/elementsFromPoint-inline-vlr-ltr.html

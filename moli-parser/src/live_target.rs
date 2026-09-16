@@ -604,9 +604,19 @@ pub trait ParserDomMutationConsumer {
         system_id: String,
     ) -> NativeNodeId;
 
-    fn prepend_text_to_text_node(&mut self, node_id: NativeNodeId, text: String);
+    /// Return notifications for text coalescing just as for node insertion.
+    /// The sink delivers them after releasing its structural borrow.
+    fn prepend_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects;
 
-    fn append_text_to_text_node(&mut self, node_id: NativeNodeId, text: String);
+    fn append_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects;
 
     fn push_parse_error(&mut self, error: String);
 
@@ -642,8 +652,8 @@ struct ParserDomMutationSink {
     create_cdata_section: unsafe fn(NonNull<()>, NativeNodeId, String) -> NativeNodeId,
     create_document_type:
         unsafe fn(NonNull<()>, NativeNodeId, String, String, String) -> NativeNodeId,
-    prepend_text_to_text_node: unsafe fn(NonNull<()>, NativeNodeId, String),
-    append_text_to_text_node: unsafe fn(NonNull<()>, NativeNodeId, String),
+    prepend_text_to_text_node: unsafe fn(NonNull<()>, NativeNodeId, String) -> DomMutationEffects,
+    append_text_to_text_node: unsafe fn(NonNull<()>, NativeNodeId, String) -> DomMutationEffects,
     push_parse_error: unsafe fn(NonNull<()>, String),
     set_html_quirks_mode_for_parser: unsafe fn(NonNull<()>, QuirksMode),
     mark_script_already_started_for_parser: unsafe fn(NonNull<()>, NativeNodeId),
@@ -753,19 +763,19 @@ impl ParserDomMutationSink {
             data: NonNull<()>,
             node_id: NativeNodeId,
             text: String,
-        ) {
+        ) -> DomMutationEffects {
             // SAFETY: ParserDomMutationSink::from_consumer_unchecked requires the
             // pointed-to consumer to remain live and exclusive for the pump step.
-            unsafe { data.cast::<T>().as_mut() }.prepend_text_to_text_node(node_id, text);
+            unsafe { data.cast::<T>().as_mut() }.prepend_text_to_text_node(node_id, text)
         }
         unsafe fn append_text_to_text_node_impl<T: ParserDomMutationConsumer>(
             data: NonNull<()>,
             node_id: NativeNodeId,
             text: String,
-        ) {
+        ) -> DomMutationEffects {
             // SAFETY: ParserDomMutationSink::from_consumer_unchecked requires the
             // pointed-to consumer to remain live and exclusive for the pump step.
-            unsafe { data.cast::<T>().as_mut() }.append_text_to_text_node(node_id, text);
+            unsafe { data.cast::<T>().as_mut() }.append_text_to_text_node(node_id, text)
         }
         unsafe fn push_parse_error_impl<T: ParserDomMutationConsumer>(
             data: NonNull<()>,
@@ -929,16 +939,16 @@ impl ParserDomMutationSink {
         }
     }
 
-    fn prepend_text_to_text_node(self, node_id: NativeNodeId, text: String) {
+    fn prepend_text_to_text_node(self, node_id: NativeNodeId, text: String) -> DomMutationEffects {
         // SAFETY: construction ties the raw pointer and callback to the same
         // consumer remains live for the current runtime-DOM sink step.
-        unsafe { (self.prepend_text_to_text_node)(self.data, node_id, text) };
+        unsafe { (self.prepend_text_to_text_node)(self.data, node_id, text) }
     }
 
-    fn append_text_to_text_node(self, node_id: NativeNodeId, text: String) {
+    fn append_text_to_text_node(self, node_id: NativeNodeId, text: String) -> DomMutationEffects {
         // SAFETY: construction ties the raw pointer and callback to the same
         // consumer remains live for the current runtime-DOM sink step.
-        unsafe { (self.append_text_to_text_node)(self.data, node_id, text) };
+        unsafe { (self.append_text_to_text_node)(self.data, node_id, text) }
     }
 
     fn push_parse_error(self, error: String) {
@@ -1487,16 +1497,24 @@ impl ParserDomMutationConsumer for TestMutationEffectCollector<'_> {
         )
     }
 
-    fn prepend_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn prepend_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         // SAFETY: tests keep the borrowed DomHost pointer alive and route the
         // parser pump through this collector for the duration of the step.
-        prepend_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text);
+        prepend_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text)
     }
 
-    fn append_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn append_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         // SAFETY: tests keep the borrowed DomHost pointer alive and route the
         // parser pump through this collector for the duration of the step.
-        append_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text);
+        append_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text)
     }
 
     fn push_parse_error(&mut self, error: String) {
@@ -1558,26 +1576,30 @@ impl ParserMutationEffectConsumer for TestMutationEffectCollector<'_> {
     }
 }
 
-fn prepend_text_to_text_node_in_host(host: &mut DomHost, node_id: NativeNodeId, text: String) {
-    if let Some(text_node) = host
-        .node_mut(node_id)
-        .and_then(|node| node.data_mut().as_text_mut())
-    {
-        let mut merged = text;
-        merged.push_str(text_node.data());
-        text_node.set_data(merged);
-    }
+fn prepend_text_to_text_node_in_host(
+    host: &mut DomHost,
+    node_id: NativeNodeId,
+    text: String,
+) -> DomMutationEffects {
+    let Some(previous) = host.node(node_id).and_then(Node::as_text) else {
+        return DomMutationEffects::default();
+    };
+    let mut merged = text;
+    merged.push_str(previous.data());
+    host.set_text_content_effects(node_id, &merged)
 }
 
-fn append_text_to_text_node_in_host(host: &mut DomHost, node_id: NativeNodeId, text: String) {
-    if let Some(text_node) = host
-        .node_mut(node_id)
-        .and_then(|node| node.data_mut().as_text_mut())
-    {
-        let mut merged = text_node.data().to_owned();
-        merged.push_str(&text);
-        text_node.set_data(merged);
-    }
+fn append_text_to_text_node_in_host(
+    host: &mut DomHost,
+    node_id: NativeNodeId,
+    text: String,
+) -> DomMutationEffects {
+    let Some(previous) = host.node(node_id).and_then(Node::as_text) else {
+        return DomMutationEffects::default();
+    };
+    let mut merged = previous.data().to_owned();
+    merged.push_str(&text);
+    host.set_text_content_effects(node_id, &merged)
 }
 
 #[cfg(test)]
@@ -1846,16 +1868,24 @@ impl ParserDomMutationConsumer for TestReadTrackingCollector<'_> {
         )
     }
 
-    fn prepend_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn prepend_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         // SAFETY: tests keep the borrowed DomHost pointer alive and route the
         // parser pump through this collector for the duration of the step.
-        prepend_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text);
+        prepend_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text)
     }
 
-    fn append_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn append_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         // SAFETY: tests keep the borrowed DomHost pointer alive and route the
         // parser pump through this collector for the duration of the step.
-        append_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text);
+        append_text_to_text_node_in_host(unsafe { &mut *self.host }, node_id, text)
     }
 
     fn push_parse_error(&mut self, error: String) {
@@ -2755,23 +2785,31 @@ impl ParserStreamHtmlTreeSinkTarget {
         }
     }
 
-    fn prepend_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn prepend_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         if let Some(owner) = &self.runtime_dom_sinks {
             owner
                 .dom_mutation_sink()
-                .prepend_text_to_text_node(node_id, text);
+                .prepend_text_to_text_node(node_id, text)
         } else {
-            prepend_text_to_text_node_in_host(self.dom_host_mut(), node_id, text);
+            prepend_text_to_text_node_in_host(self.dom_host_mut(), node_id, text)
         }
     }
 
-    fn append_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {
+    fn append_text_to_text_node(
+        &mut self,
+        node_id: NativeNodeId,
+        text: String,
+    ) -> DomMutationEffects {
         if let Some(owner) = &self.runtime_dom_sinks {
             owner
                 .dom_mutation_sink()
-                .append_text_to_text_node(node_id, text);
+                .append_text_to_text_node(node_id, text)
         } else {
-            append_text_to_text_node_in_host(self.dom_host_mut(), node_id, text);
+            append_text_to_text_node_in_host(self.dom_host_mut(), node_id, text)
         }
     }
 
@@ -2999,21 +3037,21 @@ impl ParserStreamHtmlTreeSinkTarget {
 
         if let Some(reference_child) = reference_child {
             if self.read_is_text_node(reference_child) {
-                self.prepend_text_to_text_node(reference_child, text);
-                return ParserMutationEffectDelivery::none();
+                let effects = self.prepend_text_to_text_node(reference_child, text);
+                return self.mutation_effect_delivery(effects);
             }
 
             if let Some(previous) = self.read_previous_sibling(reference_child)
                 && self.read_is_text_node(previous)
             {
-                self.append_text_to_text_node(previous, text);
-                return ParserMutationEffectDelivery::none();
+                let effects = self.append_text_to_text_node(previous, text);
+                return self.mutation_effect_delivery(effects);
             }
         } else if let Some(last_child) = self.read_last_child(parent_id)
             && self.read_is_text_node(last_child)
         {
-            self.append_text_to_text_node(last_child, text);
-            return ParserMutationEffectDelivery::none();
+            let effects = self.append_text_to_text_node(last_child, text);
+            return self.mutation_effect_delivery(effects);
         }
 
         let document_handle = self
