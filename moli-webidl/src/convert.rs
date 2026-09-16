@@ -378,7 +378,7 @@ where
     Ok(Some(Sequence(values)))
 }
 
-// Records are converted from own property names and then property values. If two
+// Records are converted from own property keys and then property values. If two
 // JavaScript keys become the same WebIDL key after key conversion, the later
 // property wins, matching the WebIDL record replacement behavior.
 impl<'s, K, V> WebIdlConverter<'s> for Record<K, V>
@@ -398,12 +398,15 @@ where
     ) -> Result<Self, WebIdlError> {
         let object = v8::Local::<v8::Object>::try_from(value)
             .map_err(|_| WebIdlError::new(context, WebIdlErrorKind::CannotConvert("record")))?;
-        let properties = own_property_names(scope, object, context)?;
-        let mut entries: Vec<(K, V)> = Vec::with_capacity(properties.length() as usize);
-        for index in 0..properties.length() {
-            let key_value = properties.get_index(scope, index).ok_or_else(|| {
+        let keys = record_own_keys(scope, object, context)?;
+        let mut entries: Vec<(K, V)> = Vec::with_capacity(keys.length() as usize);
+        for index in 0..keys.length() {
+            let key_value = keys.get_index(scope, index).ok_or_else(|| {
                 WebIdlError::new(context, WebIdlErrorKind::CannotConvert("record"))
             })?;
+            if !record_property_is_enumerable(scope, object, key_value, context)? {
+                continue;
+            }
             let key = K::convert(scope, key_value, context, &K::Options::default())?;
             let value = record_property_value(scope, object, key_value, context)?;
             let value = V::convert(scope, value, context, &V::Options::default())?;
@@ -1200,21 +1203,65 @@ fn call_sequence_function<'s>(
     }
 }
 
-fn own_property_names<'s>(
+fn record_own_keys<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
     context: Context,
 ) -> Result<v8::Local<'s, v8::Array>, WebIdlError> {
     let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
     let mut scope = try_catch.init();
-    // WebIDL record conversion starts with [[OwnPropertyKeys]], including symbols,
-    // and then considers only enumerable properties. V8's default arguments skip
-    // symbols, which would bypass the record key conversion that rejects them.
+    // WebIDL record conversion starts with [[OwnPropertyKeys]]. Enumerability is
+    // checked later, one key at a time, so Proxy descriptor traps stay interleaved
+    // with key and value conversion.
     let property_names_args = v8::GetPropertyNamesArgsBuilder::new()
-        .property_filter(v8::PropertyFilter::ONLY_ENUMERABLE)
+        .property_filter(v8::PropertyFilter::ALL_PROPERTIES)
+        .key_conversion(v8::KeyConversionMode::ConvertToString)
         .build();
     match object.get_own_property_names(&scope, property_names_args) {
         Some(properties) => Ok(properties),
+        None if scope.has_caught() => {
+            let _ = scope.rethrow();
+            Err(WebIdlError::pending_exception(context))
+        }
+        None => Err(WebIdlError::new(
+            context,
+            WebIdlErrorKind::CannotConvert("record"),
+        )),
+    }
+}
+
+fn record_property_is_enumerable<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    key: v8::Local<'s, v8::Value>,
+    context: Context,
+) -> Result<bool, WebIdlError> {
+    let key = v8::Local::<v8::Name>::try_from(key)
+        .map_err(|_| WebIdlError::new(context, WebIdlErrorKind::CannotConvert("record")))?;
+    let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
+    let mut scope = try_catch.init();
+    let descriptor = match object.get_own_property_descriptor(&scope, key) {
+        Some(descriptor) => descriptor,
+        None if scope.has_caught() => {
+            let _ = scope.rethrow();
+            return Err(WebIdlError::pending_exception(context));
+        }
+        None => {
+            return Err(WebIdlError::new(
+                context,
+                WebIdlErrorKind::CannotConvert("record"),
+            ));
+        }
+    };
+    if descriptor.is_undefined() {
+        return Ok(false);
+    }
+    let descriptor = v8::Local::<v8::Object>::try_from(descriptor)
+        .map_err(|_| WebIdlError::new(context, WebIdlErrorKind::CannotConvert("record")))?;
+    let enumerable_key = v8::String::new(&scope, "enumerable")
+        .ok_or_else(|| WebIdlError::new(context, WebIdlErrorKind::CannotConvert("record")))?;
+    match descriptor.get(&scope, enumerable_key.into()) {
+        Some(enumerable) => Ok(enumerable.boolean_value(&scope)),
         None if scope.has_caught() => {
             let _ = scope.rethrow();
             Err(WebIdlError::pending_exception(context))

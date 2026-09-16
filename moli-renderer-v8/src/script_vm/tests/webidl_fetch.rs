@@ -6812,6 +6812,64 @@ fn webidl_initializer_records_reject_enumerable_symbol_keys() {
 }
 
 #[test]
+fn webidl_initializer_records_interleave_descriptor_and_value_access() {
+    let mut vm = new_storage_test_vm("https://initializer-record-order.test/");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const equal = (actual, expected, label) => {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error(label + ': ' + JSON.stringify(actual));
+    }
+  };
+  const consumers = [
+    ['Headers', input => Array.from(new Headers(input)).map(pair => pair.join('=')).join('&')],
+    ['URLSearchParams', input => new URLSearchParams(input).toString()],
+  ];
+  for (const [target, create] of consumers) {
+    const log = [];
+    const record = {};
+    Object.defineProperties(record, {
+      a: {value: '1', enumerable: true, configurable: true},
+      b: {value: '2', enumerable: true, configurable: true},
+    });
+    const input = new Proxy(record, {
+      get(object, key, receiver) {
+        log.push(['get', key === Symbol.iterator ? '@@iterator' : String(key)]);
+        if (key === Symbol.iterator) return undefined;
+        if (key === 'a') {
+          Object.defineProperty(object, 'b', {enumerable: false});
+        }
+        return Reflect.get(object, key, receiver);
+      },
+      ownKeys(object) {
+        log.push(['ownKeys']);
+        return Reflect.ownKeys(object);
+      },
+      getOwnPropertyDescriptor(object, key) {
+        log.push(['descriptor', String(key)]);
+        return Reflect.getOwnPropertyDescriptor(object, key);
+      },
+    });
+    equal(create(input), 'a=1', target + ' result');
+    equal(log, [
+      ['get', '@@iterator'],
+      ['ownKeys'],
+      ['descriptor', 'a'],
+      ['get', 'a'],
+      ['descriptor', 'b'],
+    ], target + ' operation order');
+  }
+  return 'ok';
+})()
+"#,
+        )
+        .unwrap();
+    assert_eq!(result, "ok");
+}
+
+#[test]
 fn webidl_initializer_unions_convert_url_objects_as_records() {
     let mut vm = new_storage_test_vm("https://initializer-record.test/");
     let result = vm
