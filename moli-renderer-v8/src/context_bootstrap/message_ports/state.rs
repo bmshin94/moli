@@ -191,7 +191,7 @@ struct MessagePortPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(interface = web_api_interfaces::MessageChannel)]
+#[webapi(interface = web_api_interfaces::MessageChannel, receiver)]
 struct MessageChannelPrototypeDeclaration {
     #[webapi(
         accessor_property,
