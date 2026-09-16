@@ -1542,12 +1542,9 @@ css/css-grid/abspos/positioned-grid-descendants-005.html
 css/css-grid/abspos/positioned-grid-descendants-006.html
 css/css-grid/abspos/positioned-grid-descendants-008.html
 css/css-grid/abspos/positioned-grid-descendants-009.html
-css/css-grid/abspos/positioned-grid-descendants-010.html
-css/css-grid/abspos/positioned-grid-descendants-011.html
 css/css-grid/abspos/positioned-grid-descendants-012.html
 css/css-grid/abspos/positioned-grid-descendants-013.html
 css/css-grid/abspos/positioned-grid-descendants-014.html
-css/css-grid/abspos/positioned-grid-descendants-015.html
 css/css-grid/abspos/positioned-grid-descendants-016.html
 css/css-grid/abspos/positioned-grid-descendants-017.html
 css/css-grid/abspos/positioned-grid-items-001.html
@@ -1675,6 +1672,7 @@ css/css-grid/alignment/grid-item-aspect-ratio-justify-self-002.html
 css/css-grid/alignment/grid-item-auto-margins-001.html
 css/css-grid/alignment/grid-item-auto-margins-002.html
 css/css-grid/alignment/grid-item-auto-margins-alignment.html
+css/css-grid/alignment/grid-place-content-001.html
 css/css-grid/alignment/grid-row-axis-alignment-sticky-positioned-items-001.html
 css/css-grid/alignment/grid-row-axis-alignment-sticky-positioned-items-002.html
 css/css-grid/alignment/grid-self-alignment-baseline-with-grid-001.html
@@ -3022,7 +3020,6 @@ css/cssom/cssimportrule-parent.html
 css/cssom/cssimportrule-sheet-identity.html
 css/cssom/cssom-cssText-serialize.html
 css/cssom/cssom-cssstyledeclaration-set.html
-css/cssom/cssom-fontfacerule-constructors.html
 css/cssom/cssom-fontfacerule.html
 css/cssom/cssom-ruleTypeAndOrder.html
 css/cssom/cssom-setProperty-shorthand.html
@@ -3031,6 +3028,7 @@ css/cssom/cssstyledeclaration-csstext-all-shorthand.html
 css/cssom/cssstyledeclaration-csstext-final-delimiter.html
 css/cssom/cssstyledeclaration-csstext-important.html
 css/cssom/cssstyledeclaration-csstext.html
+css/cssom/cssstyledeclaration-custom-properties.html
 css/cssom/cssstyledeclaration-mutability.html
 css/cssom/cssstyledeclaration-mutationrecord-001.html
 css/cssom/cssstyledeclaration-mutationrecord-002.html
@@ -3372,7 +3370,9 @@ custom-elements/parser/parser-custom-element-in-foreign-content.html
 custom-elements/parser/parser-fallsback-to-unknown-element.html
 custom-elements/parser/parser-sets-attributes-and-children.html
 custom-elements/parser/parser-uses-constructed-element.html
+custom-elements/parser/parser-uses-registry-of-owner-document.html
 custom-elements/parser/serializing-html-fragments-customized-builtins.html
+custom-elements/perform-microtask-checkpoint-before-construction.html
 custom-elements/pseudo-class-defined-customized-builtins.html
 custom-elements/pseudo-class-defined.html
 custom-elements/range-and-constructors.html
@@ -3385,6 +3385,7 @@ custom-elements/reactions/CSSStyleDeclaration.html
 custom-elements/reactions/ChildNode.html
 custom-elements/reactions/DOMStringMap.html
 custom-elements/reactions/DOMTokenList.html
+custom-elements/reactions/Document.html
 custom-elements/reactions/Element.html
 custom-elements/reactions/ElementContentEditable.html
 custom-elements/reactions/HTMLAnchorElement.html
@@ -3468,6 +3469,8 @@ custom-elements/state/state-css-selector-nth-of.html
 custom-elements/state/state-css-selector-shadow-dom.html
 custom-elements/state/state-css-selector.html
 custom-elements/state/state-pseudo-class.html
+custom-elements/throw-on-dynamic-markup-insertion-counter-construct.html
+custom-elements/throw-on-dynamic-markup-insertion-counter-reactions.html
 custom-elements/upgrading.html
 custom-elements/upgrading/Document-importNode-customized-builtins.html
 custom-elements/upgrading/Document-importNode.html
@@ -5624,6 +5627,7 @@ html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroll
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller-nested-4.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller-nested-5.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller-nested.html
+html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-in-scroller.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-nav-form-submit.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-nav-link-click-fragment.html
 html/semantics/embedded-content/the-iframe-element/iframe-loading-lazy-nav-link-click.html
@@ -5679,6 +5683,7 @@ html/semantics/embedded-content/the-iframe-element/sandbox_028.htm
 html/semantics/embedded-content/the-iframe-element/sandbox_030.htm
 html/semantics/embedded-content/the-iframe-element/sandbox_031.htm
 html/semantics/embedded-content/the-iframe-element/sandbox_032.htm
+html/semantics/embedded-content/the-iframe-element/src-repeated-in-ancestor.html
 html/semantics/embedded-content/the-iframe-element/srcdoc-anchor.html
 html/semantics/embedded-content/the-iframe-element/srcdoc-attribute-reset.html
 html/semantics/embedded-content/the-iframe-element/srcdoc_process_attributes.html
@@ -5846,6 +5851,7 @@ html/semantics/forms/the-form-element/form-elements-nameditem-02.html
 html/semantics/forms/the-form-element/form-elements-sameobject.html
 html/semantics/forms/the-form-element/form-indexed-element-shadow.html
 html/semantics/forms/the-form-element/form-indexed-element.html
+html/semantics/forms/the-form-element/form-length.html
 html/semantics/forms/the-form-element/form-nameditem.html
 html/semantics/forms/the-form-element/form-requestsubmit.html
 html/semantics/forms/the-input-element/button.html
@@ -6024,6 +6030,7 @@ html/semantics/interactive-elements/the-dialog-element/dialog-showModal-remove.h
 html/semantics/interactive-elements/the-dialog-element/form-submit-dialog-shadow.html
 html/semantics/interactive-elements/the-dialog-element/inert-does-not-match-disabled-selector.html
 html/semantics/interactive-elements/the-dialog-element/inert-node-is-unselectable.html
+html/semantics/interactive-elements/the-dialog-element/inertness-with-modal-dialogs-and-iframes.html
 html/semantics/interactive-elements/the-dialog-element/modal-dialog-in-visibility-hidden.html
 html/semantics/interactive-elements/the-dialog-element/submit-dialog-close-event.html
 html/semantics/interactive-elements/the-dialog-element/synthetic-click-inert.html
@@ -6057,7 +6064,9 @@ html/semantics/scripting-1/the-noscript-element/non-html-noscript.html
 html/semantics/scripting-1/the-script-element/async_001.htm
 html/semantics/scripting-1/the-script-element/async_002.htm
 html/semantics/scripting-1/the-script-element/async_011.htm
+html/semantics/scripting-1/the-script-element/css-module/charset-2.html
 html/semantics/scripting-1/the-script-element/css-module/charset-bom.html
+html/semantics/scripting-1/the-script-element/css-module/charset.html
 html/semantics/scripting-1/the-script-element/css-module/css-module-parse-error.html
 html/semantics/scripting-1/the-script-element/css-module/import-css-module-basic.html
 html/semantics/scripting-1/the-script-element/css-module/import-css-module-dynamic.html
@@ -6223,12 +6232,19 @@ html/semantics/scripting-1/the-script-element/import-attributes/empty-attributes
 html/semantics/scripting-1/the-script-element/import-attributes/invalid-import-errors-order.html
 html/semantics/scripting-1/the-script-element/import-attributes/invalid-type-attribute-error.html
 html/semantics/scripting-1/the-script-element/import-attributes/unsupported-attribute.html
+html/semantics/scripting-1/the-script-element/json-module/charset-2.html
+html/semantics/scripting-1/the-script-element/json-module/charset.html
 html/semantics/scripting-1/the-script-element/json-module/integrity.html
 html/semantics/scripting-1/the-script-element/json-module/module.html
 html/semantics/scripting-1/the-script-element/json-module/parse-error.html
 html/semantics/scripting-1/the-script-element/json-module/script-element-json-src.html
+html/semantics/scripting-1/the-script-element/json-module/valid-content-type.html
+html/semantics/scripting-1/the-script-element/load-error-events-1.html
 html/semantics/scripting-1/the-script-element/microtasks/evaluation-order-3.html
 html/semantics/scripting-1/the-script-element/microtasks/evaluation-order-4.html
+html/semantics/scripting-1/the-script-element/module/charset-01.html
+html/semantics/scripting-1/the-script-element/module/charset-02.html
+html/semantics/scripting-1/the-script-element/module/charset-03.html
 html/semantics/scripting-1/the-script-element/module/choice-of-error-1.html
 html/semantics/scripting-1/the-script-element/module/choice-of-error-2.html
 html/semantics/scripting-1/the-script-element/module/currentScript-null.html
@@ -6259,6 +6275,8 @@ html/semantics/scripting-1/the-script-element/module/execorder.html
 html/semantics/scripting-1/the-script-element/module/fetch-error-1.html
 html/semantics/scripting-1/the-script-element/module/fetch-error-2.html
 html/semantics/scripting-1/the-script-element/module/import-meta/import-meta-resolve-importmap.html
+html/semantics/scripting-1/the-script-element/module/import-meta/import-meta-resolve-multiple-scripts.html
+html/semantics/scripting-1/the-script-element/module/import-meta/import-meta-url.html
 html/semantics/scripting-1/the-script-element/module/import-subgraph-404.html
 html/semantics/scripting-1/the-script-element/module/imports.html
 html/semantics/scripting-1/the-script-element/module/inactive-context-import.html
@@ -6275,6 +6293,7 @@ html/semantics/scripting-1/the-script-element/module/integrity.html
 html/semantics/scripting-1/the-script-element/module/late-namespace-request.html
 html/semantics/scripting-1/the-script-element/module/late-star-export-request.html
 html/semantics/scripting-1/the-script-element/module/load-error-events-inline.html
+html/semantics/scripting-1/the-script-element/module/load-error-events.html
 html/semantics/scripting-1/the-script-element/module/module-vs-script-1.html
 html/semantics/scripting-1/the-script-element/module/module-vs-script-2.html
 html/semantics/scripting-1/the-script-element/module/nested-imports.html
@@ -6293,6 +6312,8 @@ html/semantics/scripting-1/the-script-element/nomodule-set-on-inline-module-scri
 html/semantics/scripting-1/the-script-element/nomodule-set-on-synchronously-loaded-classic-scripts.html
 html/semantics/scripting-1/the-script-element/promise-reject-and-remove.html
 html/semantics/scripting-1/the-script-element/remove-src-attr-prepare-a-script.html
+html/semantics/scripting-1/the-script-element/script-charset-01.html
+html/semantics/scripting-1/the-script-element/script-charset-02.html
 html/semantics/scripting-1/the-script-element/script-charset-03.html
 html/semantics/scripting-1/the-script-element/script-crossorigin.html
 html/semantics/scripting-1/the-script-element/script-defer.html
@@ -6858,6 +6879,7 @@ inert/inert-and-contenteditable.html
 inert/inert-does-not-match-disabled-selector.html
 inert/inert-inlines-around-selection-range-in-contenteditable.html
 inert/inert-node-is-unselectable.html
+inert/inert-with-modal-dialog-001.html
 inert/inert-with-modal-dialog-002.html
 infrastructure/assumptions/cookie.html
 infrastructure/assumptions/html-elements.html
@@ -7354,7 +7376,6 @@ quirks/unitless-length/quirks.html
 referrer-policy/generic/subresource-test/attr-referrer-invalid-value.html
 requestidlecallback/basic.html
 requestidlecallback/callback-exception.html
-requestidlecallback/callback-idle-periods.html
 requestidlecallback/callback-iframe-different-origin.html
 requestidlecallback/callback-iframe.html
 requestidlecallback/callback-invoked.html
@@ -7465,6 +7486,7 @@ selection/textcontrols/selectionchange-bubble.html
 selection/textcontrols/selectionchange-on-shadow-dom.html
 selection/textcontrols/selectionchange.html
 selection/toString-ff-bug-001.html
+selection/toString-user-select-none.html
 selection/type.html
 service-workers/cache-storage/cache-api-nested-worker.https.html
 service-workers/cache-storage/credentials.https.html
@@ -7522,7 +7544,6 @@ service-workers/service-worker/register-wait-forever-in-install-worker.https.htm
 service-workers/service-worker/registration-basic.https.html
 service-workers/service-worker/registration-events.https.html
 service-workers/service-worker/registration-iframe.https.html
-service-workers/service-worker/rejections.https.html
 service-workers/service-worker/serviceworker-message-event-historical.https.html
 service-workers/service-worker/serviceworkerobject-scripturl.https.html
 service-workers/service-worker/state.https.html
@@ -7561,6 +7582,7 @@ shadow-dom/declarative/declarative-shadow-dom-slot-assignment.html
 shadow-dom/declarative/declarative-shadow-dom-write-to-iframe.html
 shadow-dom/declarative/declarative-with-disabled-shadow.html
 shadow-dom/declarative/gethtml-ordering.html
+shadow-dom/declarative/gethtml.html
 shadow-dom/declarative/innerhtml-before-closing-tag.html
 shadow-dom/declarative/innerhtml-on-ordinary-template.html
 shadow-dom/declarative/move-template-before-closing-tag.html
@@ -8674,6 +8696,9 @@ xhr/open-url-multi-window-6.htm
 xhr/open-url-multi-window.htm
 xhr/open-url-worker-simple.htm
 xhr/open-user-password-non-same-origin.htm
+xhr/overridemimetype-loading-state.htm
+xhr/overridemimetype-open-state-force-utf-8.htm
+xhr/overridemimetype-open-state-force-xml.htm
 xhr/progress-events-response-data-gzip.htm
 xhr/progressevent-constructor.html
 xhr/progressevent-interface.html
@@ -8682,11 +8707,13 @@ xhr/responseXML-unavailable-in-worker.html
 xhr/responsexml-get-twice.htm
 xhr/responsexml-invalid-type.html
 xhr/responsexml-non-document-types.htm
+xhr/send-after-setting-document-domain.htm
 xhr/send-non-same-origin.htm
 xhr/send-sync-blocks-async.htm
 xhr/send-sync-timeout.htm
 xhr/setrequestheader-after-send.htm
 xhr/setrequestheader-before-open.htm
+xhr/status-error.htm
 xhr/sync-xhr-and-window-onload.html
 xhr/template-element.html
 xhr/thrown-error-in-events.html
@@ -8723,6 +8750,7 @@ xhr/xmlhttprequest-timeout-worker-overrides.html?timeout enabled after initially
 xhr/xmlhttprequest-timeout-worker-overrides.html?timeout overrides load after a delay
 xhr/xmlhttprequest-timeout-worker-overridesexpires.html?timeout set to expired value before load fires
 xhr/xmlhttprequest-timeout-worker-overridesexpires.html?timeout set to expiring value after load fires
+xhr/xmlhttprequest-timeout-worker-overridesexpires.html?timeout set to non-expiring value after timeout fires
 xhr/xmlhttprequest-timeout-worker-simple.html?load fires normally
 xhr/xmlhttprequest-timeout-worker-simple.html?no time out scheduled, load fires normally
 xhr/xmlhttprequest-timeout-worker-simple.html?timeout hit before load
