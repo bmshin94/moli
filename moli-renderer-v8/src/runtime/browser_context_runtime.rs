@@ -254,13 +254,14 @@ impl DetachedParserScriptFetchContinuation {
                 error_text.clone(),
             ));
         inner.request.0.finish();
-        inner
-            .completer
-            .finish(external_script_source_load_outcome_from_result(
+        inner.loader.script_source_completion()(
+            inner.completer,
+            external_script_source_load_outcome_from_result(
                 &inner.script,
                 Err(error_text),
                 inner.document_character_set.as_deref(),
-            ));
+            ),
+        );
         true
     }
 
@@ -291,13 +292,14 @@ impl DetachedParserScriptFetchContinuation {
         crate::network::ResourceBodyResponse::from(response.clone())
             .publish(&inner.request.1, None);
         inner.request.0.finish();
-        inner
-            .completer
-            .finish(external_script_source_load_outcome_from_result(
+        inner.loader.script_source_completion()(
+            inner.completer,
+            external_script_source_load_outcome_from_result(
                 &inner.script,
                 Ok(response),
                 inner.document_character_set.as_deref(),
-            ));
+            ),
+        );
         true
     }
 
@@ -336,13 +338,14 @@ impl DetachedParserScriptFetchContinuation {
                 .await
                 .map(|(response, _)| response)
                 .map_err(|error| error.to_string());
-            inner
-                .completer
-                .finish(external_script_source_load_outcome_from_result(
+            inner.loader.script_source_completion()(
+                inner.completer,
+                external_script_source_load_outcome_from_result(
                     &inner.script,
                     result,
                     inner.document_character_set.as_deref(),
-                ));
+                ),
+            );
         });
         true
     }

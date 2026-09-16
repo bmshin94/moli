@@ -365,7 +365,7 @@ fn send_synchronous_network_xhr(
     let response = ResourceResponseStream::new(network);
     let observer = response.network.clone();
     let preflight = crate::network_host::CorsPreflightNetworkObserver {
-        request: observer.request(),
+        request: observer.request().expect("admitted synchronous XHR"),
         observer: Arc::new(move |event| observer.observe(event)),
         frame_id: prepared.frame_id.clone(),
         resource_type: SubresourceResourceType::Xhr,
