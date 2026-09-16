@@ -1036,7 +1036,7 @@ async fn worker_opfs_sync_shared_modes_enforce_compatibility_and_write_permissio
 }
 
 #[tokio::test]
-async fn worker_opfs_unsafe_handles_keep_separate_cursors_and_reject_host_file_overflow() {
+async fn worker_opfs_unsafe_handles_keep_separate_cursors_and_enforce_offset_range() {
     ensure_v8();
     let mut handle = spawn_worker(
         r#"
@@ -1066,8 +1066,8 @@ async fn worker_opfs_unsafe_handles_keep_separate_cursors_and_reject_host_file_o
             first.write(new TextEncoder().encode("C"));
             second.write(new TextEncoder().encode("Z"));
 
-            const huge = 2 ** 63;
-            const nearLimit = huge - 1024;
+            const huge = 2 ** 53;
+            const nearLimit = Number.MAX_SAFE_INTEGER;
             const bounds = [
                 thrownName(() => first.read(new Uint8Array(0), { at: huge })),
                 thrownName(() => first.write(new Uint8Array(0), { at: huge })),

@@ -1303,33 +1303,37 @@ fn unsigned_long_long(value: f64) -> u64 {
 }
 
 fn enforce_range_unsigned_long_long(value: f64, context: Context) -> Result<u64, WebIdlError> {
-    if !value.is_finite() || value < 0.0 || value >= 2f64.powi(64) {
+    // ConvertToInt uses the exact JavaScript integer range for 64-bit types.
+    let value = value.trunc();
+    if !value.is_finite() || !(0.0..=9_007_199_254_740_991.0).contains(&value) {
         return Err(WebIdlError::new(
             context,
             WebIdlErrorKind::CannotConvert("[EnforceRange] unsigned long long"),
         ));
     }
-    Ok(value.trunc() as u64)
+    Ok(value as u64)
 }
 
 fn enforce_range_unsigned_long(value: f64, context: Context) -> Result<u32, WebIdlError> {
+    let value = value.trunc();
     if !value.is_finite() || value < 0.0 || value >= 2f64.powi(32) {
         return Err(WebIdlError::new(
             context,
             WebIdlErrorKind::CannotConvert("[EnforceRange] unsigned long"),
         ));
     }
-    Ok(value.trunc() as u32)
+    Ok(value as u32)
 }
 
 fn enforce_range_long(value: f64, context: Context) -> Result<i32, WebIdlError> {
+    let value = value.trunc();
     if !value.is_finite() || value < -(2f64.powi(31)) || value >= 2f64.powi(31) {
         return Err(WebIdlError::new(
             context,
             WebIdlErrorKind::CannotConvert("[EnforceRange] long"),
         ));
     }
-    Ok(value.trunc() as i32)
+    Ok(value as i32)
 }
 
 fn long(value: f64) -> i32 {
@@ -1410,9 +1414,17 @@ mod tests {
         let context = Context::argument("IDBFactory.open", 2);
         assert!(enforce_range_unsigned_long_long(f64::NAN, context).is_err());
         assert!(enforce_range_unsigned_long_long(f64::INFINITY, context).is_err());
+        assert!(enforce_range_unsigned_long_long(f64::NEG_INFINITY, context).is_err());
         assert!(enforce_range_unsigned_long_long(-1.0, context).is_err());
+        assert!(enforce_range_unsigned_long_long(2f64.powi(53), context).is_err());
         assert!(enforce_range_unsigned_long_long(2f64.powi(64), context).is_err());
         assert_eq!(enforce_range_unsigned_long_long(1.9, context).unwrap(), 1);
+        assert_eq!(enforce_range_unsigned_long_long(-0.9, context).unwrap(), 0);
+        assert_eq!(enforce_range_unsigned_long_long(-0.0, context).unwrap(), 0);
+        assert_eq!(
+            enforce_range_unsigned_long_long(9_007_199_254_740_991.0, context).unwrap(),
+            9_007_199_254_740_991
+        );
     }
 
     #[test]
@@ -1420,9 +1432,16 @@ mod tests {
         let context = Context::argument("IDBCursor.advance", 1);
         assert!(enforce_range_unsigned_long(f64::NAN, context).is_err());
         assert!(enforce_range_unsigned_long(f64::INFINITY, context).is_err());
+        assert!(enforce_range_unsigned_long(f64::NEG_INFINITY, context).is_err());
         assert!(enforce_range_unsigned_long(-1.0, context).is_err());
         assert!(enforce_range_unsigned_long(2f64.powi(32), context).is_err());
         assert_eq!(enforce_range_unsigned_long(1.9, context).unwrap(), 1);
+        assert_eq!(enforce_range_unsigned_long(-0.9, context).unwrap(), 0);
+        assert_eq!(enforce_range_unsigned_long(-0.0, context).unwrap(), 0);
+        assert_eq!(
+            enforce_range_unsigned_long(4_294_967_295.9, context).unwrap(),
+            u32::MAX
+        );
     }
 
     #[test]
@@ -1430,10 +1449,20 @@ mod tests {
         let context = Context::argument("CanvasRenderingContext2D.getImageData", 1);
         assert!(enforce_range_long(f64::NAN, context).is_err());
         assert!(enforce_range_long(f64::INFINITY, context).is_err());
+        assert!(enforce_range_long(f64::NEG_INFINITY, context).is_err());
         assert!(enforce_range_long(-(2f64.powi(31)) - 1.0, context).is_err());
         assert!(enforce_range_long(2f64.powi(31), context).is_err());
         assert_eq!(enforce_range_long(-1.9, context).unwrap(), -1);
         assert_eq!(enforce_range_long(1.9, context).unwrap(), 1);
+        assert_eq!(enforce_range_long(-0.0, context).unwrap(), 0);
+        assert_eq!(
+            enforce_range_long(-2_147_483_648.9, context).unwrap(),
+            i32::MIN
+        );
+        assert_eq!(
+            enforce_range_long(2_147_483_647.9, context).unwrap(),
+            i32::MAX
+        );
     }
 
     #[test]
