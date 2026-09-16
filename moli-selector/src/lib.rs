@@ -5,18 +5,17 @@
 
 mod cssom_selector;
 mod detached_stylo;
+mod directionality;
 mod error;
 mod stylo;
 mod validation;
 
-pub use cssom_selector::{
-    CssDirection, GetComputedStylePseudoElement, first_strong_text_direction,
-    get_computed_style_pseudo_element,
-};
+pub use cssom_selector::{GetComputedStylePseudoElement, get_computed_style_pseudo_element};
 pub use detached_stylo::{
     DetachedStyloSelectorHost, detached_stylo_selector_matches,
     detached_stylo_selector_matches_if_uses_defined_pseudo, detached_stylo_selector_query_all,
 };
+pub use directionality::{CssDirection, first_strong_text_direction, html_directionality};
 pub use error::{SelectorError, SelectorErrorKind};
 pub use moli_dom as dom;
 pub use stylo::{
@@ -272,10 +271,6 @@ impl QueryEngine {
         let host = Self::host_for_document(document);
         self.closest_host(&host, start, selector)
     }
-}
-
-pub fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirection {
-    stylo::html_directionality(host, handle)
 }
 
 pub fn validate_supports_selector_condition_argument(selector: &str) -> Result<(), SelectorError> {

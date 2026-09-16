@@ -9,42 +9,6 @@ fn css_parse_error<'i>(error: cssparser::BasicParseError<'i>) -> ParseError<'i, 
     error.into()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CssDirection {
-    Ltr,
-    Rtl,
-}
-
-impl CssDirection {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ltr => "ltr",
-            Self::Rtl => "rtl",
-        }
-    }
-}
-
-pub fn first_strong_text_direction(value: &str) -> Option<CssDirection> {
-    value.chars().find_map(strong_char_direction)
-}
-
-fn strong_char_direction(ch: char) -> Option<CssDirection> {
-    if is_rtl_strong_char(ch) {
-        Some(CssDirection::Rtl)
-    } else if ch.is_alphabetic() {
-        Some(CssDirection::Ltr)
-    } else {
-        None
-    }
-}
-
-fn is_rtl_strong_char(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x0590..=0x08ff | 0xfb1d..=0xfdff | 0xfe70..=0xfefc | 0x10800..=0x10fff
-    )
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GetComputedStylePseudoElement {
     OriginatingElement,

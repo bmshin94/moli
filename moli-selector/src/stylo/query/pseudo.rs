@@ -1,4 +1,4 @@
-use crate::{CssDirection, first_strong_text_direction};
+use crate::{CssDirection, html_directionality};
 use dom::{ElementState, HEADING_LEVEL_OFFSET};
 
 use crate::{
@@ -8,9 +8,9 @@ use crate::{
             form_control_type_supports_intrinsic_validation, input_range_overflow,
             input_range_underflow, parse_input_numeric_value, parse_non_negative_integer_prefix,
         },
-        native::{DomHost, Element, Node},
+        native::{Element, Node},
     },
-    stylo::{atoms::normalized_direction, query::QueryElement},
+    stylo::query::QueryElement,
 };
 
 impl<'a> QueryElement<'a> {
@@ -611,95 +611,6 @@ impl<'a> QueryElement<'a> {
         }
         None
     }
-}
-
-pub(crate) fn html_directionality(host: &DomHost, handle: NodeId) -> CssDirection {
-    let mut current = Some(handle);
-    while let Some(handle) = current {
-        if let Some(element) = host.node(handle).and_then(Node::as_element) {
-            if let Some(direction) = element.attribute("dir").and_then(normalized_direction) {
-                return direction;
-            }
-            if element
-                .attribute("dir")
-                .is_some_and(|value| value.eq_ignore_ascii_case("auto"))
-                || element.is_html_element("bdi")
-            {
-                return auto_direction_for_element(host, handle).unwrap_or(CssDirection::Ltr);
-            }
-            if element.is_html_input() && element.input_type() == "tel" {
-                return CssDirection::Ltr;
-            }
-        }
-        current = host
-            .node(handle)
-            .and_then(Node::parent_node)
-            .or_else(|| host.shadow_root_host(handle));
-    }
-    CssDirection::Ltr
-}
-
-fn auto_direction_for_element(host: &DomHost, root: NodeId) -> Option<CssDirection> {
-    if let Some(element) = host.node(root).and_then(Node::as_element)
-        && element.is_html_input()
-    {
-        return input_auto_direction(element);
-    }
-
-    let mut stack = host.child_handles(root).collect::<Vec<_>>();
-    stack.reverse();
-    while let Some(handle) = stack.pop() {
-        let Some(node) = host.node(handle) else {
-            continue;
-        };
-        if let Some(text) = node.as_text() {
-            if let Some(direction) = first_strong_text_direction(text.data()) {
-                return Some(direction);
-            }
-            continue;
-        }
-        let Some(element) = node.as_element() else {
-            continue;
-        };
-        if descendant_is_directionally_isolated_for_auto(element) {
-            continue;
-        }
-        let mut children = host.child_handles(handle).collect::<Vec<_>>();
-        children.reverse();
-        stack.extend(children);
-    }
-    None
-}
-
-fn descendant_is_directionally_isolated_for_auto(element: &Element) -> bool {
-    if element.is_html_element("bdi") {
-        return true;
-    }
-    element.attribute("dir").is_some_and(|value| {
-        normalized_direction(value).is_some() || value.eq_ignore_ascii_case("auto")
-    })
-}
-
-fn input_auto_direction(element: &Element) -> Option<CssDirection> {
-    input_type_uses_value_for_auto_direction(&element.input_type())
-        .then(|| first_strong_text_direction(&element.input_value()))
-        .flatten()
-}
-
-fn input_type_uses_value_for_auto_direction(input_type: &str) -> bool {
-    matches!(
-        input_type,
-        "hidden"
-            | "text"
-            | "search"
-            | "tel"
-            | "url"
-            | "email"
-            | "password"
-            | "submit"
-            | "reset"
-            | "button"
-    )
 }
 
 fn default_submit_button_element(element: &Element) -> bool {

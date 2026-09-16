@@ -2981,6 +2981,7 @@ dependencies = [
  "stylo",
  "stylo_dom",
  "stylo_traits",
+ "unicode-bidi",
  "url",
 ]
 
