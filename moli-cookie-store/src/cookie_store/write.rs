@@ -291,6 +291,7 @@ impl CookieStore {
             let replacing_existing = existing_creation_index.is_some();
             if !self.make_room_for_cookie(
                 &cookie_domain,
+                cookie.partition_key(),
                 cookie.secure().unwrap_or(false),
                 replacing_existing,
             ) {

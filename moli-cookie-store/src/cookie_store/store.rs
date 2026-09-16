@@ -80,9 +80,11 @@ pub struct CookieDeleteFilter<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CookieStoreLimits {
     /// Maximum number of unexpired cookies allowed for one canonical cookie
-    /// domain bucket.
+    /// domain bucket, independently for unpartitioned cookies and each
+    /// partition key.
     pub per_domain_cookies: usize,
-    /// Maximum number of unexpired cookies allowed across the entire store.
+    /// Maximum number of unexpired unpartitioned cookies across the store.
+    /// Partitioned cookies are limited per domain and partition instead.
     pub total_cookies: usize,
 }
 
