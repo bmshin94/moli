@@ -2738,7 +2738,7 @@ mod tests {
         let mut manager = manager.lock();
         let opened = manager.open(OpenOptions {
             origin: origin.to_owned(),
-            name: "bucket-db".to_owned(),
+            name: "bucket-db".into(),
             version: None,
         })?;
         let upgrade = opened
