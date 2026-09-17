@@ -29,12 +29,18 @@ class ServiceWorkerRegistrationFixtureTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         (self.root / "resources").mkdir()
-        for name in ('mime-type-worker.py', 'import-mime-type-worker.py', 'malformed-worker.py', 'invalid-chunked-encoding.py', 'invalid-chunked-encoding-with-flush.py'):
+        for name in ("testharness.js", "testharnessreport.js"):
+            (self.root / "resources" / name).write_text("// harness")
+        resources = self.root / DIRECTORY / "resources"
+        resources.mkdir(parents=True)
+        for name in (
+            "mime-type-worker.py", "import-mime-type-worker.py", "malformed-worker.py",
+            "invalid-chunked-encoding.py", "invalid-chunked-encoding-with-flush.py",
+        ):
             (resources / name).write_text("# Python source must not be sent as a script")
         self.stack.enter_context(patch(
             "moli_benchmark.wpt_cross.server._global_ipv6_address", return_value=None
         ))
-
 
     def server(self) -> WptFixtureServer:
         return self.stack.enter_context(WptFixtureServer(self.root))
