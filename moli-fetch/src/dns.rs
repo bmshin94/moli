@@ -12,14 +12,14 @@ use crate::{
 /// Fetch-side DNS admission decision.
 ///
 /// The shared resolver is used only when Fetch can prove that curl will
-/// connect directly to an HTTP(S) origin. Proxy traffic stays curl-managed
-/// only when no address policy is active; otherwise a proxy-resolved hostname
-/// cannot be verified locally and is rejected. IP literals and matching
-/// explicit host-resolve entries already have exact routing and are checked
-/// synchronously before this decision.
+/// connect directly to an HTTP(S) origin. Proxy traffic needs no shared origin
+/// lookup only when no address policy is active; otherwise a proxy-resolved
+/// hostname cannot be verified locally and is rejected. IP literals and
+/// matching explicit host-resolve entries already have exact routing and are
+/// checked synchronously before this decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FetchCurlDnsAdmission {
-    CurlManaged,
+    NoSharedResolution,
     SharedResolver(DnsTarget),
 }
 
@@ -29,7 +29,7 @@ pub(crate) fn curl_dns_resolution(
     proxy_route: &HttpProxyRoute,
 ) -> Result<CurlDnsResolution> {
     match curl_dns_admission(config, url, proxy_route)? {
-        FetchCurlDnsAdmission::CurlManaged => Ok(CurlDnsResolution::curl_managed()),
+        FetchCurlDnsAdmission::NoSharedResolution => Ok(CurlDnsResolution::no_shared_resolution()),
         FetchCurlDnsAdmission::SharedResolver(target) => {
             let policy = config.network_address_policy();
             Ok(CurlDnsResolution::resolve_origin(
@@ -50,13 +50,13 @@ fn curl_dns_admission(
     proxy_route: &HttpProxyRoute,
 ) -> Result<FetchCurlDnsAdmission> {
     if !matches!(url.scheme(), "http" | "https") {
-        return Ok(FetchCurlDnsAdmission::CurlManaged);
+        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
     }
     let Some(Host::Domain(host)) = url.host() else {
-        return Ok(FetchCurlDnsAdmission::CurlManaged);
+        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
     };
     let Some(port) = url.port_or_known_default() else {
-        return Ok(FetchCurlDnsAdmission::CurlManaged);
+        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
     };
     if proxy_route.is_proxy() {
         if config.network_address_policy().is_enforced() {
@@ -64,10 +64,10 @@ fn curl_dns_admission(
                 "cannot enforce network address policy for proxied hostname `{host}` in `{url}`; the proxy must not resolve an unchecked target hostname"
             );
         }
-        return Ok(FetchCurlDnsAdmission::CurlManaged);
+        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
     }
     if resolve_host_resolve_override_ips(config.http_host_resolve(), host, port)?.is_some() {
-        return Ok(FetchCurlDnsAdmission::CurlManaged);
+        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
     }
     Ok(FetchCurlDnsAdmission::SharedResolver(DnsTarget::new(
         host, port,
@@ -121,21 +121,21 @@ mod tests {
     }
 
     #[test]
-    fn ip_literals_and_matching_host_resolve_entries_stay_curl_managed() {
+    fn ip_literals_and_matching_host_resolve_entries_need_no_shared_resolution() {
         let mut config = FetchConfig::default();
 
         assert_eq!(
             admission(&config, "http://127.0.0.1/path", &HttpProxyRoute::Direct,),
-            FetchCurlDnsAdmission::CurlManaged
+            FetchCurlDnsAdmission::NoSharedResolution
         );
         assert_eq!(
             admission(&config, "http://[::1]/path", &HttpProxyRoute::Direct,),
-            FetchCurlDnsAdmission::CurlManaged
+            FetchCurlDnsAdmission::NoSharedResolution
         );
         config.set_http_host_resolve(vec!["example.test:80:127.0.0.1".to_owned()]);
         assert_eq!(
             admission(&config, "http://example.test/path", &HttpProxyRoute::Direct,),
-            FetchCurlDnsAdmission::CurlManaged
+            FetchCurlDnsAdmission::NoSharedResolution
         );
         assert_eq!(
             admission(&config, "http://other.test/path", &HttpProxyRoute::Direct,),
@@ -145,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_proxy_route_uses_curl_resolution() {
+    fn selected_proxy_route_needs_no_shared_origin_resolution() {
         let config = FetchConfig::default();
 
         assert_eq!(
@@ -154,7 +154,7 @@ mod tests {
                 "https://api.example.test/path",
                 &HttpProxyRoute::Proxy("http://proxy.test:8080".to_owned()),
             ),
-            FetchCurlDnsAdmission::CurlManaged
+            FetchCurlDnsAdmission::NoSharedResolution
         );
     }
 

@@ -12,10 +12,12 @@ use crate::NetworkAddressPolicy;
 
 /// Curl-side policy for DNS ownership before a transfer enters the multi set.
 ///
-/// `origin == None` means curl owns name resolution. `Some` means the transfer
+/// `origin == None` means no shared origin lookup is required. The configured
+/// curl handle may already have a fixed address, use an IP literal or proxy, or
+/// deliberately retain libcurl's resolver behavior. `Some` means the transfer
 /// must first wait in [`CurlDnsOwnerResidence`]. After that residence installs
-/// the exact address list with `CURLOPT_RESOLVE`, this object transitions back
-/// to curl-managed so a requeued transfer cannot resolve twice.
+/// the exact address list with `CURLOPT_RESOLVE`, the shared lookup is consumed
+/// so a requeued transfer cannot resolve twice.
 #[derive(Debug)]
 pub struct CurlDnsResolution {
     origin: Option<Box<CurlDnsOriginResolution>>,
@@ -32,8 +34,20 @@ struct CurlDnsOriginResolution {
 }
 
 impl CurlDnsResolution {
-    pub fn curl_managed() -> Self {
+    /// Creates a policy that does not request Moli's shared origin resolver.
+    ///
+    /// This keeps `moli-curl` transport-neutral: callers may use an IP literal,
+    /// preconfigure `CURLOPT_RESOLVE`, delegate the target to a proxy, or retain
+    /// libcurl's resolver behavior.
+    pub fn no_shared_resolution() -> Self {
         Self { origin: None }
+    }
+
+    #[deprecated(
+        note = "use `no_shared_resolution`; no shared lookup does not necessarily mean curl performs DNS"
+    )]
+    pub fn curl_managed() -> Self {
+        Self::no_shared_resolution()
     }
 
     pub fn resolve_origin(target: DnsTarget, static_entries: Vec<String>) -> Self {
@@ -279,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_origin_transitions_back_to_curl_managed() {
+    fn installed_origin_consumes_shared_resolution() {
         let target = DnsTarget::new("example.test", 443);
         let mut policy = CurlDnsResolution::resolve_origin(target.clone(), Vec::new());
         let mut easy = Easy2::new(TestHandler);

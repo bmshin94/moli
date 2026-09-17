@@ -51,7 +51,7 @@ fn submitted_identity_reaches_the_matching_runtime_completion() {
             context: "matching-context".to_owned(),
             origin: None,
             deadline: None,
-            dns_resolution: CurlDnsResolution::curl_managed(),
+            dns_resolution: CurlDnsResolution::no_shared_resolution(),
             priority: 1,
             label: "identity-test".to_owned(),
         })
@@ -87,7 +87,7 @@ fn http_sender_does_not_keep_owner_alive_and_returns_rejected_job() {
                 context: vec![7; 1024],
                 origin: None,
                 deadline: None,
-                dns_resolution: CurlDnsResolution::curl_managed(),
+                dns_resolution: CurlDnsResolution::no_shared_resolution(),
                 priority: 1,
                 label: "closed".into(),
             })

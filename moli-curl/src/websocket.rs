@@ -58,7 +58,7 @@ impl CurlWebSocketRequest {
             proxy: None,
             proxy_headers: Vec::new(),
             tls: CurlTlsConfig::default(),
-            dns_resolution: CurlDnsResolution::curl_managed(),
+            dns_resolution: CurlDnsResolution::no_shared_resolution(),
             handshake_timeout: Duration::from_secs(30),
         }
     }
