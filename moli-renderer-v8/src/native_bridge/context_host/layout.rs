@@ -335,8 +335,19 @@ impl JsContextHost {
         if self.force_fresh_layout_reads_for_test {
             return false;
         }
-        self.with_latest_layout_tree_for_document(document, |_| ())
+        self.with_current_layout_tree_for_document(document, |_| ())
             .is_some()
+    }
+
+    fn with_current_layout_tree_for_document<T>(
+        &self,
+        document: DomHandle,
+        inspect: impl FnOnce(&FrozenLayoutTree<DomHandle>) -> T,
+    ) -> Option<T> {
+        if self.document_layout_state.borrow().latest_layout_is_dirty() {
+            return None;
+        }
+        self.with_latest_layout_tree_for_document(document, inspect)
     }
 
     /// Inspects the member tree for one exact Document in the single latest
@@ -387,7 +398,7 @@ impl JsContextHost {
         let reuse_latest = true;
         let cached = reuse_latest
             && self
-                .with_latest_layout_tree_for_document(document, |tree| {
+                .with_current_layout_tree_for_document(document, |tree| {
                     layout_tree_satisfies_request(tree, reason, viewport, true)
                 })
                 .unwrap_or(false);
@@ -420,7 +431,7 @@ impl JsContextHost {
         #[cfg(not(test))]
         let reuse_latest = true;
         let cached = if reuse_latest {
-            self.with_latest_layout_tree_for_document(document, |tree| {
+            self.with_current_layout_tree_for_document(document, |tree| {
                 if !layout_tree_satisfies_request(tree, reason, viewport, exact_viewport) {
                     return None;
                 }
@@ -539,6 +550,14 @@ impl JsContextHost {
         self.document_layout_state
             .borrow_mut()
             .clear_latest_layout();
+    }
+
+    pub(crate) fn mark_layout_input_dirty(&self) {
+        debug_assert!(!self.layout_pass_active.get());
+        self.clear_layout_rect_cache();
+        self.document_layout_state
+            .borrow_mut()
+            .mark_latest_layout_dirty();
     }
 
     pub(crate) fn document_web_font_resources_are_current(

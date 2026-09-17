@@ -1,4 +1,8 @@
-use std::{fs, io::ErrorKind, path::Path};
+use std::{
+    fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
@@ -20,8 +24,7 @@ impl SqliteSnapshot {
         fs::copy(source, &database)
             .with_context(|| format!("failed to snapshot {label} `{}`", source.display()))?;
         for suffix in ["-wal", "-shm"] {
-            let mut companion = source.as_os_str().to_owned();
-            companion.push(suffix);
+            let companion = sqlite_companion_path(source, suffix);
             match fs::copy(
                 &companion,
                 directory.path().join(format!("database.sqlite{suffix}")),
@@ -47,6 +50,12 @@ impl SqliteSnapshot {
     }
 }
 
+fn sqlite_companion_path(source: &Path, suffix: &str) -> PathBuf {
+    let mut companion = source.as_os_str().to_owned();
+    companion.push(suffix);
+    companion.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,11 +67,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn snapshot_preserves_non_utf8_paths_when_finding_wal_files() -> Result<()> {
+    fn companion_paths_preserve_non_utf8_database_names() {
         use std::os::unix::ffi::OsStrExt;
-        check_wal_snapshot(Path::new(std::ffi::OsStr::from_bytes(
-            b"cookies-\xff.sqlite",
-        )))
+
+        let source = Path::new(std::ffi::OsStr::from_bytes(b"cookies-\xff.sqlite"));
+        assert_eq!(
+            sqlite_companion_path(source, "-wal").as_os_str().as_bytes(),
+            b"cookies-\xff.sqlite-wal",
+        );
+        assert_eq!(
+            sqlite_companion_path(source, "-shm").as_os_str().as_bytes(),
+            b"cookies-\xff.sqlite-shm",
+        );
     }
 
     fn check_wal_snapshot(name: &Path) -> Result<()> {
