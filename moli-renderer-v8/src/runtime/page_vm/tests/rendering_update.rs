@@ -2819,6 +2819,50 @@ async fn screenshot_preserves_table_cell_dimension_hints_and_avatar_columns() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn screenshot_recascades_table_part_dimension_hints() {
+    run_page_vm_async_test(async move {
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        let mut page = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/table-part-dimensions.html")?,
+        );
+        page.vm_mut()
+            .set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+        let fixture = include_str!("../../../../tests/fixtures/table-part-dimensions.html");
+        page.vm_mut().eval(&format!(
+            "document.open();document.write({});document.close()",
+            serde_json::to_string(fixture)?,
+        ))?;
+        page.vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+
+        for phase in 0..4 {
+            page.vm_mut()
+                .eval(&format!("setTablePartDimensionPhase({phase})"))?;
+            page.vm_mut()
+                .screenshot_layout_snapshot(moli_layout::PaintViewport::new(800, 600, 1.0))?
+                .expect("table-part dimension fixture must retain a layout root");
+            let checks: serde_json::Value = serde_json::from_str(
+                &page
+                    .vm_mut()
+                    .eval("JSON.stringify(collectTablePartDimensionChecks())")?,
+            )?;
+            let checks = checks.as_array().expect("table-part dimension checks");
+            assert_eq!(checks.len(), 71);
+            let failures: Vec<_> = checks
+                .iter()
+                .filter(|check| check["actual"] != check["expected"])
+                .collect();
+            assert!(failures.is_empty(), "phase {phase}: {failures:#?}");
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("table-part dimensions should recascade and resize tables");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn screenshot_recascades_nearest_table_cell_presentation_style() {
     run_page_vm_async_test(async move {
         let loader =
