@@ -73,6 +73,8 @@ DEFAULT_TESTHARNESS_TIMEOUT_SECONDS = 10.0
 MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
 MAX_REQUEST_BODY_LINE_BYTES = 64 * 1024
 XHR_RESPONSE_RESOURCE_PATHS = {
+    "/xhr/resources/inspect-headers.py",
+    "/xhr/resources/echo-headers.py",
     "/xhr/resources/corsenabled.py",
     "/xhr/resources/status.py",
     "/xhr/resources/last-modified.py",
@@ -1069,6 +1071,38 @@ def _wpt_delay_seconds(query: str) -> float | None:
     return delay_ms / 1_000.0
 
 
+def _xhr_inspect_headers_fixture_response(
+    query: str, raw_headers: list[tuple[str, str]]
+) -> tuple[list[tuple[str, str]], bytes]:
+    """Model xhr/resources/inspect-headers.py's raw header filtering."""
+    params = parse_qs(query, keep_blank_values=True, encoding="latin-1")
+    filter_value = params.get("filter_value", [""])[0].encode("latin-1")
+    filter_name = params.get("filter_name", [""])[0].encode("latin-1").lower()
+    parts = []
+    for raw_name, raw_value in raw_headers:
+        name, value = raw_name.encode("latin-1"), raw_value.encode("latin-1")
+        if filter_value:
+            if value == filter_value:
+                parts.append(name + b",")
+        elif name.lower() == filter_name:
+            parts.append(name + b": " + value + b"\n")
+    headers = []
+    if "cors" in params:
+        headers.extend([
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Credentials", "true"),
+            ("Access-Control-Allow-Methods", "GET, POST, PUT, FOO"),
+            ("Access-Control-Allow-Headers", "x-test, x-foo"),
+            (
+                "Access-Control-Expose-Headers",
+                "x-request-method, x-request-content-type, x-request-query, "
+                "x-request-content-length",
+            ),
+        ])
+    headers.append(("content-type", "text/plain"))
+    return headers, b"".join(parts)
+
+
 def _redirect_fixture_response(query: str) -> tuple[int, str] | None:
     """Return the shared redirect response used by static WPT fixture handlers."""
 
@@ -1705,6 +1739,11 @@ def _make_handler(
         do_DELETE = _serve_fetch_resource_method
 
         def do_YO(self) -> None:  # noqa: N802 (WPT custom method)
+            if unquote(urlparse(self.path).path) in {
+                "/xhr/resources/inspect-headers.py", "/xhr/resources/echo-headers.py",
+            }:
+                self._serve_xhr_response_resource()
+                return
             parsed = urlparse(self.path)
             if unquote(parsed.path) in FETCH_ABORT_RESOURCE_PATHS | {
                 "/fetch/api/resources/status.py", "/fetch/api/resources/trickle.py"
@@ -2435,7 +2474,16 @@ def _make_handler(
                 self._serve_xhr_cors_echo(parsed, emit_body=emit_body)
                 return True
             try:
-                if path == "/xhr/resources/status.py":
+                if path == "/xhr/resources/inspect-headers.py":
+                    status, reason, content_type = 200, None, None
+                    headers, body = _xhr_inspect_headers_fixture_response(
+                        parsed.query, list(self.headers.raw_items()),
+                    )
+                elif path == "/xhr/resources/echo-headers.py":
+                    status, reason, content_type = 200, None, "text/plain"
+                    headers = []
+                    body = str(self.headers).encode("utf-8")
+                elif path == "/xhr/resources/status.py":
                     status, reason, content_type, body = _fetch_status_response(parsed.query)
                     headers = [("X-Request-Method", self.command)]
                 else:
