@@ -3,6 +3,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{Arc, atomic::Ordering},
     thread,
+    time::Instant,
 };
 
 use tokio::{sync::oneshot, time::timeout};
@@ -110,6 +111,37 @@ async fn strict_connector_checks_shared_websocket_dns_before_connecting() {
     }
 }
 
+#[tokio::test]
+async fn shared_proxy_dns_failure_never_starts_the_websocket_transfer() {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .expect("test proxy listener should bind to a local port");
+    let proxy_address = listener
+        .local_addr()
+        .expect("test proxy listener should have an address");
+    let runtime = CurlWebSocketRuntime::new().unwrap();
+    let mut request =
+        CurlWebSocketRequest::new("ws://websocket-target.invalid/proxy-dns-failure".to_owned());
+    request.proxy = Some(format!("http://{proxy_address}"));
+    request.handshake_timeout = DEADLINE;
+    request.dns_resolution = CurlDnsResolution::resolve_endpoint(
+        DnsTarget::new("proxy.invalid", proxy_address.port()),
+        Vec::new(),
+    );
+
+    let mut connection = runtime.connect(request).unwrap();
+    let event = timeout(DEADLINE, connection.recv())
+        .await
+        .expect("WebSocket DNS failure deadline")
+        .expect("WebSocket DNS failure event");
+    match event {
+        CurlWebSocketEvent::Closed { result: Err(error) } => {
+            assert!(error.contains("reserved .invalid domain"), "{error}")
+        }
+        unexpected => panic!("expected a DNS failure, got {unexpected:?}"),
+    }
+    assert_listener_stays_idle(&listener);
+}
+
 fn server(handler: impl FnOnce(TcpStream) + Send + 'static) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("ws://{}/native", listener.local_addr().unwrap());
@@ -131,6 +163,25 @@ fn read_request(stream: &mut TcpStream) -> String {
         assert!(request.len() < 65536);
     }
     String::from_utf8(request).unwrap()
+}
+
+fn assert_listener_stays_idle(listener: &TcpListener) {
+    listener
+        .set_nonblocking(true)
+        .expect("test listener should become nonblocking");
+    let deadline = Instant::now() + Duration::from_millis(200);
+    loop {
+        match listener.accept() {
+            Ok(_) => panic!("curl connected after shared proxy DNS failed"),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("failed to inspect test listener: {error}"),
+        }
+    }
 }
 
 fn upgrade(stream: &mut TcpStream, tail: &[u8]) {
