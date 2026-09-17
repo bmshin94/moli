@@ -82,6 +82,9 @@ pub(super) fn configure(request: &CurlWebSocketRequest) -> Result<Easy2<Handshak
     // The caller selects the client identity carried by this connection request.
     request.tls.configure(&mut easy, true)?;
     easy.proxy(request.proxy.as_deref().unwrap_or(""))?;
+    if request.proxy.as_deref().is_some_and(proxy_uses_https_tls) {
+        request.tls.configure_https_proxy(&mut easy)?;
+    }
     // The browser has already applied no_proxy; do not evaluate environment policy twice.
     easy.noproxy("")?;
     easy.http_proxy_tunnel(request.proxy.as_deref().is_some_and(proxy_uses_http_tunnel))?;
@@ -108,6 +111,12 @@ fn proxy_uses_http_tunnel(proxy: &str) -> bool {
         return true;
     };
     scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+}
+
+fn proxy_uses_https_tls(proxy: &str) -> bool {
+    proxy
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
 }
 
 fn headers(entries: &[(String, String)]) -> Result<List> {

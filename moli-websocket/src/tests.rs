@@ -309,6 +309,22 @@ fn websocket_proxy_route_normalizes_chromium_socks_schemes() {
 }
 
 #[test]
+fn websocket_https_proxy_domain_selects_shared_endpoint_dns() {
+    let uri = Url::parse("wss://target.test/socket").unwrap();
+    let mut context = test_websocket_context();
+    context.http_proxy = Some("https://proxy.test:8443".to_owned());
+    let route = websocket_proxy_route_with_env(&uri, &context, |_| None).unwrap();
+    let endpoint = route
+        .connection_dns_endpoint(&uri, &moli_curl::HostResolveOverrides::default())
+        .unwrap()
+        .expect("proxy domain must use shared endpoint DNS");
+
+    assert_eq!(endpoint.role(), moli_curl::ConnectionEndpointRole::Proxy);
+    assert_eq!(endpoint.target().host(), "proxy.test");
+    assert_eq!(endpoint.target().port(), 8443);
+}
+
+#[test]
 fn websocket_request_preparation_applies_context_protocols_and_cookie() {
     let mut context = test_websocket_context();
     context.extra_headers = vec![

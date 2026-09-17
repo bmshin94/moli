@@ -14,7 +14,7 @@ use moli_cookie_jar::{
     NetworkCookieRequestContext, SharedBrowserCookieStore, StoredCookieQueryReport,
     StoredCookieSetReport, same_site_urls,
 };
-use moli_curl::HostResolveOverrides;
+use moli_curl::{HostResolveOverrides, ProxyScheme};
 use moli_url::is_potentially_trustworthy_url;
 use moli_url_policy::ensure_http_network_transport_url;
 use tracing::debug;
@@ -627,6 +627,9 @@ pub(crate) fn configure_easy<H: Handler>(
         HttpProxyRoute::Proxy(proxy) => {
             easy.proxy(proxy.curl_url())
                 .with_context(|| anyhow!("failed to configure HTTP proxy `{}`", proxy.url()))?;
+            if proxy.scheme() == ProxyScheme::Https {
+                config.tls_config().configure_https_proxy(easy)?;
+            }
             configure_proxy_headers(easy, config, request, proxy.scheme().uses_http_headers())?;
         }
     }

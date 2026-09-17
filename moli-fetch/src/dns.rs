@@ -31,6 +31,9 @@ pub(crate) fn curl_dns_resolution(
                 .with_network_address_policy(policy, url.to_string()))
         }
         FetchCurlDnsAdmission::ProxyEndpoint(target) => {
+            // Pin the locally connected proxy, but do not apply origin address
+            // policy to it. Configured enterprise proxies commonly live on
+            // private networks, and the proxy owns target DNS/admission.
             Ok(CurlDnsResolution::resolve_endpoint(target, static_entries))
         }
     }
@@ -142,14 +145,19 @@ mod tests {
     fn selected_proxy_domain_uses_shared_endpoint_resolution() {
         let config = FetchConfig::default();
 
-        assert_eq!(
-            admission(
-                &config,
-                "https://api.example.test/path",
-                &proxy_route("http://proxy.test:8080"),
-            ),
-            proxy_endpoint("proxy.test", 8080)
-        );
+        for (proxy, port) in [
+            ("http://proxy.test:8080", 8080),
+            ("https://proxy.test:8443", 8443),
+        ] {
+            assert_eq!(
+                admission(
+                    &config,
+                    "https://api.example.test/path",
+                    &proxy_route(proxy),
+                ),
+                proxy_endpoint("proxy.test", port)
+            );
+        }
     }
 
     #[test]

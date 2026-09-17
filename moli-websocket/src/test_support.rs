@@ -504,6 +504,70 @@ pub async fn spawn_http_connect_proxy() -> (
     (format!("http://{addr}"), request_rx, handle)
 }
 
+#[derive(Debug)]
+pub struct HttpsProxyObservation {
+    pub request: String,
+    pub server_name: Option<String>,
+    pub client_certificates: Vec<Vec<u8>>,
+}
+
+pub async fn spawn_https_connect_proxy(
+    acceptor: tokio_rustls::TlsAcceptor,
+) -> (
+    String,
+    oneshot::Receiver<HttpsProxyObservation>,
+    tokio::task::JoinHandle<Result<(), String>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind HTTPS WebSocket proxy");
+    let port = listener.local_addr().expect("HTTPS proxy addr").port();
+    let (observation_tx, observation_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let (client, _) = listener
+            .accept()
+            .await
+            .map_err(|error| format!("accept HTTPS proxy client: {error}"))?;
+        let mut client = acceptor
+            .accept(client)
+            .await
+            .map_err(|error| format!("accept HTTPS proxy TLS: {error}"))?;
+        let server_name = client.get_ref().1.server_name().map(str::to_owned);
+        let client_certificates = client
+            .get_ref()
+            .1
+            .peer_certificates()
+            .unwrap_or_default()
+            .iter()
+            .map(|certificate| certificate.to_vec())
+            .collect();
+        let request = try_read_http_headers(&mut client)
+            .await
+            .map_err(|error| format!("read HTTPS proxy request: {error}"))?;
+        let target = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .expect("HTTPS proxy CONNECT target")
+            .to_owned();
+        let _ = observation_tx.send(HttpsProxyObservation {
+            request,
+            server_name,
+            client_certificates,
+        });
+        let mut upstream = TcpStream::connect(&target)
+            .await
+            .map_err(|error| format!("connect HTTPS proxy upstream: {error}"))?;
+        client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .map_err(|error| format!("write HTTPS proxy CONNECT response: {error}"))?;
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        Ok(())
+    });
+    (format!("https://localhost:{port}"), observation_rx, handle)
+}
+
 pub async fn spawn_http_connect_proxy_response(
     response: &'static [u8],
 ) -> (
@@ -1085,18 +1149,31 @@ pub async fn spawn_dropping_websocket_server() -> (String, tokio::task::JoinHand
     (format!("ws://{addr}/drop"), handle)
 }
 
-async fn read_http_headers(stream: &mut TcpStream) -> String {
+async fn read_http_headers(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> String {
+    try_read_http_headers(stream)
+        .await
+        .expect("read HTTP request")
+}
+
+async fn try_read_http_headers(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> Result<String, String> {
     let mut request_bytes = Vec::new();
     let mut chunk = [0_u8; 512];
     loop {
-        let count = stream.read(&mut chunk).await.expect("read HTTP request");
-        assert!(count > 0, "client closed before HTTP headers completed");
+        let count = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Err("client closed before HTTP headers completed".to_owned());
+        }
         request_bytes.extend_from_slice(&chunk[..count]);
         if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
             break;
         }
     }
-    String::from_utf8_lossy(&request_bytes).into_owned()
+    Ok(String::from_utf8_lossy(&request_bytes).into_owned())
 }
 
 fn websocket_request_header(request: &str, name: &str) -> Option<String> {
