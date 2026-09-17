@@ -159,6 +159,17 @@ fn adjacent_code_elements_keep_distinct_values() {
 }
 
 #[test]
+fn preformatted_block_children_keep_text_boundaries() {
+    let html = "<pre><div>ts</div><div><code>function identity() {}</code></div></pre>";
+    let output = markdown(html, false);
+    assert_eq!(output, "```\nts\nfunction identity() {}\n```");
+    assert_eq!(
+        rendered_html(&output),
+        "<pre><code>ts\nfunction identity() {}\n</code></pre>\n"
+    );
+}
+
+#[test]
 fn attribute_newlines_remove_indentation_without_joining_words() {
     for separator in ["\n ", "\r\n\t", "\n  \n \t  "] {
         let html = format!("<a href='/a' title='first{separator}second'>link</a>");
