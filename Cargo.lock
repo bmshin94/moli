@@ -3422,7 +3422,6 @@ dependencies = [
  "http",
  "moli-crypto",
  "moli-curl",
- "moli-dns-resolver",
  "moli-url",
  "openssl",
  "rcgen",

@@ -19,19 +19,74 @@ mod storage;
 const DEADLINE: Duration = Duration::from_secs(10);
 
 #[test]
-fn strict_connector_rejects_proxy_resolved_websocket_hostname() {
+fn address_policy_leaves_proxy_resolved_websocket_target_to_proxy() {
     let runtime = CurlWebSocketRuntime::new().unwrap();
     let connector = runtime
         .connector()
         .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
     let mut request = CurlWebSocketRequest::new("wss://example.test/socket".to_owned());
-    request.proxy = Some("http://proxy.test:8080".to_owned());
+    request.proxy = Some("http://127.0.0.1:1".to_owned());
+
+    let connection = connector
+        .connect(request)
+        .expect("request-target policy must not reject a proxy-resolved hostname");
+    drop(connection);
+}
+
+#[test]
+fn address_policy_does_not_treat_an_empty_proxy_as_remote_dns() {
+    let runtime = CurlWebSocketRuntime::new().unwrap();
+    let connector = runtime
+        .connector()
+        .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
+    let mut request = CurlWebSocketRequest::new("ws://127.0.0.1/socket".to_owned());
+    request.proxy = Some(String::new());
 
     let error = connector
         .connect(request)
-        .expect_err("a strict connector cannot verify proxy-side DNS");
+        .expect_err("an empty curl proxy setting is still a direct connection");
+    assert!(
+        error
+            .to_string()
+            .contains("blocked private network address")
+    );
+}
 
-    assert!(error.to_string().contains("proxied WebSocket hostname"));
+#[test]
+fn address_policy_rejects_a_local_dns_websocket_proxy() {
+    let runtime = CurlWebSocketRuntime::new().unwrap();
+    let connector = runtime
+        .connector()
+        .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
+    let mut request = CurlWebSocketRequest::new("ws://example.test/socket".to_owned());
+    request.proxy = Some("socks5://127.0.0.1:1080".to_owned());
+
+    let error = connector
+        .connect(request)
+        .expect_err("a local-DNS proxy cannot satisfy request-target admission");
+    assert!(
+        format!("{error:#}").contains("supported remote-DNS WebSocket proxy"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn strict_connector_checks_fixed_websocket_target_before_connecting() {
+    let runtime = CurlWebSocketRuntime::new().unwrap();
+    let connector = runtime
+        .connector()
+        .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
+    let mut request = CurlWebSocketRequest::new("ws://example.test:65534/socket".to_owned());
+    request.resolve_entries = vec!["example.test:65534:127.0.0.1".to_owned()];
+
+    let error = connector
+        .connect(request)
+        .expect_err("a fixed private WebSocket target must be rejected before connecting");
+    assert!(
+        error
+            .to_string()
+            .contains("blocked private network address")
+    );
 }
 
 #[tokio::test]

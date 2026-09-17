@@ -14,6 +14,7 @@ use moli_cookie_jar::{
     NetworkCookieRequestContext, SharedBrowserCookieStore, StoredCookieQueryReport,
     StoredCookieSetReport, same_site_urls,
 };
+use moli_curl::HostResolveOverrides;
 use moli_url::is_potentially_trustworthy_url;
 use moli_url_policy::ensure_http_network_transport_url;
 use tracing::debug;
@@ -164,13 +165,6 @@ pub(crate) fn outgoing_request_headers_for_url(
 ) -> Vec<(String, String)> {
     let mut outgoing = Vec::new();
 
-    if let Some(proxy_bearer_token) = config.proxy_bearer_token() {
-        outgoing.push((
-            "Proxy-Authorization".to_owned(),
-            format!("Bearer {proxy_bearer_token}"),
-        ));
-    }
-
     if let Some(cookie_header) = cookie_header {
         outgoing.push(("Cookie".to_owned(), cookie_header.to_owned()));
     }
@@ -231,19 +225,6 @@ pub(crate) fn outgoing_request_headers_for_url(
     {
         outgoing.push((
             "Authorization".to_owned(),
-            format!(
-                "Basic {}",
-                encode_basic_auth(&auth.username, &auth.password)
-            ),
-        ));
-    }
-
-    if let Some(auth) = request.auth()
-        && auth.target == RequestAuthTarget::ProxyHeader
-        && !header_present(&outgoing, "proxy-authorization")
-    {
-        outgoing.push((
-            "Proxy-Authorization".to_owned(),
             format!(
                 "Basic {}",
                 encode_basic_auth(&auth.username, &auth.password)
@@ -543,7 +524,12 @@ pub(crate) fn configure_easy<H: Handler>(
     validation_headers: Option<Vec<(String, String)>>,
 ) -> Result<Vec<(String, String)>> {
     ensure_http_network_transport_url(request_url)?;
-    enforce_request_target_policy(config, request_url)?;
+    if crate::should_request_be_blocked_due_to_bad_port(request_url) {
+        bail!("blocked bad port for `{request_url}`");
+    }
+    if matches!(proxy_route, HttpProxyRoute::Direct) {
+        enforce_request_target_address_policy(config, request_url)?;
+    }
     configure_curl_http_protocol_allowlist(easy)?;
 
     // Keep proxy CONNECT handshake headers out of the response callbacks so
@@ -638,9 +624,11 @@ pub(crate) fn configure_easy<H: Handler>(
         HttpProxyRoute::Direct => easy
             .proxy("")
             .context("failed to disable the HTTP proxy for a direct request")?,
-        HttpProxyRoute::Proxy(proxy) => easy
-            .proxy(proxy.url())
-            .with_context(|| anyhow!("failed to configure HTTP proxy `{}`", proxy.url()))?,
+        HttpProxyRoute::Proxy(proxy) => {
+            easy.proxy(proxy.url())
+                .with_context(|| anyhow!("failed to configure HTTP proxy `{}`", proxy.url()))?;
+            configure_proxy_headers(easy, config, request, proxy.scheme().uses_http_headers())?;
+        }
     }
     // Proxy bypass has already been resolved into `proxy_route`. Keep curl
     // from re-evaluating environment `no_proxy` after that security decision.
@@ -660,6 +648,16 @@ pub(crate) fn configure_easy<H: Handler>(
     let mut headers = List::new();
     let mut outgoing_headers =
         outgoing_request_headers_for_url(config, request, request_url, cookie_header);
+    // A 407 can come from a transparent proxy even when no explicit proxy
+    // route is configured. In that case the connected endpoint receives the
+    // challenge response as a normal request header. Explicit proxies use the
+    // separate CURLOPT_PROXYHEADER path configured above.
+    if matches!(proxy_route, HttpProxyRoute::Direct)
+        && let Some(authorization) = proxy_header_authorization(request)
+        && !header_present(&outgoing_headers, "proxy-authorization")
+    {
+        outgoing_headers.push(("Proxy-Authorization".to_owned(), authorization));
+    }
     if let Some(web_bot_auth) = config.web_bot_auth() {
         web_bot_auth
             .append_request_headers(&mut outgoing_headers, &request.method, request_url)
@@ -749,11 +747,50 @@ pub(crate) fn configure_easy<H: Handler>(
     Ok(outgoing_headers)
 }
 
-fn enforce_request_target_policy(config: &FetchConfig, request_url: &Url) -> Result<()> {
-    if crate::should_request_be_blocked_due_to_bad_port(request_url) {
-        bail!("blocked bad port for `{request_url}`");
+fn configure_proxy_headers<H: Handler>(
+    easy: &mut Easy2<H>,
+    config: &FetchConfig,
+    request: &Request,
+    proxy_uses_http_headers: bool,
+) -> Result<()> {
+    let explicit_proxy_header_auth = proxy_header_authorization(request);
+    if !proxy_uses_http_headers {
+        if config.proxy_bearer_token().is_some() || explicit_proxy_header_auth.is_some() {
+            bail!("Proxy-Authorization headers require an HTTP(S) proxy");
+        }
+        return Ok(());
     }
 
+    easy.separate_proxy_headers(true)
+        .context("failed to separate proxy headers from origin request headers")?;
+    let authorization = config
+        .proxy_bearer_token()
+        .map(|token| format!("Bearer {token}"))
+        .or(explicit_proxy_header_auth);
+    if let Some(authorization) = authorization {
+        let mut headers = List::new();
+        headers
+            .append(&format!("Proxy-Authorization: {authorization}"))
+            .context("failed to build proxy authorization header")?;
+        easy.proxy_headers(headers)
+            .context("failed to configure HTTP proxy headers")?;
+    }
+    Ok(())
+}
+
+fn proxy_header_authorization(request: &Request) -> Option<String> {
+    request
+        .auth()
+        .filter(|auth| auth.target == RequestAuthTarget::ProxyHeader)
+        .map(|auth| {
+            format!(
+                "Basic {}",
+                encode_basic_auth(&auth.username, &auth.password)
+            )
+        })
+}
+
+fn enforce_request_target_address_policy(config: &FetchConfig, request_url: &Url) -> Result<()> {
     if !config.block_private_networks() && config.block_cidrs().is_empty() {
         return Ok(());
     }
@@ -787,140 +824,13 @@ pub(crate) fn resolve_host_resolve_override_ips(
     host: &str,
     port: u16,
 ) -> Result<Option<Vec<IpAddr>>> {
-    let mut exact_match: Option<Vec<IpAddr>> = None;
-    let mut wildcard_match: Option<Vec<IpAddr>> = None;
-    for entry in entries {
-        let entry = parse_http_host_resolve_entry(entry)?;
-        if entry.port == port {
-            if entry.host == "*" {
-                wildcard_match = Some(entry.addresses);
-            } else if entry.host.eq_ignore_ascii_case(host) {
-                exact_match = Some(entry.addresses);
-            }
-        }
-    }
-
-    Ok(exact_match.or(wildcard_match))
-}
-
-struct HttpHostResolveEntry {
-    host: String,
-    port: u16,
-    addresses: Vec<IpAddr>,
-}
-
-impl HttpHostResolveEntry {
-    fn curl_entry(&self) -> String {
-        let addresses = self
-            .addresses
-            .iter()
-            .map(format_http_host_resolve_ip)
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(
-            "{}:{}:{addresses}",
-            format_http_host_resolve_host(&self.host),
-            self.port
-        )
-    }
+    Ok(HostResolveOverrides::parse(entries)?
+        .addresses_for(host, port)
+        .map(<[IpAddr]>::to_vec))
 }
 
 pub(crate) fn normalized_http_host_resolve_entries(entries: &[String]) -> Result<Vec<String>> {
-    entries
-        .iter()
-        .map(|entry| parse_http_host_resolve_entry(entry).map(|entry| entry.curl_entry()))
-        .collect()
-}
-
-pub fn validate_http_host_resolve_entries(entries: &[String]) -> Result<()> {
-    for entry in entries {
-        parse_http_host_resolve_entry(entry)?;
-    }
-    Ok(())
-}
-
-fn parse_http_host_resolve_entry(entry: &str) -> Result<HttpHostResolveEntry> {
-    let entry = entry.trim();
-    if entry.starts_with('+') || entry.starts_with('-') {
-        bail!("--http-host-resolve does not support `+` or `-` prefixes; use HOST:PORT:ADDR");
-    }
-
-    let (host, port, address) = split_http_host_resolve_add_entry(entry)?;
-    let port = parse_http_host_resolve_port(port, entry)?;
-    let mut addresses = Vec::new();
-    for address in address.split(',').map(str::trim) {
-        if address.is_empty() {
-            bail!("--http-host-resolve entries must not contain empty addresses");
-        }
-        let address = address.trim_matches(['[', ']']);
-        let address = address
-            .parse::<IpAddr>()
-            .with_context(|| format!("invalid --http-host-resolve address in `{entry}`"))?;
-        if !addresses.contains(&address) {
-            addresses.push(address);
-        }
-    }
-
-    Ok(HttpHostResolveEntry {
-        host: normalize_http_host_resolve_host(host),
-        port,
-        addresses,
-    })
-}
-
-fn split_http_host_resolve_add_entry(entry: &str) -> Result<(&str, &str, &str)> {
-    if let Some(entry) = entry.strip_prefix('[') {
-        let Some(host_end) = entry.find(']') else {
-            bail!("--http-host-resolve must be in HOST:PORT:ADDR form");
-        };
-        let host = &entry[..host_end];
-        let remainder = &entry[host_end + 1..];
-        let Some(remainder) = remainder.strip_prefix(':') else {
-            bail!("--http-host-resolve must be in HOST:PORT:ADDR form");
-        };
-        let Some((port, address)) = remainder.split_once(':') else {
-            bail!("--http-host-resolve must be in HOST:PORT:ADDR form");
-        };
-        if host.trim().is_empty() || port.trim().is_empty() || address.trim().is_empty() {
-            bail!("--http-host-resolve must be in HOST:PORT:ADDR form");
-        }
-        return Ok((host.trim(), port.trim(), address.trim()));
-    }
-
-    let mut parts = entry.splitn(3, ':');
-    let host = parts.next().unwrap_or_default().trim();
-    let port = parts.next().unwrap_or_default().trim();
-    let address = parts.next().unwrap_or_default().trim();
-
-    if host.is_empty() || port.is_empty() || address.is_empty() {
-        bail!("--http-host-resolve must be in HOST:PORT:ADDR form");
-    }
-
-    Ok((host, port, address))
-}
-
-fn parse_http_host_resolve_port(port: &str, entry: &str) -> Result<u16> {
-    port.parse::<u16>()
-        .with_context(|| format!("invalid --http-host-resolve port in `{entry}`"))
-}
-
-fn normalize_http_host_resolve_host(host: &str) -> String {
-    host.trim_matches(['[', ']']).to_owned()
-}
-
-fn format_http_host_resolve_host(host: &str) -> String {
-    if host != "*" && host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_owned()
-    }
-}
-
-fn format_http_host_resolve_ip(ip: &IpAddr) -> String {
-    match ip {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
-    }
+    Ok(HostResolveOverrides::parse(entries)?.normalized_entries())
 }
 
 fn configure_curl_http_protocol_allowlist<H: Handler>(easy: &mut Easy2<H>) -> Result<()> {
@@ -1506,6 +1416,20 @@ mod tests {
                 "{error:#}"
             );
         }
+    }
+
+    #[test]
+    fn configured_proxy_bearer_token_is_not_an_origin_header() {
+        let mut config = FetchConfig::default();
+        config.set_proxy_options(
+            Some("http://proxy.test:8080".to_owned()),
+            Some("secret".to_owned()),
+        );
+        let request = Request::get("http://example.test/").unwrap();
+
+        let headers = outgoing_request_headers_for_url(&config, &request, &request.url, None);
+
+        assert!(!header_present(&headers, "proxy-authorization"));
     }
 
     #[test]

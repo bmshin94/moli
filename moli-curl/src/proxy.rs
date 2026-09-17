@@ -2,13 +2,38 @@ use std::net::IpAddr;
 
 use anyhow::{Context, Result, bail};
 use cidr::AnyIpCidr;
+use moli_dns_resolver::DnsTarget;
 use url::{Host, Url};
+
+use crate::HostResolveOverrides;
 
 /// How an accepted proxy resolves the request target hostname.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyTargetResolution {
     /// The target hostname is sent to the proxy without a local DNS lookup.
     Proxy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionEndpointRole {
+    RequestTarget,
+    Proxy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionDnsEndpoint {
+    target: DnsTarget,
+    role: ConnectionEndpointRole,
+}
+
+impl ConnectionDnsEndpoint {
+    pub fn target(&self) -> &DnsTarget {
+        &self.target
+    }
+
+    pub fn role(&self) -> ConnectionEndpointRole {
+        self.role
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +154,68 @@ impl ProxyRoute {
         match self {
             Self::Direct => None,
             Self::Proxy(proxy) => Some(proxy),
+        }
+    }
+
+    /// Returns the one hostname Moli must resolve locally for this route.
+    ///
+    /// IP literals and fixed host-resolve entries need no lookup. A direct
+    /// route resolves the request target; a remote-DNS proxy route resolves
+    /// only the proxy endpoint.
+    pub fn connection_dns_endpoint(
+        &self,
+        request_url: &Url,
+        host_resolve: &HostResolveOverrides,
+    ) -> Result<Option<ConnectionDnsEndpoint>> {
+        let request_host = request_url
+            .host_str()
+            .with_context(|| format!("request URL `{request_url}` is missing a host"))?;
+        let request_port = request_url
+            .port_or_known_default()
+            .with_context(|| format!("request URL `{request_url}` has no port"))?;
+
+        match self {
+            Self::Direct => {
+                if request_url
+                    .host()
+                    .is_some_and(|host| matches!(host, Host::Domain(_)))
+                    && host_resolve
+                        .addresses_for(request_host, request_port)
+                        .is_none()
+                {
+                    return Ok(Some(ConnectionDnsEndpoint {
+                        target: DnsTarget::new(request_host, request_port),
+                        role: ConnectionEndpointRole::RequestTarget,
+                    }));
+                }
+                Ok(None)
+            }
+            Self::Proxy(proxy) => {
+                let proxy_is_request_endpoint =
+                    proxy.endpoint_host().eq_ignore_ascii_case(request_host)
+                        && proxy.endpoint_port() == request_port;
+                if !proxy_is_request_endpoint
+                    && host_resolve
+                        .addresses_for(request_host, request_port)
+                        .is_some()
+                {
+                    bail!(
+                        "--http-host-resolve entry for proxied target `{request_host}:{request_port}` would be ignored; remote-DNS proxy `{}` resolves request target hostnames",
+                        proxy.url()
+                    );
+                }
+                if proxy.endpoint_ip().is_none()
+                    && host_resolve
+                        .addresses_for(proxy.endpoint_host(), proxy.endpoint_port())
+                        .is_none()
+                {
+                    return Ok(Some(ConnectionDnsEndpoint {
+                        target: DnsTarget::new(proxy.endpoint_host(), proxy.endpoint_port()),
+                        role: ConnectionEndpointRole::Proxy,
+                    }));
+                }
+                Ok(None)
+            }
         }
     }
 }
@@ -414,5 +501,65 @@ mod tests {
             let error = SelectedProxy::parse(&format!("{scheme}://proxy.test:1080")).unwrap_err();
             assert!(error.to_string().contains("remote-DNS proxy scheme"));
         }
+    }
+
+    #[test]
+    fn route_selects_only_the_locally_connected_dns_endpoint() {
+        let empty = HostResolveOverrides::default();
+        let direct = ProxyRoute::Direct;
+        let direct_endpoint = direct
+            .connection_dns_endpoint(&Url::parse("https://origin.test/path").unwrap(), &empty)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            direct_endpoint.role(),
+            ConnectionEndpointRole::RequestTarget
+        );
+        assert_eq!(
+            direct_endpoint.target(),
+            &DnsTarget::new("origin.test", 443)
+        );
+
+        let proxy = ProxyRoute::from_proxy_url("http://proxy.test:8080").unwrap();
+        let proxy_endpoint = proxy
+            .connection_dns_endpoint(&Url::parse("https://origin.test/path").unwrap(), &empty)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proxy_endpoint.role(), ConnectionEndpointRole::Proxy);
+        assert_eq!(proxy_endpoint.target(), &DnsTarget::new("proxy.test", 8080));
+
+        let ip_proxy = ProxyRoute::from_proxy_url("http://192.0.2.1:8080").unwrap();
+        assert!(
+            ip_proxy
+                .connection_dns_endpoint(&Url::parse("https://origin.test/path").unwrap(), &empty,)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn proxy_endpoint_override_avoids_dns_and_target_override_is_rejected() {
+        let proxy = ProxyRoute::from_proxy_url("http://proxy.test:8080").unwrap();
+        let proxy_override =
+            HostResolveOverrides::parse(&["proxy.test:8080:192.0.2.1".to_owned()]).unwrap();
+        assert!(
+            proxy
+                .connection_dns_endpoint(
+                    &Url::parse("https://origin.test/path").unwrap(),
+                    &proxy_override,
+                )
+                .unwrap()
+                .is_none()
+        );
+
+        let target_override =
+            HostResolveOverrides::parse(&["origin.test:443:198.51.100.1".to_owned()]).unwrap();
+        let error = proxy
+            .connection_dns_endpoint(
+                &Url::parse("https://origin.test/path").unwrap(),
+                &target_override,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("would be ignored"), "{error:#}");
     }
 }

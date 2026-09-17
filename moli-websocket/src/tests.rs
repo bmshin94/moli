@@ -924,7 +924,11 @@ async fn websocket_transport_uses_explicit_http_proxy_connect_without_forwarding
     let (proxy_url, proxy_request_rx, proxy) = spawn_http_connect_proxy().await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let mut context = test_websocket_context();
-    context.http_proxy = Some(proxy_url);
+    let mut named_proxy = Url::parse(&proxy_url).expect("proxy URL");
+    named_proxy
+        .set_host(Some("localhost"))
+        .expect("proxy hostname should be replaceable");
+    context.http_proxy = Some(named_proxy.to_string());
     context.http_no_proxy = Some(String::new());
     context.proxy_bearer_token = Some("proxy-token".to_owned());
     let user_agent = context.user_agent.clone();
@@ -967,13 +971,58 @@ async fn websocket_transport_uses_explicit_http_proxy_connect_without_forwarding
 }
 
 #[tokio::test]
+async fn websocket_transport_socks5h_sends_target_hostname_to_proxy() {
+    let (server_url, headers_rx, server) = spawn_header_capture_websocket_server().await;
+    let mut target = Url::parse(&server_url).expect("WebSocket target URL");
+    let target_port = target
+        .port_or_known_default()
+        .expect("WebSocket target port");
+    let upstream_addr = format!("127.0.0.1:{target_port}")
+        .parse()
+        .expect("WebSocket upstream address");
+    target
+        .set_host(Some("websocket-target.invalid"))
+        .expect("WebSocket target hostname should be replaceable");
+    let (proxy_url, proxy_request_rx, proxy) = spawn_socks5h_proxy(upstream_addr).await;
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let mut context = test_websocket_context();
+    context.http_proxy = Some(proxy_url);
+    context.http_no_proxy = Some(String::new());
+
+    let command_tx =
+        spawn_standalone_connection(5, target.to_string(), Vec::new(), context, event_tx);
+    let (requested_host, requested_port) = timeout(Duration::from_secs(3), proxy_request_rx)
+        .await
+        .expect("SOCKS request should arrive")
+        .expect("SOCKS request sender should stay alive");
+    let _headers = timeout(Duration::from_secs(3), headers_rx)
+        .await
+        .expect("WebSocket headers should arrive")
+        .expect("WebSocket header sender should stay alive");
+    let open = recv_open_event(&mut event_rx).await;
+    let _ = command_tx.close(Some(1000), "done".to_owned());
+    server.await.expect("WebSocket header server should finish");
+    proxy.await.expect("WebSocket SOCKS proxy should finish");
+
+    assert_eq!(open.socket_id, 5);
+    assert_eq!(requested_host, "websocket-target.invalid");
+    assert_eq!(requested_port, target_port);
+}
+
+#[tokio::test]
 async fn websocket_transport_rejects_non_200_http_proxy_connect() {
     let (proxy_url, proxy_request_rx, proxy) =
         spawn_http_connect_proxy_response(b"HTTP/1.1 204 No Content\r\n\r\n").await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let mut context = test_websocket_context();
-    context.http_proxy = Some(proxy_url);
+    let mut fixed_proxy = Url::parse(&proxy_url).expect("proxy URL");
+    let proxy_port = fixed_proxy.port().expect("proxy URL should include a port");
+    fixed_proxy
+        .set_host(Some("proxy.invalid"))
+        .expect("proxy hostname should be replaceable");
+    context.http_proxy = Some(fixed_proxy.to_string());
     context.http_no_proxy = Some(String::new());
+    context.http_host_resolve = vec![format!("proxy.invalid:{proxy_port}:127.0.0.1")];
 
     let _command_tx = spawn_standalone_connection(
         3,
@@ -997,6 +1046,26 @@ async fn websocket_transport_rejects_non_200_http_proxy_connect() {
         message.contains("HTTP/1.1 204 No Content"),
         "unexpected proxy CONNECT error: {message}"
     );
+}
+
+#[tokio::test]
+async fn websocket_transport_rejects_host_resolve_for_remote_proxy_target() {
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let mut context = test_websocket_context();
+    context.http_proxy = Some("http://127.0.0.1:1".to_owned());
+    context.http_no_proxy = Some(String::new());
+    context.http_host_resolve = vec!["target.invalid:80:127.0.0.1".to_owned()];
+
+    let _command_tx = spawn_standalone_connection(
+        4,
+        "ws://target.invalid/socket".to_owned(),
+        Vec::new(),
+        context,
+        event_tx,
+    );
+    let message = recv_handshake_failure_events(&mut event_rx).await;
+
+    assert!(message.contains("would be ignored"), "{message}");
 }
 
 #[tokio::test]

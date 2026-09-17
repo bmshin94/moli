@@ -3,7 +3,10 @@
 use super::{
     CurlWebSocketConnection, CurlWebSocketRequest, SESSION_CAPACITY, connection::SessionIo,
 };
-use crate::{CurlTransferId, NetworkAddressPolicy, runtime::identity::next_transfer_id};
+use crate::{
+    CurlTransferId, HostResolveOverrides, NetworkAddressPolicy, SelectedProxy,
+    runtime::identity::next_transfer_id,
+};
 use anyhow::{Context, Result, bail};
 use curl::multi::MultiWaker;
 use std::sync::{
@@ -100,20 +103,32 @@ impl CurlWebSocketConnector {
 
         let url = Url::parse(&request.url)
             .with_context(|| format!("failed to parse WebSocket URL `{}`", request.url))?;
+        // A validated remote-DNS proxy owns request-target admission. An empty
+        // proxy string disables proxying in curl, while socks4/socks5 resolve
+        // the target locally; neither may bypass direct-target admission.
+        if let Some(proxy) = request.proxy.as_deref().filter(|proxy| !proxy.is_empty()) {
+            SelectedProxy::parse(proxy).with_context(|| {
+                format!(
+                    "network address policy requires a supported remote-DNS WebSocket proxy, got `{proxy}`"
+                )
+            })?;
+            return Ok(());
+        }
         let host = url
             .host()
             .ok_or_else(|| anyhow::anyhow!("WebSocket URL `{url}` is missing a host"))?;
 
         match host {
             Host::Domain(host) => {
-                if request.proxy.is_some() {
-                    bail!(
-                        "cannot enforce network address policy for proxied WebSocket hostname `{host}` in `{url}`; the proxy must not resolve an unchecked target hostname"
-                    );
-                }
                 let port = url
                     .port_or_known_default()
                     .ok_or_else(|| anyhow::anyhow!("WebSocket URL `{url}` has no port"))?;
+                let host_resolve = HostResolveOverrides::parse(&request.resolve_entries)?;
+                if let Some(addresses) = host_resolve.addresses_for(host, port) {
+                    return self
+                        .network_address_policy
+                        .check_addresses(addresses, url.as_str());
+                }
                 let target = request.dns_resolution.target().ok_or_else(|| {
                     anyhow::anyhow!(
                         "network address policy requires shared DNS resolution for WebSocket hostname `{host}` in `{url}`"

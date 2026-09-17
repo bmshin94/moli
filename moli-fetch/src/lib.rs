@@ -34,7 +34,7 @@ pub use blocking::{
 pub use blocking::{
     clear_http_cache, clear_http_cache_for_origin, clear_http_cache_root,
     clear_http_cache_root_for_origin, cookie_header_for_request, http_cache_stats,
-    observe_cookie_access_report_for_request, trim_http_cache, validate_http_host_resolve_entries,
+    observe_cookie_access_report_for_request, trim_http_cache,
 };
 pub use cancellation::FetchCancelHandle;
 pub use client::{FetchClient, FetchClientHandle};
@@ -50,8 +50,8 @@ pub use headers::{
     is_forbidden_response_header_name, is_no_cors_safelisted_request_header,
 };
 pub use moli_cookie_jar::SharedBrowserCookieStore as SharedCookieStore;
-pub use moli_curl::CurlTlsConfig;
 pub use moli_curl::websocket::CurlWebSocketConnector;
+pub use moli_curl::{CurlTlsConfig, validate_http_host_resolve_entries};
 pub use moli_web_bot_auth::{WebBotAuthProfile, WebBotAuthSigner};
 pub use network_fetch_result::{
     NetworkExchangeObservation, NetworkFetchFailureContext, NetworkFetchFailureRequestContext,

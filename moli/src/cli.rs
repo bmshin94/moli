@@ -484,12 +484,17 @@ pub struct CommonArgs {
     #[arg(long)]
     pub obey_robots: bool,
 
-    #[arg(long)]
+    /// Route HTTP(S) and WebSocket traffic through an HTTP, HTTPS, socks5h, or
+    /// socks4a proxy. Moli resolves and pins the proxy endpoint; the proxy is
+    /// responsible for resolving and filtering request target hostnames.
+    #[arg(long, value_name = "URL")]
     pub http_proxy: Option<String>,
 
     #[arg(long)]
     pub http_no_proxy: Option<String>,
 
+    /// Permanently map a directly connected origin or proxy endpoint to an IP.
+    /// Target mappings are rejected when a remote-DNS proxy would ignore them.
     #[arg(long = "http-host-resolve", value_name = "HOST:PORT:ADDR")]
     pub http_host_resolve: Vec<String>,
 
@@ -594,6 +599,8 @@ pub struct CommonArgs {
     #[arg(long)]
     pub document_start_script_file: Vec<String>,
 
+    /// Block private addresses for directly connected request targets.
+    /// Proxy-resolved targets are outside this client-side policy.
     #[arg(
         long,
         env = "MOLI_BLOCK_PRIVATE_NETWORKS",
@@ -601,6 +608,8 @@ pub struct CommonArgs {
     )]
     pub block_private_networks: bool,
 
+    /// Block CIDRs for directly connected request targets. Proxy-resolved
+    /// targets must be filtered by the configured proxy.
     #[arg(long)]
     pub block_cidrs: Option<String>,
 

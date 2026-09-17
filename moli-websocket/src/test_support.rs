@@ -38,6 +38,7 @@ pub fn test_websocket_context() -> ConnectOptions {
         extra_headers: Vec::new(),
         http_proxy: None,
         http_no_proxy: None,
+        http_host_resolve: Vec::new(),
         proxy_bearer_token: None,
         tls: Default::default(),
         cookie_header: None,
@@ -530,6 +531,79 @@ pub async fn spawn_http_connect_proxy_response(
             .expect("write proxy CONNECT response");
     });
     (format!("http://{addr}"), request_rx, handle)
+}
+
+pub async fn spawn_socks5h_proxy(
+    upstream_addr: std::net::SocketAddr,
+) -> (
+    String,
+    oneshot::Receiver<(String, u16)>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WebSocket SOCKS proxy");
+    let addr = listener.local_addr().expect("WebSocket SOCKS proxy addr");
+    let (request_tx, request_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        let (mut client, _) = listener.accept().await.expect("accept SOCKS client");
+        let mut greeting = [0u8; 2];
+        client
+            .read_exact(&mut greeting)
+            .await
+            .expect("read SOCKS greeting");
+        assert_eq!(greeting[0], 5);
+        let mut methods = vec![0; usize::from(greeting[1])];
+        client
+            .read_exact(&mut methods)
+            .await
+            .expect("read SOCKS methods");
+        assert!(methods.contains(&0), "SOCKS client must offer no-auth");
+        client
+            .write_all(&[5, 0])
+            .await
+            .expect("write SOCKS method selection");
+
+        let mut request_head = [0u8; 4];
+        client
+            .read_exact(&mut request_head)
+            .await
+            .expect("read SOCKS request head");
+        assert_eq!(&request_head[..3], &[5, 1, 0]);
+        let host = match request_head[3] {
+            3 => {
+                let mut length = [0u8; 1];
+                client
+                    .read_exact(&mut length)
+                    .await
+                    .expect("read SOCKS domain length");
+                let mut domain = vec![0; usize::from(length[0])];
+                client
+                    .read_exact(&mut domain)
+                    .await
+                    .expect("read SOCKS domain");
+                String::from_utf8(domain).expect("SOCKS domain should be UTF-8")
+            }
+            atyp => panic!("socks5h must send a domain target, got address type {atyp}"),
+        };
+        let mut port = [0u8; 2];
+        client
+            .read_exact(&mut port)
+            .await
+            .expect("read SOCKS target port");
+        let port = u16::from_be_bytes(port);
+        let _ = request_tx.send((host, port));
+
+        let mut upstream = TcpStream::connect(upstream_addr)
+            .await
+            .expect("connect SOCKS upstream");
+        client
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+            .await
+            .expect("write SOCKS success response");
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    });
+    (format!("socks5h://{addr}"), request_rx, handle)
 }
 
 pub async fn spawn_text_echo_websocket_server() -> (String, tokio::task::JoinHandle<()>) {

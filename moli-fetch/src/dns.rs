@@ -1,26 +1,19 @@
-use anyhow::{Result, bail};
-use moli_curl::CurlDnsResolution;
+use anyhow::Result;
+use moli_curl::{ConnectionEndpointRole, CurlDnsResolution, HostResolveOverrides};
 use moli_dns_resolver::DnsTarget;
-use url::{Host, Url};
+use url::Url;
 
-use crate::{
-    FetchConfig,
-    blocking::{normalized_http_host_resolve_entries, resolve_host_resolve_override_ips},
-    proxy::HttpProxyRoute,
-};
+use crate::{FetchConfig, proxy::HttpProxyRoute};
 
 /// Fetch-side DNS admission decision.
 ///
-/// The shared resolver is used only when Fetch can prove that curl will
-/// connect directly to an HTTP(S) origin. Proxy traffic needs no shared origin
-/// lookup only when no address policy is active; otherwise a proxy-resolved
-/// hostname cannot be verified locally and is rejected. IP literals and
-/// matching explicit host-resolve entries already have exact routing and are
-/// checked synchronously before this decision.
+/// Each request resolves at most the one hostname curl will connect to locally:
+/// the origin for a direct route or the proxy endpoint for a proxy route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FetchCurlDnsAdmission {
     NoSharedResolution,
-    SharedResolver(DnsTarget),
+    DirectTarget(DnsTarget),
+    ProxyEndpoint(DnsTarget),
 }
 
 pub(crate) fn curl_dns_resolution(
@@ -28,47 +21,42 @@ pub(crate) fn curl_dns_resolution(
     url: &Url,
     proxy_route: &HttpProxyRoute,
 ) -> Result<CurlDnsResolution> {
-    match curl_dns_admission(config, url, proxy_route)? {
+    let host_resolve = HostResolveOverrides::parse(config.http_host_resolve())?;
+    let static_entries = host_resolve.normalized_entries();
+    match curl_dns_admission(url, proxy_route, &host_resolve)? {
         FetchCurlDnsAdmission::NoSharedResolution => Ok(CurlDnsResolution::no_shared_resolution()),
-        FetchCurlDnsAdmission::SharedResolver(target) => {
+        FetchCurlDnsAdmission::DirectTarget(target) => {
             let policy = config.network_address_policy();
-            Ok(CurlDnsResolution::resolve_endpoint(
-                target,
-                normalized_http_host_resolve_entries(config.http_host_resolve())?,
-            )
-            .with_network_address_policy(policy, url.to_string()))
+            Ok(CurlDnsResolution::resolve_endpoint(target, static_entries)
+                .with_network_address_policy(policy, url.to_string()))
+        }
+        FetchCurlDnsAdmission::ProxyEndpoint(target) => {
+            Ok(CurlDnsResolution::resolve_endpoint(target, static_entries))
         }
     }
 }
 
 fn curl_dns_admission(
-    config: &FetchConfig,
     url: &Url,
     proxy_route: &HttpProxyRoute,
+    host_resolve: &HostResolveOverrides,
 ) -> Result<FetchCurlDnsAdmission> {
     if !matches!(url.scheme(), "http" | "https") {
         return Ok(FetchCurlDnsAdmission::NoSharedResolution);
     }
-    let Some(Host::Domain(host)) = url.host() else {
-        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
-    };
-    let Some(port) = url.port_or_known_default() else {
-        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
-    };
-    if proxy_route.is_proxy() {
-        if config.network_address_policy().is_enforced() {
-            bail!(
-                "cannot enforce network address policy for proxied hostname `{host}` in `{url}`; the proxy must not resolve an unchecked target hostname"
-            );
-        }
-        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
-    }
-    if resolve_host_resolve_override_ips(config.http_host_resolve(), host, port)?.is_some() {
-        return Ok(FetchCurlDnsAdmission::NoSharedResolution);
-    }
-    Ok(FetchCurlDnsAdmission::SharedResolver(DnsTarget::new(
-        host, port,
-    )))
+    Ok(
+        match proxy_route.connection_dns_endpoint(url, host_resolve)? {
+            None => FetchCurlDnsAdmission::NoSharedResolution,
+            Some(endpoint) => match endpoint.role() {
+                ConnectionEndpointRole::RequestTarget => {
+                    FetchCurlDnsAdmission::DirectTarget(endpoint.target().clone())
+                }
+                ConnectionEndpointRole::Proxy => {
+                    FetchCurlDnsAdmission::ProxyEndpoint(endpoint.target().clone())
+                }
+            },
+        },
+    )
 }
 
 #[cfg(test)]
@@ -88,15 +76,20 @@ mod tests {
         raw_url: &str,
         proxy_route: &HttpProxyRoute,
     ) -> Result<FetchCurlDnsAdmission> {
+        let host_resolve = HostResolveOverrides::parse(config.http_host_resolve())?;
         curl_dns_admission(
-            config,
             &Url::parse(raw_url).expect("test URL should parse"),
             proxy_route,
+            &host_resolve,
         )
     }
 
-    fn shared_target(host: &str, port: u16) -> FetchCurlDnsAdmission {
-        FetchCurlDnsAdmission::SharedResolver(DnsTarget::new(host, port))
+    fn direct_target(host: &str, port: u16) -> FetchCurlDnsAdmission {
+        FetchCurlDnsAdmission::DirectTarget(DnsTarget::new(host, port))
+    }
+
+    fn proxy_endpoint(host: &str, port: u16) -> FetchCurlDnsAdmission {
+        FetchCurlDnsAdmission::ProxyEndpoint(DnsTarget::new(host, port))
     }
 
     fn proxy_route(raw: &str) -> HttpProxyRoute {
@@ -109,7 +102,7 @@ mod tests {
 
         assert_eq!(
             admission(&config, "http://example.test/path", &HttpProxyRoute::Direct),
-            shared_target("example.test", 80)
+            direct_target("example.test", 80)
         );
         assert_eq!(
             admission(
@@ -117,7 +110,7 @@ mod tests {
                 "https://example.test:8443/path",
                 &HttpProxyRoute::Direct,
             ),
-            shared_target("example.test", 8443)
+            direct_target("example.test", 8443)
         );
     }
 
@@ -140,13 +133,13 @@ mod tests {
         );
         assert_eq!(
             admission(&config, "http://other.test/path", &HttpProxyRoute::Direct,),
-            shared_target("other.test", 80),
+            direct_target("other.test", 80),
             "an unrelated host-resolve entry must not return DNS ownership to curl"
         );
     }
 
     #[test]
-    fn selected_proxy_route_needs_no_shared_origin_resolution() {
+    fn selected_proxy_domain_uses_shared_endpoint_resolution() {
         let config = FetchConfig::default();
 
         assert_eq!(
@@ -155,22 +148,53 @@ mod tests {
                 "https://api.example.test/path",
                 &proxy_route("http://proxy.test:8080"),
             ),
+            proxy_endpoint("proxy.test", 8080)
+        );
+    }
+
+    #[test]
+    fn selected_proxy_ip_needs_no_shared_resolution_even_with_address_policy() {
+        let mut config = FetchConfig::default();
+        config.set_network_blocking(true, Vec::new());
+
+        assert_eq!(
+            admission(
+                &config,
+                "https://api.example.test/path",
+                &proxy_route("http://192.0.2.1:8080"),
+            ),
             FetchCurlDnsAdmission::NoSharedResolution
         );
     }
 
     #[test]
-    fn enforced_policy_rejects_proxy_resolved_hostname() {
+    fn proxy_endpoint_override_needs_no_dns_but_target_override_is_rejected() {
+        let route = proxy_route("http://proxy.test:8080");
+        let mut config = FetchConfig::default();
+        config.set_http_host_resolve(vec!["proxy.test:8080:192.0.2.1".to_owned()]);
+        assert_eq!(
+            admission(&config, "https://api.example.test/path", &route),
+            FetchCurlDnsAdmission::NoSharedResolution
+        );
+
+        config.set_http_host_resolve(vec!["api.example.test:443:198.51.100.1".to_owned()]);
+        let error = admission_result(&config, "https://api.example.test/path", &route)
+            .expect_err("a target override cannot affect remote proxy DNS");
+        assert!(error.to_string().contains("would be ignored"), "{error:#}");
+    }
+
+    #[test]
+    fn address_policy_does_not_reject_proxy_resolved_target() {
         let mut config = FetchConfig::default();
         config.set_network_blocking(true, Vec::new());
 
-        let error = admission_result(
-            &config,
-            "https://api.example.test/path",
-            &proxy_route("http://proxy.test:8080"),
-        )
-        .expect_err("a strict policy cannot verify proxy-side DNS");
-
-        assert!(error.to_string().contains("proxied hostname"));
+        assert_eq!(
+            admission(
+                &config,
+                "https://api.example.test/path",
+                &proxy_route("http://proxy.test:8080"),
+            ),
+            proxy_endpoint("proxy.test", 8080)
+        );
     }
 }

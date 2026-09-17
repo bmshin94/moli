@@ -6,12 +6,11 @@ use crate::{
     request::PreparedWebSocketRequest,
 };
 use moli_curl::{
-    CurlDnsResolution,
+    CurlDnsResolution, HostResolveOverrides,
     websocket::{
         CurlWebSocketConnection, CurlWebSocketConnector, CurlWebSocketEvent, CurlWebSocketRequest,
     },
 };
-use moli_dns_resolver::DnsTarget;
 
 pub(crate) struct HandshakeInfo {
     pub request_headers: http::HeaderMap,
@@ -29,9 +28,16 @@ pub(crate) async fn open_websocket_connection(
     context: &ConnectOptions,
 ) -> Result<OpenedConnection, String> {
     let proxy_route = websocket_proxy_route(&request.url, context)?;
+    let host_resolve = HostResolveOverrides::parse(&context.http_host_resolve)
+        .map_err(|error| error.to_string())?;
+    let dns_endpoint = proxy_route
+        .connection_dns_endpoint(&request.url, &host_resolve)
+        .map_err(|error| error.to_string())?;
+    let resolve_entries = host_resolve.normalized_entries();
     let mut native = CurlWebSocketRequest::new(request.url.to_string());
     native.headers = header_map_entries(&request.headers);
     native.proxy = proxy_route.proxy().map(|proxy| proxy.url().to_owned());
+    native.resolve_entries = resolve_entries.clone();
     // WebSocket opening handshakes use credentials=include, including across
     // origins: https://websockets.spec.whatwg.org/#opening-handshake
     native.tls = context.tls.clone();
@@ -48,18 +54,10 @@ pub(crate) async fn open_websocket_connection(
         } else if context.proxy_bearer_token.is_some() {
             return Err("proxy bearer authentication requires an HTTP(S) proxy".to_owned());
         }
-    } else {
-        let url = &request.url;
-        if let Some(url::Host::Domain(host)) = url.host() {
-            native.dns_resolution = CurlDnsResolution::resolve_endpoint(
-                DnsTarget::new(
-                    host,
-                    url.port_or_known_default()
-                        .ok_or("WebSocket URL has no port")?,
-                ),
-                Vec::new(),
-            );
-        }
+    }
+    if let Some(endpoint) = dns_endpoint {
+        native.dns_resolution =
+            CurlDnsResolution::resolve_endpoint(endpoint.target().clone(), resolve_entries);
     }
     let mut connection = connector
         .connect(native)
