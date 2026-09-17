@@ -234,9 +234,9 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     .attribute(node, "src")
                     .filter(|src| !src.is_empty())
                 {
-                    // Lazy-image placeholders carry no visible image. Keep
+                    // Embedded placeholders carry no useful image. Keep
                     // accessible alternate text without emitting a data URI.
-                    if is_empty_svg_placeholder(src) {
+                    if is_noncontent_data_image(src) {
                         if !alt.is_empty()
                             && !self
                                 .dom
@@ -441,38 +441,52 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
     }
 }
 
-fn is_empty_svg_placeholder(src: &str) -> bool {
+fn is_noncontent_data_image(src: &str) -> bool {
     use base64::Engine as _;
 
     let Some((media_type, payload)) = src
-        .strip_prefix("data:")
+        .get(5..)
+        .filter(|_| {
+            src.get(..5)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+        })
         .and_then(|uri| uri.split_once(','))
     else {
         return false;
     };
     let mut parts = media_type.split(';');
-    if !parts
-        .next()
-        .is_some_and(|kind| kind.eq_ignore_ascii_case("image/svg+xml"))
+    let Some(kind) = parts.next() else {
+        return false;
+    };
+    if !["image/svg+xml", "image/gif", "image/png"]
+        .iter()
+        .any(|supported| kind.eq_ignore_ascii_case(supported))
+        || payload.len() > 1_000_000
     {
         return false;
     }
     let encoded = parts.any(|part| part.eq_ignore_ascii_case("base64"));
-    let svg = if encoded {
+    let bytes = if encoded {
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
             return false;
         };
-        let Ok(text) = String::from_utf8(bytes) else {
-            return false;
-        };
-        text
+        bytes
     } else {
-        let Ok(text) = percent_encoding::percent_decode_str(payload).decode_utf8() else {
-            return false;
-        };
-        text.into_owned()
+        percent_encoding::percent_decode_str(payload).collect::<Vec<_>>()
     };
-    let Ok(document) = roxmltree::Document::parse(&svg) else {
+    if kind.eq_ignore_ascii_case("image/gif") {
+        return (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))
+            && bytes.get(6..10) == Some(&[1, 0, 1, 0][..]);
+    }
+    if kind.eq_ignore_ascii_case("image/png") {
+        return bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+            && bytes.get(12..16) == Some(&b"IHDR"[..])
+            && bytes.get(16..24) == Some(&[0, 0, 0, 1, 0, 0, 0, 1][..]);
+    }
+    let Ok(svg) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    let Ok(document) = roxmltree::Document::parse(svg) else {
         return false;
     };
     let root = document.root_element();

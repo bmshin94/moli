@@ -171,6 +171,14 @@ impl<'a> Writer<'a> {
     }
 
     pub(crate) fn code_with_edges(&mut self, text: &str, preformatted: bool) {
+        // Each call represents a separate HTML code element. Keep adjacent
+        // elements distinct even when the source has no whitespace between them.
+        if self.code.is_some() {
+            self.flush_code();
+            if !text.is_empty() {
+                self.space = true;
+            }
+        }
         if preformatted {
             if !text.is_empty() {
                 if self.code.is_none() {

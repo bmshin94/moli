@@ -76,7 +76,7 @@ fn inline_code_breaks_keep_separation_at_code_span_edges() {
             ..Options::default()
         },
     );
-    assert_eq!(result, "before`git status`after");
+    assert_eq!(result, "before`git ` `status`after");
 }
 
 #[test]
