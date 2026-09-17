@@ -30,6 +30,8 @@ pub(crate) async fn open_websocket_connection(
     let proxy_route = websocket_proxy_route(&request.url, context)?;
     let host_resolve = HostResolveOverrides::parse(&context.http_host_resolve)
         .map_err(|error| error.to_string())?;
+    // Resolve exactly the endpoint this process will connect to: the target
+    // when direct, or the proxy when target DNS belongs to that proxy.
     let dns_endpoint = proxy_route
         .connection_dns_endpoint(&request.url, &host_resolve)
         .map_err(|error| error.to_string())?;

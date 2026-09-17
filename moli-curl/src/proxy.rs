@@ -78,6 +78,12 @@ impl SelectedProxy {
         };
         let url = Url::parse(&normalized)
             .with_context(|| format!("failed to parse proxy URL `{raw}`"))?;
+        // Chromium's public `socks`/`socks5` spelling always sends the target
+        // hostname to the proxy. libcurl assigns local-DNS semantics to
+        // `socks5`, so use its explicit `socks5h` spelling internally. The
+        // analogous SOCKS4 hostname form is `socks4a`. Keeping `url` unchanged
+        // preserves useful diagnostics while `curl_url` carries this semantic
+        // translation to the transport.
         let (scheme, curl_scheme) = match url.scheme() {
             "http" => (ProxyScheme::Http, "http"),
             "https" => (ProxyScheme::Https, "https"),
@@ -200,6 +206,11 @@ impl ProxyRoute {
                 Ok(None)
             }
             Self::Proxy(proxy) => {
+                // A target override cannot influence a remote-DNS proxy. Fail
+                // instead of silently giving the caller a false pinning
+                // guarantee. The one exception is when target and proxy are
+                // literally the same endpoint, where the entry pins the local
+                // proxy connection itself.
                 let proxy_is_request_endpoint =
                     proxy.endpoint_host().eq_ignore_ascii_case(request_host)
                         && proxy.endpoint_port() == request_port;

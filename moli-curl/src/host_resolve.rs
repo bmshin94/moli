@@ -15,6 +15,12 @@ struct HostResolveEntry {
 }
 
 impl HostResolveOverrides {
+    /// Parse only permanent address overrides owned by Moli.
+    ///
+    /// libcurl also accepts `+` temporary cache entries and `-` removals. Moli
+    /// deliberately excludes both: expiry or removal could return a direct
+    /// request hostname to libcurl's resolver after the routing and address
+    /// admission decision was made.
     pub fn parse(entries: &[String]) -> Result<Self> {
         entries
             .iter()

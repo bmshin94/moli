@@ -105,6 +105,9 @@ impl CurlDnsResolution {
         resolution
             .address_policy
             .check_addresses(addresses, &resolution.policy_target)?;
+        // Preserve the complete checked answer. Filtering forbidden addresses
+        // would change curl's selection/fallback semantics, while resolving a
+        // second time would reopen the DNS-rebinding TOCTOU window.
         let mut resolve = List::new();
         for entry in &resolution.static_entries {
             resolve
@@ -129,6 +132,9 @@ impl CurlDnsResolution {
         })?;
         easy.resolve(resolve)
             .context("failed to install shared DNS result on curl request")?;
+        // CURLOPT_RESOLVE entries without `+` are permanent for this easy
+        // handle. Consuming the endpoint also prevents a requeued job from
+        // issuing a second lookup before it enters curl.
         self.endpoint = None;
         Ok(())
     }
