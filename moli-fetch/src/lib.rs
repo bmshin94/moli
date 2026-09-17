@@ -34,7 +34,7 @@ pub use blocking::{
 pub use blocking::{
     clear_http_cache, clear_http_cache_for_origin, clear_http_cache_root,
     clear_http_cache_root_for_origin, cookie_header_for_request, http_cache_stats,
-    observe_cookie_access_report_for_request, trim_http_cache,
+    observe_cookie_access_report_for_request, trim_http_cache, validate_http_host_resolve_entries,
 };
 pub use cancellation::FetchCancelHandle;
 pub use client::{FetchClient, FetchClientHandle};

@@ -6,7 +6,9 @@ use moli_core::{
     page::{SubresourceJsonPathEquals, SubresourceJsonPathRegex, SubresourceResponseWaitCriteria},
     runtime::BrowserConfig,
 };
-use moli_fetch::{FetchConfig, WebBotAuthProfile, WebBotAuthSigner};
+use moli_fetch::{
+    FetchConfig, WebBotAuthProfile, WebBotAuthSigner, validate_http_host_resolve_entries,
+};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -251,27 +253,6 @@ fn configure_web_bot_auth(fetch: &mut FetchConfig, common: &CommonArgs) -> Resul
         profile,
     )?;
     fetch.set_web_bot_auth(Some(signer));
-    Ok(())
-}
-
-fn validate_http_host_resolve_entries(entries: &[String]) -> Result<()> {
-    for entry in entries {
-        validate_http_host_resolve_entry(entry)?;
-    }
-    Ok(())
-}
-
-fn validate_http_host_resolve_entry(entry: &str) -> Result<()> {
-    let mut parts = entry.splitn(3, ':');
-    let host = parts.next().unwrap_or_default();
-    let port = parts.next().unwrap_or_default();
-    let address = parts.next().unwrap_or_default();
-
-    if host.is_empty() || port.is_empty() || address.is_empty() {
-        bail!("--http-host-resolve must be in HOST:PORT:ADDR form");
-    }
-    port.parse::<u16>()
-        .with_context(|| format!("invalid --http-host-resolve port in `{entry}`"))?;
     Ok(())
 }
 

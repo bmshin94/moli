@@ -648,10 +648,7 @@ pub(crate) fn configure_easy<H: Handler>(
         .context("failed to disable curl HTTP no_proxy evaluation")?;
     if !config.http_host_resolve().is_empty() {
         let mut resolve = List::new();
-        let force_permanent = config.network_address_policy().is_enforced();
-        for entry in
-            normalized_http_host_resolve_entries(config.http_host_resolve(), force_permanent)?
-        {
+        for entry in normalized_http_host_resolve_entries(config.http_host_resolve())? {
             resolve
                 .append(&entry)
                 .with_context(|| anyhow!("failed to build curl host resolve entry `{entry}`"))?;
@@ -793,106 +790,61 @@ pub(crate) fn resolve_host_resolve_override_ips(
     let mut exact_match: Option<Vec<IpAddr>> = None;
     let mut wildcard_match: Option<Vec<IpAddr>> = None;
     for entry in entries {
-        match parse_http_host_resolve_entry(entry)? {
-            HttpHostResolveEntry::Add {
-                host: entry_host,
-                port: entry_port,
-                addresses,
-                ..
-            } if entry_port == port => {
-                if entry_host == "*" {
-                    wildcard_match = Some(addresses);
-                } else if entry_host.eq_ignore_ascii_case(host) {
-                    exact_match = Some(addresses);
-                }
+        let entry = parse_http_host_resolve_entry(entry)?;
+        if entry.port == port {
+            if entry.host == "*" {
+                wildcard_match = Some(entry.addresses);
+            } else if entry.host.eq_ignore_ascii_case(host) {
+                exact_match = Some(entry.addresses);
             }
-            HttpHostResolveEntry::Remove {
-                host: entry_host,
-                port: entry_port,
-            } if entry_port == port => {
-                if entry_host == "*" {
-                    wildcard_match = None;
-                } else if entry_host.eq_ignore_ascii_case(host) {
-                    exact_match = None;
-                }
-            }
-            _ => {}
         }
     }
 
     Ok(exact_match.or(wildcard_match))
 }
-enum HttpHostResolveEntry {
-    Add {
-        plus_prefix: bool,
-        host: String,
-        port: u16,
-        addresses: Vec<IpAddr>,
-    },
-    Remove {
-        host: String,
-        port: u16,
-    },
+
+struct HttpHostResolveEntry {
+    host: String,
+    port: u16,
+    addresses: Vec<IpAddr>,
 }
 
 impl HttpHostResolveEntry {
-    fn curl_entry(&self, force_permanent: bool) -> String {
-        match self {
-            Self::Add {
-                plus_prefix,
-                host,
-                port,
-                addresses,
-            } => {
-                let prefix = if *plus_prefix && !force_permanent {
-                    "+"
-                } else {
-                    ""
-                };
-                let addresses = addresses
-                    .iter()
-                    .map(format_http_host_resolve_ip)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    "{prefix}{}:{port}:{addresses}",
-                    format_http_host_resolve_host(host)
-                )
-            }
-            Self::Remove { host, port } => {
-                format!("-{}:{port}", format_http_host_resolve_host(host))
-            }
-        }
+    fn curl_entry(&self) -> String {
+        let addresses = self
+            .addresses
+            .iter()
+            .map(format_http_host_resolve_ip)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{}:{}:{addresses}",
+            format_http_host_resolve_host(&self.host),
+            self.port
+        )
     }
 }
 
-pub(crate) fn normalized_http_host_resolve_entries(
-    entries: &[String],
-    force_permanent: bool,
-) -> Result<Vec<String>> {
+pub(crate) fn normalized_http_host_resolve_entries(entries: &[String]) -> Result<Vec<String>> {
     entries
         .iter()
-        .map(|entry| {
-            parse_http_host_resolve_entry(entry).map(|entry| entry.curl_entry(force_permanent))
-        })
+        .map(|entry| parse_http_host_resolve_entry(entry).map(|entry| entry.curl_entry()))
         .collect()
+}
+
+pub fn validate_http_host_resolve_entries(entries: &[String]) -> Result<()> {
+    for entry in entries {
+        parse_http_host_resolve_entry(entry)?;
+    }
+    Ok(())
 }
 
 fn parse_http_host_resolve_entry(entry: &str) -> Result<HttpHostResolveEntry> {
     let entry = entry.trim();
-    if let Some(entry) = entry.strip_prefix('-') {
-        let (host, port) = split_http_host_resolve_remove_entry(entry)?;
-        return Ok(HttpHostResolveEntry::Remove {
-            host: normalize_http_host_resolve_host(host),
-            port: parse_http_host_resolve_port(port, entry)?,
-        });
+    if entry.starts_with('+') || entry.starts_with('-') {
+        bail!("--http-host-resolve does not support `+` or `-` prefixes; use HOST:PORT:ADDR");
     }
 
-    let (plus_prefix, entry) = if let Some(entry) = entry.strip_prefix('+') {
-        (true, entry)
-    } else {
-        (false, entry)
-    };
     let (host, port, address) = split_http_host_resolve_add_entry(entry)?;
     let port = parse_http_host_resolve_port(port, entry)?;
     let mut addresses = Vec::new();
@@ -909,8 +861,7 @@ fn parse_http_host_resolve_entry(entry: &str) -> Result<HttpHostResolveEntry> {
         }
     }
 
-    Ok(HttpHostResolveEntry::Add {
-        plus_prefix,
+    Ok(HttpHostResolveEntry {
         host: normalize_http_host_resolve_host(host),
         port,
         addresses,
@@ -946,31 +897,6 @@ fn split_http_host_resolve_add_entry(entry: &str) -> Result<(&str, &str, &str)> 
     }
 
     Ok((host, port, address))
-}
-
-fn split_http_host_resolve_remove_entry(entry: &str) -> Result<(&str, &str)> {
-    if let Some(entry) = entry.strip_prefix('[') {
-        let Some(host_end) = entry.find(']') else {
-            bail!("--http-host-resolve removal must be in HOST:PORT form");
-        };
-        let host = &entry[..host_end];
-        let remainder = &entry[host_end + 1..];
-        let Some(port) = remainder.strip_prefix(':') else {
-            bail!("--http-host-resolve removal must be in HOST:PORT form");
-        };
-        if host.trim().is_empty() || port.trim().is_empty() {
-            bail!("--http-host-resolve removal must be in HOST:PORT form");
-        }
-        return Ok((host.trim(), port.trim()));
-    }
-
-    let Some((host, port)) = entry.split_once(':') else {
-        bail!("--http-host-resolve removal must be in HOST:PORT form");
-    };
-    if host.trim().is_empty() || port.trim().is_empty() {
-        bail!("--http-host-resolve removal must be in HOST:PORT form");
-    }
-    Ok((host.trim(), port.trim()))
 }
 
 fn parse_http_host_resolve_port(port: &str, entry: &str) -> Result<u16> {
@@ -1550,36 +1476,36 @@ mod tests {
 
     #[test]
     fn http_host_resolve_entries_are_normalized_before_curl_configuration() {
-        let entries = normalized_http_host_resolve_entries(
-            &[
-                " localhost:80: 1.1.1.1 , [2001:db8::1] ".to_owned(),
-                " - localhost:80 ".to_owned(),
-            ],
-            false,
-        )
+        let entries = normalized_http_host_resolve_entries(&[
+            " localhost:80: 1.1.1.1 , [2001:db8::1] ".to_owned(),
+            " [2001:db8::2]:443: 192.0.2.1 ".to_owned(),
+        ])
         .unwrap();
 
         assert_eq!(
             entries,
             vec![
                 "localhost:80:1.1.1.1,[2001:db8::1]".to_owned(),
-                "-localhost:80".to_owned()
+                "[2001:db8::2]:443:192.0.2.1".to_owned()
             ]
         );
     }
 
     #[test]
-    fn address_policy_makes_temporary_host_resolve_entries_permanent() {
-        let entries = vec!["+example.test:443:93.184.216.34".to_owned()];
-
-        assert_eq!(
-            normalized_http_host_resolve_entries(&entries, false).unwrap(),
-            ["+example.test:443:93.184.216.34"]
-        );
-        assert_eq!(
-            normalized_http_host_resolve_entries(&entries, true).unwrap(),
-            ["example.test:443:93.184.216.34"]
-        );
+    fn http_host_resolve_rejects_curl_prefix_syntax() {
+        for entry in [
+            "+example.test:443:93.184.216.34",
+            "-example.test:443",
+            "-example.test:443:93.184.216.34",
+        ] {
+            let error = normalized_http_host_resolve_entries(&[entry.to_owned()]).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("does not support `+` or `-` prefixes"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]

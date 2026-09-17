@@ -1369,6 +1369,31 @@ fn app_config_rejects_invalid_http_host_resolve_entry() {
 }
 
 #[test]
+fn app_config_rejects_prefixed_http_host_resolve_entries() {
+    for entry in [
+        "+web-platform.test:8443:127.0.0.1",
+        "-web-platform.test:8443",
+        "-web-platform.test:8443:127.0.0.1",
+    ] {
+        let option = format!("--http-host-resolve={entry}");
+        let cli = Cli::try_parse_from(normalize_args_for_compat([
+            "moli",
+            "serve",
+            option.as_str(),
+        ]))
+        .unwrap();
+
+        let error = AppConfig::from_cli(&cli).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not support `+` or `-` prefixes"),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
 fn removed_cookie_cache_flag_is_rejected() {
     let error = Cli::try_parse_from(normalize_args_for_compat([
         "moli",

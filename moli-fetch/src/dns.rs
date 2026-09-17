@@ -34,10 +34,7 @@ pub(crate) fn curl_dns_resolution(
             let policy = config.network_address_policy();
             Ok(CurlDnsResolution::resolve_origin(
                 target,
-                normalized_http_host_resolve_entries(
-                    config.http_host_resolve(),
-                    policy.is_enforced(),
-                )?,
+                normalized_http_host_resolve_entries(config.http_host_resolve())?,
             )
             .with_network_address_policy(policy, url.to_string()))
         }
