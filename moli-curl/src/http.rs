@@ -46,7 +46,7 @@ pub struct CurlMultiJob<H: Handler, C> {
     /// DNS ownership chosen by the caller before this transfer enters curl.
     ///
     /// A no-shared-resolution policy leaves the already configured curl handle
-    /// in charge of routing; it may need no DNS lookup at all. A shared-origin
+    /// in charge of routing; it may need no DNS lookup at all. A shared-endpoint
     /// policy parks the transfer outside the curl multi handle set until the
     /// bounded system resolver publishes an answer.
     pub dns_resolution: CurlDnsResolution,

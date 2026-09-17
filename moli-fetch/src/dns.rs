@@ -32,7 +32,7 @@ pub(crate) fn curl_dns_resolution(
         FetchCurlDnsAdmission::NoSharedResolution => Ok(CurlDnsResolution::no_shared_resolution()),
         FetchCurlDnsAdmission::SharedResolver(target) => {
             let policy = config.network_address_policy();
-            Ok(CurlDnsResolution::resolve_origin(
+            Ok(CurlDnsResolution::resolve_endpoint(
                 target,
                 normalized_http_host_resolve_entries(config.http_host_resolve())?,
             )

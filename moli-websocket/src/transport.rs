@@ -51,7 +51,7 @@ pub(crate) async fn open_websocket_connection(
     } else {
         let url = &request.url;
         if let Some(url::Host::Domain(host)) = url.host() {
-            native.dns_resolution = CurlDnsResolution::resolve_origin(
+            native.dns_resolution = CurlDnsResolution::resolve_endpoint(
                 DnsTarget::new(
                     host,
                     url.port_or_known_default()

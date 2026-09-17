@@ -42,7 +42,7 @@ async fn strict_connector_checks_shared_websocket_dns_before_connecting() {
         .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
     let mut request = CurlWebSocketRequest::new("ws://localhost:65534/socket".to_owned());
     request.dns_resolution =
-        CurlDnsResolution::resolve_origin(DnsTarget::new("localhost", 65534), Vec::new());
+        CurlDnsResolution::resolve_endpoint(DnsTarget::new("localhost", 65534), Vec::new());
 
     let mut connection = connector.connect(request).unwrap();
     let event = timeout(DEADLINE, connection.recv())
