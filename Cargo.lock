@@ -2770,6 +2770,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strum",
+ "unicode-id-start",
 ]
 
 [[package]]
