@@ -586,9 +586,6 @@ pub(crate) fn configure_easy<H: Handler>(
     if let Err(error) = easy.tcp_keepalive(true) {
         debug!(url = %request_url, "failed to enable TCP keepalive: {error}");
     }
-    if let Err(error) = easy.dns_cache_timeout(Duration::from_secs(60)) {
-        debug!(url = %request_url, "failed to configure curl DNS cache timeout: {error}");
-    }
     if let Some(max_connects) = config
         .http_max_total_connections()
         .or_else(|| config.effective_http_max_host_connections().map(u16::from))
