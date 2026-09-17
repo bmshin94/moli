@@ -33,6 +33,7 @@ import os
 import random
 import re
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -110,6 +111,10 @@ FETCH_ABORT_RESOURCE_PATHS = {
     "/fetch/api/resources/stash-put.py",
     "/fetch/api/resources/stash-take.py",
     "/fetch/api/resources/infinite-slow-response.py",
+}
+FETCH_RANGE_RESOURCE_PATHS = {
+    "/fetch/range/resources/long-wav.py",
+    "/fetch/range/resources/stash-take.py",
 }
 FETCH_PREFLIGHT_RESOURCE_PATHS = {
     "/fetch/api/resources/preflight.py",
@@ -1616,7 +1621,7 @@ def _make_handler(
                     return self._serve_service_worker_script_resource
                 if path in XHR_RESOURCE_PATHS:
                     return self._serve_xhr_method
-                if path in FETCH_PREFLIGHT_RESOURCE_PATHS | FETCH_REDIRECT_RESOURCE_PATHS | {
+                if path in FETCH_PREFLIGHT_RESOURCE_PATHS | FETCH_REDIRECT_RESOURCE_PATHS | FETCH_RANGE_RESOURCE_PATHS | {
                     FETCH_INSPECT_HEADERS_PATH
                 }:
                     return self._serve_fetch_resource_method
@@ -1642,7 +1647,7 @@ def _make_handler(
             if path in SERVICE_WORKER_SCRIPT_RESOURCE_PATHS:
                 self._serve_service_worker_script_resource()
                 return
-            if path in FETCH_ABORT_RESOURCE_PATHS | FETCH_PREFLIGHT_RESOURCE_PATHS | {
+            if path in FETCH_ABORT_RESOURCE_PATHS | FETCH_PREFLIGHT_RESOURCE_PATHS | FETCH_RANGE_RESOURCE_PATHS | {
                 "/fetch/api/resources/status.py", "/fetch/api/resources/trickle.py",
                 FETCH_INSPECT_HEADERS_PATH, *FETCH_REDIRECT_RESOURCE_PATHS
             }:
@@ -1673,7 +1678,7 @@ def _make_handler(
             if path in SERVICE_WORKER_SCRIPT_RESOURCE_PATHS:
                 self._serve_service_worker_script_resource()
                 return
-            if path in FETCH_ABORT_RESOURCE_PATHS | FETCH_PREFLIGHT_RESOURCE_PATHS | {
+            if path in FETCH_ABORT_RESOURCE_PATHS | FETCH_PREFLIGHT_RESOURCE_PATHS | FETCH_RANGE_RESOURCE_PATHS | {
                 "/fetch/api/resources/status.py", "/fetch/api/resources/trickle.py",
                 FETCH_INSPECT_HEADERS_PATH, *FETCH_REDIRECT_RESOURCE_PATHS
             }:
@@ -1738,9 +1743,13 @@ def _make_handler(
             self.end_headers()
 
         def _serve_fetch_resource_method(self) -> None:
+            parsed = urlparse(self.path)
+            path = unquote(parsed.path)
+            if path in FETCH_RANGE_RESOURCE_PATHS:
+                self._serve_fetch_range_resource(path, parsed.query, emit_body=self.command != "HEAD")
+                return
             if self._serve_xhr_resource(emit_body=True):
                 return
-            parsed = urlparse(self.path)
             if unquote(parsed.path) in SERVICE_WORKER_SCRIPT_RESOURCE_PATHS:
                 self._serve_service_worker_script_resource()
                 return
@@ -1916,6 +1925,9 @@ def _make_handler(
                 return
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
+            if path in FETCH_RANGE_RESOURCE_PATHS:
+                self._serve_fetch_range_resource(path, parsed.query, emit_body=emit_body)
+                return
             if path in SERVICE_WORKER_SCRIPT_RESOURCE_PATHS:
                 self._serve_service_worker_script_resource()
                 return
@@ -3006,6 +3018,85 @@ def _make_handler(
                 self._send_bytes(None, b"", emit_body=emit_body, extra_headers=headers)
             except (KeyError, ValueError, TypeError):
                 self.send_error(500)
+
+        def _serve_fetch_range_resource(
+            self, path: str, query: str, *, emit_body: bool
+        ) -> None:
+            if not self._consume_request_body():
+                return
+            params = parse_qs(query, keep_blank_values=True, encoding="latin-1")
+            stash_path = "/fetch/range/"
+            try:
+                if path.endswith("/stash-take.py"):
+                    body = json.dumps(fetch_stash.take(params["key"][0], path=stash_path)).encode("ascii")
+                    self._send_bytes("application/json", body, emit_body=emit_body, cache_control=None)
+                    return
+                if self.command == "OPTIONS":
+                    self._send_bytes("text/plain", b"Preflight not accepted",
+                                     emit_body=emit_body, status_code=404, cache_control=None)
+                    return
+
+                range_header = ", ".join(self.headers.get_all("Range", []))
+                range_key = params.get("range-received-key", [""])[0]
+                encoding_key = params.get("accept-encoding-key", [""])[0]
+                if range_key and range_header:
+                    fetch_stash.put(range_key, "range-header-received", path=stash_path, overwrite=True)
+                if encoding_key:
+                    fetch_stash.put(encoding_key, ", ".join(self.headers.get_all("Accept-Encoding", [])),
+                                    path=stash_path, overwrite=True)
+
+                # Match long-wav.py's 8 kHz, 8-bit mono, five-minute response,
+                # including its header-inclusive Content-Length convention.
+                total_length = 8000 * 300
+                wav_header = struct.pack(
+                    "<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + total_length, b"WAVE",
+                    b"fmt ", 16, 1, 1, 8000, 8000, 1, 8, b"data", total_length,
+                )
+                remaining = total_length
+                initial = wav_header
+                status = 200
+                headers = [
+                    ("Content-Type", "audio/wav"),
+                    ("Accept-Ranges", "bytes"),
+                    ("Cache-Control", "no-cache"),
+                    ("Access-Control-Allow-Origin", ", ".join(self.headers.get_all("Origin", []))),
+                ]
+                match = re.search(r"^bytes=(\d*)-(\d*)$", range_header)
+                if match:
+                    start = int(match[1])
+                    end = int(match[2]) if match[2] else 0
+                    remaining = end + 1 - start if end else total_length - start
+                    initial = wav_header[start:]
+                    if remaining < len(initial):
+                        initial = initial[:remaining]
+                    status = 206
+                    headers.append(("Content-Range", f"bytes {start}-{end or total_length - 1}/{total_length}"))
+            except (KeyError, ValueError):
+                self.send_error(500)
+                return
+
+            self.close_connection = True
+            try:
+                self.send_response(status)
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(remaining))
+                self.end_headers()
+                self.wfile.flush()
+                if not emit_body:
+                    return
+                self.wfile.write(initial)
+                self.wfile.flush()
+                remaining -= len(initial)
+                while remaining > 0 and not stopping.is_set():
+                    size = min(remaining, 8000)
+                    self.wfile.write(b"\0" * size)
+                    self.wfile.flush()
+                    remaining -= size
+                    if stopping.wait(0.5):
+                        break
+            except OSError:
+                pass  # Upstream ends its stream when a write reports disconnect.
 
         def _serve_fetch_abort_resource(
             self, path: str, query: str, *, emit_body: bool
