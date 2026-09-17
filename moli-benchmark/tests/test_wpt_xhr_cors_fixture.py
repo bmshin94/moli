@@ -14,6 +14,9 @@ from moli_benchmark.wpt_cross.server import WptFixtureServer
 RESOURCE = "/xhr/resources/corsenabled.py"
 
 
+PUT_RESOURCE = "/xhr/resources/access-control-basic-put-allow.py"
+STAR_RESOURCE = "/xhr/resources/access-control-preflight-request-allow-headers-returns-star.py"
+
 class XhrCorsFixtureTests(unittest.TestCase):
     def setUp(self) -> None:
         self.stack = ExitStack()
