@@ -56,6 +56,7 @@ use crate::{
     },
     dns::curl_dns_resolution,
     network_fetch_result::NetworkObservationRecorder,
+    proxy::resolve_http_proxy_route,
     proxy_connect::{ProxyConnectResponse, ProxyConnectResponseRecorder},
 };
 
@@ -895,17 +896,19 @@ impl RuntimeOwner {
             .buffered_mut()
             .expect("buffered request should use buffered collector")
             .begin_request(self.config.http_max_response_size());
+        let proxy_route = resolve_http_proxy_route(&self.config, &job.current_url);
         if let Err(error) = configure_network_observation(
             &mut easy,
             &job.request,
             request_cookie_report.as_ref(),
-            self.config.http_proxy().is_some() && job.current_url.scheme() == "https",
+            proxy_route.is_proxy() && job.current_url.scheme() == "https",
         ) {
             return Err((job.response_tx, error));
         }
         let outgoing_headers = match configure_easy(
             &mut easy,
             &self.config,
+            &proxy_route,
             &prepared_request.request,
             &job.current_url,
             cookie_header.as_deref(),
@@ -934,7 +937,8 @@ impl RuntimeOwner {
         );
 
         let label = job.current_url.to_string();
-        let dns_resolution = match curl_dns_resolution(&self.config, &job.current_url) {
+        let dns_resolution = match curl_dns_resolution(&self.config, &job.current_url, &proxy_route)
+        {
             Ok(resolution) => resolution,
             Err(error) => return Err((job.response_tx, error)),
         };
@@ -1073,17 +1077,19 @@ impl RuntimeOwner {
             cookie_header.clone(),
         ));
 
+        let proxy_route = resolve_http_proxy_route(&self.config, &job.current_url);
         if let Err(error) = configure_network_observation(
             &mut easy,
             &job.request,
             request_cookie_report.as_ref(),
-            self.config.http_proxy().is_some() && job.current_url.scheme() == "https",
+            proxy_route.is_proxy() && job.current_url.scheme() == "https",
         ) {
             return Err((Box::new(job), Some(easy), error));
         }
         let outgoing_headers = match configure_easy(
             &mut easy,
             &self.config,
+            &proxy_route,
             &prepared_request.request,
             &job.current_url,
             cookie_header.as_deref(),
@@ -1124,7 +1130,8 @@ impl RuntimeOwner {
         collector.set_client_hint_response_policy(prepared_request.response_policy);
 
         let label = job.current_url.to_string();
-        let dns_resolution = match curl_dns_resolution(&self.config, &job.current_url) {
+        let dns_resolution = match curl_dns_resolution(&self.config, &job.current_url, &proxy_route)
+        {
             Ok(resolution) => resolution,
             Err(error) => return Err((Box::new(job), Some(easy), error)),
         };
@@ -1273,17 +1280,19 @@ impl RuntimeOwner {
             job.current_url.clone(),
             cookie_header.clone(),
         ));
+        let proxy_route = resolve_http_proxy_route(&self.config, &job.current_url);
         if let Err(error) = configure_network_observation(
             &mut easy,
             &job.request,
             request_cookie_report.as_ref(),
-            self.config.http_proxy().is_some() && job.current_url.scheme() == "https",
+            proxy_route.is_proxy() && job.current_url.scheme() == "https",
         ) {
             return Err((Box::new(job), Some(easy), error));
         }
         let outgoing_headers = match configure_easy(
             &mut easy,
             &self.config,
+            &proxy_route,
             &prepared_request.request,
             &job.current_url,
             cookie_header.as_deref(),
@@ -1327,7 +1336,8 @@ impl RuntimeOwner {
         collector.set_client_hint_response_policy(prepared_request.response_policy);
 
         let label = job.current_url.to_string();
-        let dns_resolution = match curl_dns_resolution(&self.config, &job.current_url) {
+        let dns_resolution = match curl_dns_resolution(&self.config, &job.current_url, &proxy_route)
+        {
             Ok(resolution) => resolution,
             Err(error) => return Err((Box::new(job), Some(easy), error)),
         };

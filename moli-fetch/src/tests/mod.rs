@@ -1935,6 +1935,28 @@ fn fetch_client_rejects_proxy_side_dns_under_address_policy() {
 }
 
 #[test]
+fn fetch_client_applies_selected_no_proxy_route_to_curl() {
+    let server = ScriptedHttpServer::spawn(vec![ScriptedResponse::ok("direct")]);
+    let port = Url::parse(&server.url())
+        .unwrap()
+        .port()
+        .expect("scripted server URL should include a port");
+    let mut config = FetchConfig::default();
+    config.set_http_proxy(Some("http://127.0.0.1:1".to_owned()));
+    config.set_http_no_proxy(Some(format!("127.0.0.1:{port}")));
+
+    let response = fetch_with_config_for_test(
+        &config,
+        Request::get(&format!("http://127.0.0.1:{port}/direct")).unwrap(),
+    )
+    .expect("the selected direct route must disable curl proxy evaluation");
+
+    assert_eq!(response.body_text(), "direct");
+    assert_eq!(server.hits(), 1);
+    server.shutdown();
+}
+
+#[test]
 fn fetch_client_rejects_private_network_targets_via_host_resolve_override() {
     let server = ScriptedHttpServer::spawn(vec![ScriptedResponse::ok("should-not-be-reached")]);
     let port = Url::parse(&server.url())
@@ -2021,12 +2043,12 @@ fn fetch_client_rejects_http_bad_ports_before_network_io() {
 }
 
 #[test]
-fn fetch_client_preserves_libcurl_env_proxy_fallback() {
+fn fetch_client_preserves_env_proxy_fallback() {
     let proxy = ScriptedHttpServer::spawn(vec![ScriptedResponse::ok("proxied-env")]);
     let proxy_origin = proxy.origin();
     let output = Command::new(std::env::current_exe().expect("test binary path"))
         .arg("--exact")
-        .arg("tests::env_proxy_child_uses_libcurl_env_proxy_fallback")
+        .arg("tests::env_proxy_child_uses_selected_env_proxy_route")
         .arg("--ignored")
         .arg("--nocapture")
         .env(ENV_PROXY_CHILD_TEST, "1")
@@ -2061,8 +2083,8 @@ fn fetch_client_preserves_libcurl_env_proxy_fallback() {
 }
 
 #[test]
-#[ignore = "spawned by fetch_client_preserves_libcurl_env_proxy_fallback"]
-fn env_proxy_child_uses_libcurl_env_proxy_fallback() -> Result<()> {
+#[ignore = "spawned by fetch_client_preserves_env_proxy_fallback"]
+fn env_proxy_child_uses_selected_env_proxy_route() -> Result<()> {
     if std::env::var_os(ENV_PROXY_CHILD_TEST).is_none() {
         return Ok(());
     }

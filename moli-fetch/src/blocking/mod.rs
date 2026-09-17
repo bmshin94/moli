@@ -39,6 +39,7 @@ pub(crate) use self::collectors::{
 use crate::{
     BrowserRequestMetadata, FetchConfig, NegotiatedHttpVersion, NetworkRequestExtraInfo,
     RedirectInfo, Request, RequestAuthScheme, RequestAuthTarget, ResponseHead,
+    proxy::HttpProxyRoute,
 };
 
 const MAX_REDIRECTS: usize = 10;
@@ -534,6 +535,7 @@ pub(crate) fn store_response_cookies(
 pub(crate) fn configure_easy<H: Handler>(
     easy: &mut Easy2<H>,
     config: &FetchConfig,
+    proxy_route: &HttpProxyRoute,
     request: &Request,
     request_url: &Url,
     cookie_header: Option<&str>,
@@ -635,14 +637,18 @@ pub(crate) fn configure_easy<H: Handler>(
         }
     }
 
-    if let Some(proxy) = config.http_proxy() {
-        easy.proxy(proxy)
-            .with_context(|| anyhow!("failed to configure HTTP proxy `{proxy}`"))?;
+    match proxy_route {
+        HttpProxyRoute::Direct => easy
+            .proxy("")
+            .context("failed to disable the HTTP proxy for a direct request")?,
+        HttpProxyRoute::Proxy(proxy) => easy
+            .proxy(proxy)
+            .with_context(|| anyhow!("failed to configure HTTP proxy `{proxy}`"))?,
     }
-    if let Some(no_proxy) = config.http_no_proxy() {
-        easy.noproxy(no_proxy)
-            .with_context(|| anyhow!("failed to configure HTTP no_proxy `{no_proxy}`"))?;
-    }
+    // Proxy bypass has already been resolved into `proxy_route`. Keep curl
+    // from re-evaluating environment `no_proxy` after that security decision.
+    easy.noproxy("")
+        .context("failed to disable curl HTTP no_proxy evaluation")?;
     if !config.http_host_resolve().is_empty() {
         let mut resolve = List::new();
         let force_permanent = config.network_address_policy().is_enforced();

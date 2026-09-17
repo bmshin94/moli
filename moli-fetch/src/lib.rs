@@ -15,6 +15,7 @@ mod error;
 mod fetch_url_list;
 mod headers;
 mod network_fetch_result;
+mod proxy;
 mod proxy_connect;
 mod referrer_policy;
 mod request;
