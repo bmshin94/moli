@@ -104,14 +104,15 @@ impl CurlWebSocketConnector {
         let url = Url::parse(&request.url)
             .with_context(|| format!("failed to parse WebSocket URL `{}`", request.url))?;
         // A validated remote-DNS proxy owns request-target admission. An empty
-        // proxy string disables proxying in curl, while socks4/socks5 resolve
-        // the target locally; neither may bypass direct-target admission.
+        // proxy string disables proxying in curl. Chromium-style socks/socks5
+        // and socks4 URLs are normalized to curl's remote-DNS variants here.
         if let Some(proxy) = request.proxy.as_deref().filter(|proxy| !proxy.is_empty()) {
-            SelectedProxy::parse(proxy).with_context(|| {
+            let selected = SelectedProxy::parse(proxy).with_context(|| {
                 format!(
                     "network address policy requires a supported remote-DNS WebSocket proxy, got `{proxy}`"
                 )
             })?;
+            request.proxy = Some(selected.curl_url().to_owned());
             return Ok(());
         }
         let host = url

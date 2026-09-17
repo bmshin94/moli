@@ -484,9 +484,11 @@ pub struct CommonArgs {
     #[arg(long)]
     pub obey_robots: bool,
 
-    /// Route HTTP(S) and WebSocket traffic through an HTTP, HTTPS, socks5h, or
-    /// socks4a proxy. Moli resolves and pins the proxy endpoint; the proxy is
-    /// responsible for resolving and filtering request target hostnames.
+    /// Route HTTP(S) and WebSocket traffic through an HTTP, HTTPS, SOCKS5, or
+    /// SOCKS4 proxy. SOCKS targets always use proxy-side DNS; `socks` is a
+    /// SOCKS5 alias, while `socks5h` and `socks4a` remain accepted. Moli
+    /// resolves and pins the proxy endpoint; the proxy is responsible for
+    /// resolving and filtering request target hostnames.
     #[arg(long, value_name = "URL")]
     pub http_proxy: Option<String>,
 

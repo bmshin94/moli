@@ -61,7 +61,10 @@ impl ProxyScheme {
 /// Parsed proxy selected for a single request target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedProxy {
+    /// Proxy URL as configured by the caller, retained for diagnostics.
     url: Url,
+    /// Equivalent remote-DNS URL understood by libcurl.
+    curl_url: Url,
     scheme: ProxyScheme,
     endpoint_port: u16,
 }
@@ -75,25 +78,26 @@ impl SelectedProxy {
         };
         let url = Url::parse(&normalized)
             .with_context(|| format!("failed to parse proxy URL `{raw}`"))?;
-        let scheme = match url.scheme() {
-            "http" => ProxyScheme::Http,
-            "https" => ProxyScheme::Https,
-            "socks5h" => ProxyScheme::Socks5h,
-            "socks4a" => ProxyScheme::Socks4a,
-            "socks5" | "socks4" => bail!(
-                "unsupported proxy scheme `{}`; use a remote-DNS proxy scheme such as `socks5h://`",
-                url.scheme()
-            ),
+        let (scheme, curl_scheme) = match url.scheme() {
+            "http" => (ProxyScheme::Http, "http"),
+            "https" => (ProxyScheme::Https, "https"),
+            "socks" | "socks5" | "socks5h" => (ProxyScheme::Socks5h, "socks5h"),
+            "socks4" | "socks4a" => (ProxyScheme::Socks4a, "socks4a"),
             scheme => bail!(
-                "unsupported proxy scheme `{scheme}`; expected http, https, socks5h, or socks4a"
+                "unsupported proxy scheme `{scheme}`; expected http, https, socks, socks5, socks5h, socks4, or socks4a"
             ),
         };
         if url.host().is_none() {
             bail!("proxy URL `{raw}` is missing a host");
         }
         let endpoint_port = url.port().unwrap_or_else(|| scheme.default_port());
+        let mut curl_url = url.clone();
+        curl_url
+            .set_scheme(curl_scheme)
+            .map_err(|()| anyhow::anyhow!("failed to normalize proxy URL `{raw}` for curl"))?;
         Ok(Self {
             url,
+            curl_url,
             scheme,
             endpoint_port,
         })
@@ -101,6 +105,11 @@ impl SelectedProxy {
 
     pub fn url(&self) -> &str {
         self.url.as_str()
+    }
+
+    /// Proxy URL passed to libcurl after applying Moli's remote-DNS semantics.
+    pub fn curl_url(&self) -> &str {
+        self.curl_url.as_str()
     }
 
     pub fn scheme(&self) -> ProxyScheme {
@@ -483,23 +492,38 @@ mod tests {
     }
 
     #[test]
-    fn proxy_parser_accepts_only_remote_dns_schemes() {
-        for (raw, scheme, port) in [
-            ("proxy.test:8080", ProxyScheme::Http, 8080),
-            ("https://proxy.test", ProxyScheme::Https, 443),
-            ("socks5h://proxy.test", ProxyScheme::Socks5h, 1080),
-            ("socks4a://proxy.test", ProxyScheme::Socks4a, 1080),
+    fn proxy_parser_normalizes_socks_schemes_to_remote_dns_for_curl() {
+        for (raw, scheme, port, curl_scheme) in [
+            ("proxy.test:8080", ProxyScheme::Http, 8080, "http"),
+            ("https://proxy.test", ProxyScheme::Https, 443, "https"),
+            ("socks://proxy.test", ProxyScheme::Socks5h, 1080, "socks5h"),
+            ("socks5://proxy.test", ProxyScheme::Socks5h, 1080, "socks5h"),
+            (
+                "socks5h://proxy.test",
+                ProxyScheme::Socks5h,
+                1080,
+                "socks5h",
+            ),
+            ("socks4://proxy.test", ProxyScheme::Socks4a, 1080, "socks4a"),
+            (
+                "socks4a://proxy.test",
+                ProxyScheme::Socks4a,
+                1080,
+                "socks4a",
+            ),
         ] {
             let proxy = SelectedProxy::parse(raw).unwrap();
             assert_eq!(proxy.scheme(), scheme);
             assert_eq!(proxy.endpoint_host(), "proxy.test");
             assert_eq!(proxy.endpoint_port(), port);
             assert_eq!(proxy.target_resolution(), ProxyTargetResolution::Proxy);
-        }
-
-        for scheme in ["socks5", "socks4"] {
-            let error = SelectedProxy::parse(&format!("{scheme}://proxy.test:1080")).unwrap_err();
-            assert!(error.to_string().contains("remote-DNS proxy scheme"));
+            assert_eq!(Url::parse(proxy.curl_url()).unwrap().scheme(), curl_scheme);
+            if raw.contains("://") {
+                assert_eq!(
+                    Url::parse(proxy.url()).unwrap().scheme(),
+                    raw.split_once("://").unwrap().0
+                );
+            }
         }
     }
 

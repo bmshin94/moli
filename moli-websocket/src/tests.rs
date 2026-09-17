@@ -289,13 +289,22 @@ fn websocket_proxy_url_explicit_empty_proxy_disables_env_fallback() {
 }
 
 #[test]
-fn websocket_proxy_route_rejects_local_dns_socks_schemes() {
+fn websocket_proxy_route_normalizes_chromium_socks_schemes() {
     let uri = "wss://target.test/socket".parse().unwrap();
-    for scheme in ["socks5", "socks4"] {
+    for (scheme, curl_scheme) in [
+        ("socks", "socks5h"),
+        ("socks5", "socks5h"),
+        ("socks4", "socks4a"),
+    ] {
         let mut context = test_websocket_context();
         context.http_proxy = Some(format!("{scheme}://proxy.test:1080"));
-        let error = websocket_proxy_route_with_env(&uri, &context, |_| None).unwrap_err();
-        assert!(error.contains("remote-DNS proxy scheme"), "{error}");
+        let route = websocket_proxy_route_with_env(&uri, &context, |_| None).unwrap();
+        let proxy = route.proxy().expect("SOCKS route should use a proxy");
+        assert_eq!(url::Url::parse(proxy.url()).unwrap().scheme(), scheme);
+        assert_eq!(
+            url::Url::parse(proxy.curl_url()).unwrap().scheme(),
+            curl_scheme
+        );
     }
 }
 
@@ -971,7 +980,7 @@ async fn websocket_transport_uses_explicit_http_proxy_connect_without_forwarding
 }
 
 #[tokio::test]
-async fn websocket_transport_socks5h_sends_target_hostname_to_proxy() {
+async fn websocket_transport_socks5_sends_target_hostname_to_proxy() {
     let (server_url, headers_rx, server) = spawn_header_capture_websocket_server().await;
     let mut target = Url::parse(&server_url).expect("WebSocket target URL");
     let target_port = target
@@ -983,7 +992,7 @@ async fn websocket_transport_socks5h_sends_target_hostname_to_proxy() {
     target
         .set_host(Some("websocket-target.invalid"))
         .expect("WebSocket target hostname should be replaceable");
-    let (proxy_url, proxy_request_rx, proxy) = spawn_socks5h_proxy(upstream_addr).await;
+    let (proxy_url, proxy_request_rx, proxy) = spawn_socks5_proxy(upstream_addr).await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let mut context = test_websocket_context();
     context.http_proxy = Some(proxy_url);

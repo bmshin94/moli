@@ -39,8 +39,8 @@ use crate::{
 
 use self::support::{
     EmptyHttpHttpsUpgradeServer, Http2ProtocolFallbackServer, ScriptedH2Server, ScriptedHttpServer,
-    ScriptedHttps11Server, ScriptedResponse, spawn_socks5h_proxy, unique_test_cache_dir,
-    wait_for_runtime_owner_count,
+    ScriptedHttps11Server, ScriptedResponse, spawn_socks4_proxy, spawn_socks5_proxy,
+    unique_test_cache_dir, wait_for_runtime_owner_count,
 };
 
 const ENV_PROXY_CHILD_TEST: &str = "MOLI_FETCH_ENV_PROXY_CHILD";
@@ -2007,7 +2007,7 @@ fn fetch_client_rejects_host_resolve_for_remote_proxy_target() {
 fn fetch_client_rejects_http_header_auth_for_socks_proxy() {
     let mut config = FetchConfig::default();
     config.set_proxy_options(
-        Some("socks5h://127.0.0.1:1".to_owned()),
+        Some("socks5://127.0.0.1:1".to_owned()),
         Some("proxy-token".to_owned()),
     );
 
@@ -2025,26 +2025,7 @@ fn fetch_client_rejects_http_header_auth_for_socks_proxy() {
 }
 
 #[test]
-fn fetch_client_rejects_local_dns_socks_proxy_schemes() {
-    for scheme in ["socks5", "socks4"] {
-        let mut config = FetchConfig::default();
-        config.set_http_proxy(Some(format!("{scheme}://127.0.0.1:1080")));
-
-        let error = fetch_with_config_for_test(
-            &config,
-            Request::get("http://target.invalid/through-socks").unwrap(),
-        )
-        .expect_err("high-level fetch must reject local-DNS SOCKS schemes");
-        let error_chain = format!("{error:#}");
-        assert!(
-            error_chain.contains("remote-DNS proxy scheme"),
-            "{error_chain}"
-        );
-    }
-}
-
-#[test]
-fn fetch_client_socks5h_sends_target_hostname_to_proxy() {
+fn fetch_client_socks5_sends_target_hostname_to_proxy() {
     let upstream = ScriptedHttpServer::spawn(vec![ScriptedResponse::ok("through-socks")]);
     let upstream_url = Url::parse(&upstream.origin()).unwrap();
     let upstream_port = upstream_url
@@ -2053,7 +2034,7 @@ fn fetch_client_socks5h_sends_target_hostname_to_proxy() {
     let upstream_addr = format!("127.0.0.1:{upstream_port}")
         .parse()
         .expect("upstream socket address");
-    let (proxy_url, request_rx, proxy) = spawn_socks5h_proxy(upstream_addr);
+    let (proxy_url, request_rx, proxy) = spawn_socks5_proxy(upstream_addr);
     let mut config = FetchConfig::default();
     config.set_http_proxy(Some(proxy_url));
     config.set_http_no_proxy(Some(String::new()));
@@ -2065,7 +2046,7 @@ fn fetch_client_socks5h_sends_target_hostname_to_proxy() {
         ))
         .unwrap(),
     )
-    .expect("socks5h proxy should relay the HTTP request");
+    .expect("socks5 must use remote DNS and relay the HTTP request");
     let (requested_host, requested_port) = request_rx
         .recv_timeout(Duration::from_secs(3))
         .expect("SOCKS request should arrive");
@@ -2073,6 +2054,40 @@ fn fetch_client_socks5h_sends_target_hostname_to_proxy() {
 
     assert_eq!(response.body_text(), "through-socks");
     assert_eq!(requested_host, "http-target.invalid");
+    assert_eq!(requested_port, upstream_port);
+    upstream.shutdown();
+}
+
+#[test]
+fn fetch_client_socks4_sends_target_hostname_to_proxy() {
+    let upstream = ScriptedHttpServer::spawn(vec![ScriptedResponse::ok("through-socks4")]);
+    let upstream_url = Url::parse(&upstream.origin()).unwrap();
+    let upstream_port = upstream_url
+        .port()
+        .expect("upstream URL should include a port");
+    let upstream_addr = format!("127.0.0.1:{upstream_port}")
+        .parse()
+        .expect("upstream socket address");
+    let (proxy_url, request_rx, proxy) = spawn_socks4_proxy(upstream_addr);
+    let mut config = FetchConfig::default();
+    config.set_http_proxy(Some(proxy_url));
+    config.set_http_no_proxy(Some(String::new()));
+
+    let response = fetch_with_config_for_test(
+        &config,
+        Request::get(&format!(
+            "http://http-socks4-target.invalid:{upstream_port}/through-socks4"
+        ))
+        .unwrap(),
+    )
+    .expect("socks4 must use remote DNS and relay the HTTP request");
+    let (requested_host, requested_port) = request_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("SOCKS4 request should arrive");
+    proxy.join().expect("fetch SOCKS4 proxy should finish");
+
+    assert_eq!(response.body_text(), "through-socks4");
+    assert_eq!(requested_host, "http-socks4-target.invalid");
     assert_eq!(requested_port, upstream_port);
     upstream.shutdown();
 }

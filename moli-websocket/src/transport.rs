@@ -36,7 +36,7 @@ pub(crate) async fn open_websocket_connection(
     let resolve_entries = host_resolve.normalized_entries();
     let mut native = CurlWebSocketRequest::new(request.url.to_string());
     native.headers = header_map_entries(&request.headers);
-    native.proxy = proxy_route.proxy().map(|proxy| proxy.url().to_owned());
+    native.proxy = proxy_route.proxy().map(|proxy| proxy.curl_url().to_owned());
     native.resolve_entries = resolve_entries.clone();
     // WebSocket opening handshakes use credentials=include, including across
     // origins: https://websockets.spec.whatwg.org/#opening-handshake

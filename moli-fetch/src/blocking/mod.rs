@@ -625,7 +625,7 @@ pub(crate) fn configure_easy<H: Handler>(
             .proxy("")
             .context("failed to disable the HTTP proxy for a direct request")?,
         HttpProxyRoute::Proxy(proxy) => {
-            easy.proxy(proxy.url())
+            easy.proxy(proxy.curl_url())
                 .with_context(|| anyhow!("failed to configure HTTP proxy `{}`", proxy.url()))?;
             configure_proxy_headers(easy, config, request, proxy.scheme().uses_http_headers())?;
         }

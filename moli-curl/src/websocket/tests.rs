@@ -53,21 +53,18 @@ fn address_policy_does_not_treat_an_empty_proxy_as_remote_dns() {
 }
 
 #[test]
-fn address_policy_rejects_a_local_dns_websocket_proxy() {
+fn address_policy_accepts_chromium_socks5_semantics() {
     let runtime = CurlWebSocketRuntime::new().unwrap();
     let connector = runtime
         .connector()
         .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
     let mut request = CurlWebSocketRequest::new("ws://example.test/socket".to_owned());
-    request.proxy = Some("socks5://127.0.0.1:1080".to_owned());
+    request.proxy = Some("socks5://127.0.0.1:1".to_owned());
 
-    let error = connector
+    let connection = connector
         .connect(request)
-        .expect_err("a local-DNS proxy cannot satisfy request-target admission");
-    assert!(
-        format!("{error:#}").contains("supported remote-DNS WebSocket proxy"),
-        "{error:#}"
-    );
+        .expect("socks5 must be normalized to remote-DNS socks5h before curl");
+    drop(connection);
 }
 
 #[test]

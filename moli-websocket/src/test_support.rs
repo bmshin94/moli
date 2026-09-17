@@ -533,7 +533,7 @@ pub async fn spawn_http_connect_proxy_response(
     (format!("http://{addr}"), request_rx, handle)
 }
 
-pub async fn spawn_socks5h_proxy(
+pub async fn spawn_socks5_proxy(
     upstream_addr: std::net::SocketAddr,
 ) -> (
     String,
@@ -584,7 +584,7 @@ pub async fn spawn_socks5h_proxy(
                     .expect("read SOCKS domain");
                 String::from_utf8(domain).expect("SOCKS domain should be UTF-8")
             }
-            atyp => panic!("socks5h must send a domain target, got address type {atyp}"),
+            atyp => panic!("SOCKS5 must send a domain target, got address type {atyp}"),
         };
         let mut port = [0u8; 2];
         client
@@ -603,7 +603,7 @@ pub async fn spawn_socks5h_proxy(
             .expect("write SOCKS success response");
         let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     });
-    (format!("socks5h://{addr}"), request_rx, handle)
+    (format!("socks5://{addr}"), request_rx, handle)
 }
 
 pub async fn spawn_text_echo_websocket_server() -> (String, tokio::task::JoinHandle<()>) {
