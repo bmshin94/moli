@@ -2873,6 +2873,78 @@ async fn screenshot_preserves_table_cell_dimension_hints_and_avatar_columns() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn screenshot_table_row_heights_match_chromium() {
+    run_page_vm_async_test(async move {
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        let mut page = test_page_vm_with_loader_and_document_url(
+            &loader, Vec::new(), Url::parse("https://example.com/table-row-heights.html")?,
+        );
+        page.vm_mut().set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+        let fixture = include_str!("../../../../tests/fixtures/table-row-heights.html");
+        page.vm_mut().eval(&format!("document.open();document.write({});document.close()", serde_json::to_string(fixture)?))?;
+        page.vm_mut().prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        page.vm_mut().eval("if (!cases.length) buildTableRowHeightCases()")?;
+        let expected: serde_json::Value = serde_json::from_str(include_str!("../../../../tests/fixtures/table-row-heights.chromium.json"))?;
+        let mut failures = Vec::new();
+        for phase in 0..3 {
+            page.vm_mut().eval(&format!("setTableRowHeightPhase({phase})"))?;
+            // Both initial layout and a repeated read must agree with the oracle.
+            for read in 0..2 {
+                page.vm_mut().screenshot_layout_snapshot(moli_layout::PaintViewport::new(800, 600, 1.0))?.expect("table layout root");
+                let actual: serde_json::Value = serde_json::from_str(&page.vm_mut().eval("JSON.stringify(collectTableRowHeights())")?)?;
+                let actual = actual.as_array().unwrap();
+                let expected_cases = expected["phases"][phase].as_array().unwrap();
+                assert_eq!(actual.len(), expected_cases.len());
+                for (actual, expected) in actual.iter().zip(expected_cases) {
+                    assert_eq!(actual["name"], expected["name"]);
+                    let name = actual["name"].as_str().unwrap();
+                    let actual_rects = actual["rects"].as_array().unwrap();
+                    let expected_rects = expected["rects"].as_array().unwrap();
+                    assert_eq!(actual_rects.len(), expected_rects.len());
+                    for (index, (actual, expected)) in actual_rects.iter().zip(expected_rects).enumerate() {
+                        if (0..4).any(|axis| (actual[axis].as_f64().unwrap() - expected[axis].as_f64().unwrap()).abs() > 0.05) {
+                            failures.push(format!("phase {phase}, read {read}, {name}, rect {index}: {actual} != {expected}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{} table geometry differences:\n{}", failures.len(), failures.join("\n"));
+        // Check that final percentage-dependent baseline alignment reaches
+        // paint as well as CSSOM, including a subsequent group-height change.
+        page.vm_mut().eval(r#"
+            for (const {name,owner} of cases) owner.style.display = name === 'percent-baseline' ? 'block' : 'none';
+            const paintedCase = cases.find(c => c.name === 'percent-baseline').owner;
+            paintedCase.querySelectorAll('td > div')[0].style.background = 'rgb(255,0,0)';
+            paintedCase.querySelectorAll('td > div')[1].style.background = 'rgb(0,255,0)';
+        "#)?;
+        for height in [120u32, 160] {
+            page.vm_mut().eval(&format!("paintedCase.querySelector('tbody').style.height = '{height}px'"))?;
+            let snapshot = page.vm_mut().screenshot_layout_snapshot(moli_layout::PaintViewport::new(240, 200, 1.0))?.expect("painted table root");
+            let image = moli_paint::raster_snapshot(&snapshot)?;
+            for (x, y, color) in [(5, height / 4, [255, 0, 0, 255]), (105, height / 2 - 10, [0, 255, 0, 255])] {
+                let offset = ((y * image.width + x) * 4) as usize;
+                assert_eq!(&image.rgba[offset..offset + 4], color, "group height {height}, pixel ({x}, {y})");
+            }
+        }
+        page.vm_mut().eval(r#"
+            paintedCase.style.display = 'none';
+            const borderedCase = cases.find(c => c.name === 'empty-groups-collapsed').owner;
+            borderedCase.style.display = 'block';
+            borderedCase.querySelector('thead').style.height = '80px';
+            borderedCase.querySelector('tfoot').style.height = '80px';
+        "#)?;
+        let snapshot = page.vm_mut().screenshot_layout_snapshot(moli_layout::PaintViewport::new(240, 200, 1.0))?.expect("collapsed table root");
+        let image = moli_paint::raster_snapshot(&snapshot)?;
+        for (x, y) in [(100, 1), (100, 187), (1, 100)] {
+            let offset = ((y * image.width + x) * 4) as usize;
+            assert_eq!(&image.rgba[offset..offset + 4], [0, 0, 255, 255], "collapsed border at ({x}, {y})");
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await.expect("table row heights should match Chromium");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn screenshot_recascades_table_part_dimension_hints() {
     run_page_vm_async_test(async move {
         let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;

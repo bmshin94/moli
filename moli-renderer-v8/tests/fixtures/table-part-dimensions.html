@@ -36,7 +36,6 @@
   ];
   const checks = [];
   const mutations = [];
-  const cssHeightReferences = [];
   for (const dimension of dimensions) {
     for (const test of cases) {
       const owner = document.createElement('div');
@@ -64,10 +63,8 @@
     }
   }
 
-  // Table/row heights size real rows; zero preserves the content minimum.
-  // Moli's table formatter currently ignores CSS row-group heights too, so
-  // compare those native groups with authored CSS. The block cases above
-  // independently verify the hint values, including percentages and zero.
+  // Native table, row and row-group hints constrain actual row geometry.
+  // Zero/removal preserves the content minimum (Chromium 147 oracle).
   for (const tag of ['table','thead','tbody','tfoot','tr']) {
     const table = document.createElement('table');
     table.style.width = '200px';
@@ -81,15 +78,6 @@
     document.body.append(table);
     const check = {id:`native-${tag}`, element:row,
       expected:[[200,32],[200,64],[200,8],[200,8]]};
-    if (element === section) {
-      const reference = table.cloneNode(true);
-      const referenceGroup = reference.querySelector(tag);
-      referenceGroup.removeAttribute('height');
-      referenceGroup.style.height = '32px';
-      document.body.append(reference);
-      check.reference = reference.rows[0];
-      cssHeightReferences.push(referenceGroup);
-    }
     checks.push(check);
     mutations.push({element, names:['height']});
   }
@@ -127,18 +115,14 @@
         else if (phase === 3) element.setAttribute(name, '0');
       }
     }
-    for (const element of cssHeightReferences) {
-      element.style.height = ['32px','64px','auto','0px'][phase];
-    }
   }
   function collectTablePartDimensionChecks() {
     return checks.map(check => {
       const rect = check.element && check.element.getBoundingClientRect();
-      const reference = check.reference && check.reference.getBoundingClientRect();
       return {id:check.id,
         actual:check.cells ? check.cells.map(cell => cell.getBoundingClientRect().width)
           : [rect.width,rect.height],
-        expected:reference ? [reference.width,reference.height] : check.expected[dimensionPhase]};
+        expected:check.expected[dimensionPhase]};
     });
   }
 </script>
