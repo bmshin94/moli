@@ -2718,9 +2718,12 @@ dependencies = [
 name = "moli-html2md"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "html5ever",
  "markup5ever_rcdom",
+ "percent-encoding",
  "pulldown-cmark",
+ "roxmltree 0.21.1",
  "serde_json",
 ]
 

@@ -442,10 +442,45 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
 }
 
 fn is_empty_svg_placeholder(src: &str) -> bool {
-    let lower = src.to_ascii_lowercase();
-    lower.starts_with("data:image/svg+xml,%3csvg")
-        && lower.ends_with("%3c/svg%3e")
-        && lower.matches("%3c").count() == 2
+    use base64::Engine as _;
+
+    let Some((media_type, payload)) = src
+        .strip_prefix("data:")
+        .and_then(|uri| uri.split_once(','))
+    else {
+        return false;
+    };
+    let mut parts = media_type.split(';');
+    if !parts
+        .next()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("image/svg+xml"))
+    {
+        return false;
+    }
+    let encoded = parts.any(|part| part.eq_ignore_ascii_case("base64"));
+    let svg = if encoded {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+            return false;
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            return false;
+        };
+        text
+    } else {
+        let Ok(text) = percent_encoding::percent_decode_str(payload).decode_utf8() else {
+            return false;
+        };
+        text.into_owned()
+    };
+    let Ok(document) = roxmltree::Document::parse(&svg) else {
+        return false;
+    };
+    let root = document.root_element();
+    root.tag_name().name() == "svg"
+        && root.children().all(|child| {
+            child.is_comment()
+                || child.is_text() && child.text().is_none_or(|text| text.trim().is_empty())
+        })
 }
 
 fn class_language(class: Option<&str>) -> Option<&str> {

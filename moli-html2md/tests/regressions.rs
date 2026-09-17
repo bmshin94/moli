@@ -231,6 +231,15 @@ fn empty_svg_lazy_image_placeholders_do_not_emit_data_uris() {
     let html = format!("before<img alt='Recipe photo' src=\"{placeholder}\">after");
     assert_eq!(markdown(&html, false), "beforeRecipe photoafter");
 
+    for src in [
+        "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>",
+        "data:image/svg+xml;charset=utf-8,%3Csvg%3E%20%3C!--empty--%3E%20%3C/svg%3E",
+        "data:image/svg+xml;base64,PHN2Zy8+",
+    ] {
+        let html = format!("before<img src=\"{src}\">after");
+        assert_eq!(markdown(&html, false), "beforeafter");
+    }
+
     let html =
         format!("before<img alt='Recipe photo' aria-hidden='true' src=\"{placeholder}\">after");
     assert_eq!(markdown(&html, false), "beforeafter");
@@ -238,6 +247,9 @@ fn empty_svg_lazy_image_placeholders_do_not_emit_data_uris() {
     let real_svg = "data:image/svg+xml,%3Csvg%3E%3Cpath%20d='M0%200'/%3E%3C/svg%3E";
     let html = format!("<img alt='Logo' src=\"{real_svg}\">");
     assert!(markdown(&html, false).contains(real_svg));
+    let text_svg = "data:image/svg+xml,%3Csvg%3E%3Ctext%3ELogo%3C/text%3E%3C/svg%3E";
+    let html = format!("<img alt='Logo' src=\"{text_svg}\">");
+    assert!(markdown(&html, false).contains(text_svg));
 }
 
 #[test]
