@@ -896,7 +896,10 @@ impl RuntimeOwner {
             .buffered_mut()
             .expect("buffered request should use buffered collector")
             .begin_request(self.config.http_max_response_size());
-        let proxy_route = resolve_http_proxy_route(&self.config, &job.current_url);
+        let proxy_route = match resolve_http_proxy_route(&self.config, &job.current_url) {
+            Ok(route) => route,
+            Err(error) => return Err((job.response_tx, error)),
+        };
         if let Err(error) = configure_network_observation(
             &mut easy,
             &job.request,
@@ -1077,7 +1080,10 @@ impl RuntimeOwner {
             cookie_header.clone(),
         ));
 
-        let proxy_route = resolve_http_proxy_route(&self.config, &job.current_url);
+        let proxy_route = match resolve_http_proxy_route(&self.config, &job.current_url) {
+            Ok(route) => route,
+            Err(error) => return Err((Box::new(job), Some(easy), error)),
+        };
         if let Err(error) = configure_network_observation(
             &mut easy,
             &job.request,
@@ -1280,7 +1286,10 @@ impl RuntimeOwner {
             job.current_url.clone(),
             cookie_header.clone(),
         ));
-        let proxy_route = resolve_http_proxy_route(&self.config, &job.current_url);
+        let proxy_route = match resolve_http_proxy_route(&self.config, &job.current_url) {
+            Ok(route) => route,
+            Err(error) => return Err((Box::new(job), Some(easy), error)),
+        };
         if let Err(error) = configure_network_observation(
             &mut easy,
             &job.request,

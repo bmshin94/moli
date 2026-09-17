@@ -99,6 +99,10 @@ mod tests {
         FetchCurlDnsAdmission::SharedResolver(DnsTarget::new(host, port))
     }
 
+    fn proxy_route(raw: &str) -> HttpProxyRoute {
+        HttpProxyRoute::from_proxy_url(raw).expect("test proxy URL should parse")
+    }
+
     #[test]
     fn direct_http_and_https_domains_use_shared_resolution() {
         let config = FetchConfig::default();
@@ -149,7 +153,7 @@ mod tests {
             admission(
                 &config,
                 "https://api.example.test/path",
-                &HttpProxyRoute::Proxy("http://proxy.test:8080".to_owned()),
+                &proxy_route("http://proxy.test:8080"),
             ),
             FetchCurlDnsAdmission::NoSharedResolution
         );
@@ -163,7 +167,7 @@ mod tests {
         let error = admission_result(
             &config,
             "https://api.example.test/path",
-            &HttpProxyRoute::Proxy("http://proxy.test:8080".to_owned()),
+            &proxy_route("http://proxy.test:8080"),
         )
         .expect_err("a strict policy cannot verify proxy-side DNS");
 

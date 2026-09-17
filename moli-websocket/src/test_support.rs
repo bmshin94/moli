@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::{
 };
 
 use crate::{
-    ConnectOptions, Event, FrameOpcode, proxy::websocket_proxy_url_with_env,
+    ConnectOptions, Event, FrameOpcode, proxy::websocket_proxy_route_with_env,
     spawn_standalone_connection,
 };
 
@@ -49,12 +49,13 @@ pub fn test_websocket_proxy_url_with_env(
     context: &ConnectOptions,
     env: &[(&str, &str)],
 ) -> Option<String> {
-    websocket_proxy_url_with_env(url, context, |name| {
+    websocket_proxy_route_with_env(url, context, |name| {
         env.iter()
             .find_map(|(env_name, value)| (*env_name == name).then(|| (*value).to_owned()))
     })
     .expect("websocket proxy url should resolve")
-    .map(|url| url.to_string())
+    .proxy()
+    .map(|proxy| proxy.url().to_owned())
 }
 
 pub async fn websocket_raw_handshake_failure_message(

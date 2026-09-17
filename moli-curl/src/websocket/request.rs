@@ -84,13 +84,20 @@ pub(super) fn configure(request: &CurlWebSocketRequest) -> Result<Easy2<Handshak
     easy.proxy(request.proxy.as_deref().unwrap_or(""))?;
     // The browser has already applied no_proxy; do not evaluate environment policy twice.
     easy.noproxy("")?;
-    easy.http_proxy_tunnel(request.proxy.is_some())?;
+    easy.http_proxy_tunnel(request.proxy.as_deref().is_some_and(proxy_uses_http_tunnel))?;
     easy.separate_proxy_headers(true)?;
     easy.http_headers(headers(&request.headers)?)?;
     easy.proxy_headers(headers(&request.proxy_headers)?)?;
     // Capture HeaderOut through our handler; never print debug or credentials.
     easy.verbose(true)?;
     Ok(easy)
+}
+
+fn proxy_uses_http_tunnel(proxy: &str) -> bool {
+    let Some((scheme, _)) = proxy.split_once("://") else {
+        return true;
+    };
+    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
 }
 
 fn headers(entries: &[(String, String)]) -> Result<List> {

@@ -2,7 +2,7 @@ use crate::{
     ConnectOptions,
     handshake::{HandshakeResponse, parse_handshake_response, validate_handshake_response},
     headers::header_map_entries,
-    proxy::websocket_proxy_url,
+    proxy::websocket_proxy_route,
     request::PreparedWebSocketRequest,
 };
 use moli_curl::{
@@ -28,21 +28,25 @@ pub(crate) async fn open_websocket_connection(
     request: PreparedWebSocketRequest,
     context: &ConnectOptions,
 ) -> Result<OpenedConnection, String> {
-    let proxy = websocket_proxy_url(&request.url, context)?;
+    let proxy_route = websocket_proxy_route(&request.url, context)?;
     let mut native = CurlWebSocketRequest::new(request.url.to_string());
     native.headers = header_map_entries(&request.headers);
-    native.proxy = proxy.map(|url| url.to_string());
+    native.proxy = proxy_route.proxy().map(|proxy| proxy.url().to_owned());
     // WebSocket opening handshakes use credentials=include, including across
     // origins: https://websockets.spec.whatwg.org/#opening-handshake
     native.tls = context.tls.clone();
-    if native.proxy.is_some() {
-        native
-            .proxy_headers
-            .push(("User-Agent".to_owned(), context.user_agent.clone()));
-        if let Some(token) = &context.proxy_bearer_token {
+    if let Some(proxy) = proxy_route.proxy() {
+        if proxy.scheme().uses_http_headers() {
             native
                 .proxy_headers
-                .push(("Proxy-Authorization".to_owned(), format!("Bearer {token}")));
+                .push(("User-Agent".to_owned(), context.user_agent.clone()));
+            if let Some(token) = &context.proxy_bearer_token {
+                native
+                    .proxy_headers
+                    .push(("Proxy-Authorization".to_owned(), format!("Bearer {token}")));
+            }
+        } else if context.proxy_bearer_token.is_some() {
+            return Err("proxy bearer authentication requires an HTTP(S) proxy".to_owned());
         }
     } else {
         let url = &request.url;

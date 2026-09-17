@@ -6,7 +6,7 @@ use crate::{
         MAX_PENDING_WEBSOCKET_HANDSHAKES, MAX_WEBSOCKET_CONNECTIONS_PER_RUNTIME,
         acquire_limited_websocket_slot,
     },
-    proxy::no_proxy_matches,
+    proxy::websocket_proxy_route_with_env,
     request::prepare_websocket_request,
     test_support::*,
 };
@@ -207,32 +207,6 @@ fn websocket_request_preparation_rejects_blocked_ports() {
 }
 
 #[test]
-fn websocket_no_proxy_matches_hosts_domains_ports_and_wildcard() {
-    assert!(no_proxy_matches("example.com", None, Some("example.com")));
-    assert!(no_proxy_matches(
-        "api.example.com",
-        None,
-        Some(".example.com")
-    ));
-    assert!(no_proxy_matches(
-        "api.example.com",
-        Some(8080),
-        Some("example.com:8080")
-    ));
-    assert!(no_proxy_matches("anything.test", None, Some("*")));
-    assert!(!no_proxy_matches(
-        "api.example.com",
-        Some(8081),
-        Some("example.com:8080")
-    ));
-    assert!(!no_proxy_matches(
-        "notexample.com",
-        None,
-        Some("example.com")
-    ));
-}
-
-#[test]
 fn websocket_proxy_url_uses_env_http_proxy_for_ws_when_unset() {
     let context = test_websocket_context();
     let uri = "ws://target.test/socket".parse().unwrap();
@@ -312,6 +286,17 @@ fn websocket_proxy_url_explicit_empty_proxy_disables_env_fallback() {
     );
 
     assert_eq!(proxy, None);
+}
+
+#[test]
+fn websocket_proxy_route_rejects_local_dns_socks_schemes() {
+    let uri = "wss://target.test/socket".parse().unwrap();
+    for scheme in ["socks5", "socks4"] {
+        let mut context = test_websocket_context();
+        context.http_proxy = Some(format!("{scheme}://proxy.test:1080"));
+        let error = websocket_proxy_route_with_env(&uri, &context, |_| None).unwrap_err();
+        assert!(error.contains("remote-DNS proxy scheme"), "{error}");
+    }
 }
 
 #[test]
