@@ -226,6 +226,21 @@ fn images_without_sources_do_not_emit_placeholder_markdown() {
 }
 
 #[test]
+fn empty_svg_lazy_image_placeholders_do_not_emit_data_uris() {
+    let placeholder = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20720%20960'%3E%3C/svg%3E";
+    let html = format!("before<img alt='Recipe photo' src=\"{placeholder}\">after");
+    assert_eq!(markdown(&html, false), "beforeRecipe photoafter");
+
+    let html =
+        format!("before<img alt='Recipe photo' aria-hidden='true' src=\"{placeholder}\">after");
+    assert_eq!(markdown(&html, false), "beforeafter");
+
+    let real_svg = "data:image/svg+xml,%3Csvg%3E%3Cpath%20d='M0%200'/%3E%3C/svg%3E";
+    let html = format!("<img alt='Logo' src=\"{real_svg}\">");
+    assert!(markdown(&html, false).contains(real_svg));
+}
+
+#[test]
 fn list_paragraphs_and_code_blocks_require_blank_lines_between_items() {
     for (html, expected) in [
         ("<ul><li>one</li><li>two</li></ul>", "- one\n- two"),

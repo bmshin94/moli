@@ -234,7 +234,20 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     .attribute(node, "src")
                     .filter(|src| !src.is_empty())
                 {
-                    self.writer().image(alt, src, title);
+                    // Lazy-image placeholders carry no visible image. Keep
+                    // accessible alternate text without emitting a data URI.
+                    if is_empty_svg_placeholder(src) {
+                        if !alt.is_empty()
+                            && !self
+                                .dom
+                                .attribute(node, "aria-hidden")
+                                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+                        {
+                            self.writer().text(alt);
+                        }
+                    } else {
+                        self.writer().image(alt, src, title);
+                    }
                 }
                 return;
             }
@@ -426,6 +439,13 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
         block.push_str(&fence);
         self.writer().block(block.into(), 2, 2);
     }
+}
+
+fn is_empty_svg_placeholder(src: &str) -> bool {
+    let lower = src.to_ascii_lowercase();
+    lower.starts_with("data:image/svg+xml,%3csvg")
+        && lower.ends_with("%3c/svg%3e")
+        && lower.matches("%3c").count() == 2
 }
 
 fn class_language(class: Option<&str>) -> Option<&str> {
