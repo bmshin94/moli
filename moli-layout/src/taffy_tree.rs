@@ -3115,7 +3115,10 @@ impl InlineMeasurement {
 /// this adapter boundary instead. This is the leaf equivalent of Chromium's
 /// `AlignBlockContent` plus `BoxFragmentBuilder::MoveChildrenInDirection`, not
 /// a post-layout paint translation.
-fn single_subject_block_alignment_offset(alignment: Option<AlignContent>, free_space: f32) -> f32 {
+pub(crate) fn single_subject_block_alignment_offset(
+    alignment: Option<AlignContent>,
+    free_space: f32,
+) -> f32 {
     let Some(alignment) = alignment else {
         return 0.0;
     };
