@@ -1900,6 +1900,41 @@ fn fetch_client_rejects_private_network_targets() {
 }
 
 #[test]
+fn fetch_client_checks_the_shared_dns_answer_for_domains() {
+    let mut config = FetchConfig::default();
+    config.set_http_proxy(Some(String::new()));
+    config.set_network_blocking(true, vec![]);
+
+    let error = fetch_with_config_for_test(&config, Request::get("http://localhost/").unwrap())
+        .expect_err("the shared localhost DNS answer must be rejected before curl connects");
+    let error_chain = format!("{error:#}");
+
+    assert!(
+        error_chain.contains("blocked private network address"),
+        "unexpected error: {error_chain}"
+    );
+}
+
+#[test]
+fn fetch_client_rejects_proxy_side_dns_under_address_policy() {
+    let mut config = FetchConfig::default();
+    config.set_http_proxy(Some("http://proxy.test:8080".to_owned()));
+    config.set_network_blocking(true, vec![]);
+
+    let error = fetch_with_config_for_test(
+        &config,
+        Request::get("https://proxy-resolved.example.test/").unwrap(),
+    )
+    .expect_err("a strict client cannot verify proxy-side DNS");
+    let error_chain = format!("{error:#}");
+
+    assert!(
+        error_chain.contains("cannot enforce network address policy for proxied hostname"),
+        "unexpected error: {error_chain}"
+    );
+}
+
+#[test]
 fn fetch_client_rejects_private_network_targets_via_host_resolve_override() {
     let server = ScriptedHttpServer::spawn(vec![ScriptedResponse::ok("should-not-be-reached")]);
     let port = Url::parse(&server.url())

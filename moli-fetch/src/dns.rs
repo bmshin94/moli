@@ -1,27 +1,40 @@
+use anyhow::{Result, bail};
 use moli_curl::CurlDnsResolution;
 use moli_dns_resolver::DnsTarget;
 use url::{Host, Url};
 
-use crate::FetchConfig;
+use crate::{
+    FetchConfig,
+    blocking::{normalized_http_host_resolve_entries, resolve_host_resolve_override_ips},
+};
 
 /// Fetch-side DNS admission decision.
 ///
 /// The shared resolver is used only when Fetch can prove that curl will
-/// connect directly to an HTTP(S) origin. Proxy traffic stays curl-managed:
-/// the proxy, rather than the local process, may be responsible for resolving
-/// the origin hostname. IP literals and explicit host-resolve configuration
-/// already have exact routing and must not be resolved again.
+/// connect directly to an HTTP(S) origin. Proxy traffic stays curl-managed
+/// only when no address policy is active; otherwise a proxy-resolved hostname
+/// cannot be verified locally and is rejected. IP literals and matching
+/// explicit host-resolve entries already have exact routing and are checked
+/// synchronously before this decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FetchCurlDnsAdmission {
     CurlManaged,
     SharedResolver(DnsTarget),
 }
 
-pub(crate) fn curl_dns_resolution(config: &FetchConfig, url: &Url) -> CurlDnsResolution {
-    match curl_dns_admission_with_env(config, url, |name| std::env::var(name).ok()) {
-        FetchCurlDnsAdmission::CurlManaged => CurlDnsResolution::curl_managed(),
+pub(crate) fn curl_dns_resolution(config: &FetchConfig, url: &Url) -> Result<CurlDnsResolution> {
+    match curl_dns_admission_with_env(config, url, |name| std::env::var(name).ok())? {
+        FetchCurlDnsAdmission::CurlManaged => Ok(CurlDnsResolution::curl_managed()),
         FetchCurlDnsAdmission::SharedResolver(target) => {
-            CurlDnsResolution::resolve_origin(target, config.http_host_resolve().to_vec())
+            let policy = config.network_address_policy();
+            Ok(CurlDnsResolution::resolve_origin(
+                target,
+                normalized_http_host_resolve_entries(
+                    config.http_host_resolve(),
+                    policy.is_enforced(),
+                )?,
+            )
+            .with_network_address_policy(policy, url.to_string()))
         }
     }
 }
@@ -30,20 +43,30 @@ fn curl_dns_admission_with_env(
     config: &FetchConfig,
     url: &Url,
     mut env: impl FnMut(&str) -> Option<String>,
-) -> FetchCurlDnsAdmission {
-    if !matches!(url.scheme(), "http" | "https") || !config.http_host_resolve().is_empty() {
-        return FetchCurlDnsAdmission::CurlManaged;
+) -> Result<FetchCurlDnsAdmission> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Ok(FetchCurlDnsAdmission::CurlManaged);
     }
     let Some(Host::Domain(host)) = url.host() else {
-        return FetchCurlDnsAdmission::CurlManaged;
+        return Ok(FetchCurlDnsAdmission::CurlManaged);
     };
     let Some(port) = url.port_or_known_default() else {
-        return FetchCurlDnsAdmission::CurlManaged;
+        return Ok(FetchCurlDnsAdmission::CurlManaged);
     };
     if request_uses_proxy(config, url, host, port, &mut env) {
-        return FetchCurlDnsAdmission::CurlManaged;
+        if config.network_address_policy().is_enforced() {
+            bail!(
+                "cannot enforce network address policy for proxied hostname `{host}` in `{url}`; the proxy must not resolve an unchecked target hostname"
+            );
+        }
+        return Ok(FetchCurlDnsAdmission::CurlManaged);
     }
-    FetchCurlDnsAdmission::SharedResolver(DnsTarget::new(host, port))
+    if resolve_host_resolve_override_ips(config.http_host_resolve(), host, port)?.is_some() {
+        return Ok(FetchCurlDnsAdmission::CurlManaged);
+    }
+    Ok(FetchCurlDnsAdmission::SharedResolver(DnsTarget::new(
+        host, port,
+    )))
 }
 
 fn request_uses_proxy(
@@ -150,6 +173,14 @@ mod tests {
         raw_url: &str,
         env: &[(&str, &str)],
     ) -> FetchCurlDnsAdmission {
+        admission_result(config, raw_url, env).expect("test DNS admission should succeed")
+    }
+
+    fn admission_result(
+        config: &FetchConfig,
+        raw_url: &str,
+        env: &[(&str, &str)],
+    ) -> Result<FetchCurlDnsAdmission> {
         let env = env
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
@@ -180,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn ip_literals_and_host_resolve_configuration_stay_curl_managed() {
+    fn ip_literals_and_matching_host_resolve_entries_stay_curl_managed() {
         let mut config = FetchConfig::default();
 
         assert_eq!(
@@ -195,6 +226,11 @@ mod tests {
         assert_eq!(
             admission(&config, "http://example.test/path", &[]),
             FetchCurlDnsAdmission::CurlManaged
+        );
+        assert_eq!(
+            admission(&config, "http://other.test/path", &[]),
+            shared_target("other.test", 80),
+            "an unrelated host-resolve entry must not return DNS ownership to curl"
         );
     }
 
@@ -212,6 +248,18 @@ mod tests {
             admission(&config, "https://api.example.test/path", &[]),
             shared_target("api.example.test", 443)
         );
+    }
+
+    #[test]
+    fn enforced_policy_rejects_proxy_resolved_hostname() {
+        let mut config = FetchConfig::default();
+        config.set_http_proxy(Some("http://proxy.test:8080".to_owned()));
+        config.set_network_blocking(true, Vec::new());
+
+        let error = admission_result(&config, "https://api.example.test/path", &[])
+            .expect_err("a strict policy cannot verify proxy-side DNS");
+
+        assert!(error.to_string().contains("proxied hostname"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use super::{
     CurlWebSocketConnection, CurlWebSocketRequest, SESSION_CAPACITY, connection::SessionIo,
 };
-use crate::{CurlTransferId, runtime::identity::next_transfer_id};
+use crate::{CurlTransferId, NetworkAddressPolicy, runtime::identity::next_transfer_id};
 use anyhow::{Context, Result, bail};
 use curl::multi::MultiWaker;
 use std::sync::{
@@ -11,6 +11,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::Semaphore;
+use url::{Host, Url};
 
 pub(crate) struct Submission {
     pub(super) id: CurlTransferId,
@@ -23,6 +24,7 @@ pub(crate) struct Submission {
 #[derive(Clone, Debug)]
 pub struct CurlWebSocketConnector {
     inner: Arc<ConnectorInner>,
+    network_address_policy: NetworkAddressPolicy,
 }
 
 #[derive(Debug)]
@@ -58,13 +60,23 @@ impl CurlWebSocketConnector {
                 waker,
                 shutdown,
             }),
+            network_address_policy: NetworkAddressPolicy::default(),
         }
     }
 
-    pub fn connect(&self, request: CurlWebSocketRequest) -> Result<CurlWebSocketConnection> {
+    pub fn with_network_address_policy(
+        mut self,
+        network_address_policy: NetworkAddressPolicy,
+    ) -> Self {
+        self.network_address_policy = network_address_policy;
+        self
+    }
+
+    pub fn connect(&self, mut request: CurlWebSocketRequest) -> Result<CurlWebSocketConnection> {
         if self.inner.shutdown.load(Ordering::Acquire) {
             bail!("curl WebSocket runtime is closed");
         }
+        self.apply_network_address_policy(&mut request)?;
         let slot = self
             .inner
             .slots
@@ -79,5 +91,53 @@ impl CurlWebSocketConnector {
             .map_err(|_| anyhow::anyhow!("curl WebSocket runtime cannot accept a session"))?;
         let _ = self.inner.waker.wakeup();
         Ok(connection)
+    }
+
+    fn apply_network_address_policy(&self, request: &mut CurlWebSocketRequest) -> Result<()> {
+        if !self.network_address_policy.is_enforced() {
+            return Ok(());
+        }
+
+        let url = Url::parse(&request.url)
+            .with_context(|| format!("failed to parse WebSocket URL `{}`", request.url))?;
+        let host = url
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("WebSocket URL `{url}` is missing a host"))?;
+
+        match host {
+            Host::Domain(host) => {
+                if request.proxy.is_some() {
+                    bail!(
+                        "cannot enforce network address policy for proxied WebSocket hostname `{host}` in `{url}`; the proxy must not resolve an unchecked target hostname"
+                    );
+                }
+                let port = url
+                    .port_or_known_default()
+                    .ok_or_else(|| anyhow::anyhow!("WebSocket URL `{url}` has no port"))?;
+                let target = request.dns_resolution.target().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "network address policy requires shared DNS resolution for WebSocket hostname `{host}` in `{url}`"
+                    )
+                })?;
+                if !target.host().eq_ignore_ascii_case(host) || target.port() != port {
+                    bail!(
+                        "WebSocket DNS target `{}:{}` does not match policy target `{host}:{port}`",
+                        target.host(),
+                        target.port()
+                    );
+                }
+                request.dns_resolution.set_network_address_policy(
+                    self.network_address_policy.clone(),
+                    url.to_string(),
+                );
+            }
+            Host::Ipv4(address) => self
+                .network_address_policy
+                .check_address(address.into(), url.as_str())?,
+            Host::Ipv6(address) => self
+                .network_address_policy
+                .check_address(address.into(), url.as_str())?,
+        }
+        Ok(())
     }
 }

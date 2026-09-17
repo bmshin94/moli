@@ -8,6 +8,8 @@ use curl::{
 };
 use moli_dns_resolver::{DnsCachePartition, DnsLookupResult, DnsResolverService, DnsTarget};
 
+use crate::NetworkAddressPolicy;
+
 /// Curl-side policy for DNS ownership before a transfer enters the multi set.
 ///
 /// `origin == None` means curl owns name resolution. `Some` means the transfer
@@ -25,6 +27,8 @@ struct CurlDnsOriginResolution {
     /// Existing caller-provided `CURLOPT_RESOLVE` entries that must remain
     /// installed when the generated origin answer is added.
     static_entries: Vec<String>,
+    address_policy: NetworkAddressPolicy,
+    policy_target: String,
 }
 
 impl CurlDnsResolution {
@@ -33,11 +37,36 @@ impl CurlDnsResolution {
     }
 
     pub fn resolve_origin(target: DnsTarget, static_entries: Vec<String>) -> Self {
+        let policy_target = format!("{}:{}", target.host(), target.port());
         Self {
             origin: Some(Box::new(CurlDnsOriginResolution {
                 target,
                 static_entries,
+                address_policy: NetworkAddressPolicy::default(),
+                policy_target,
             })),
+        }
+    }
+
+    /// Applies address admission to the shared-resolver result before it is
+    /// installed on curl. The target text is retained for actionable errors.
+    pub fn with_network_address_policy(
+        mut self,
+        address_policy: NetworkAddressPolicy,
+        policy_target: impl Into<String>,
+    ) -> Self {
+        self.set_network_address_policy(address_policy, policy_target);
+        self
+    }
+
+    pub(crate) fn set_network_address_policy(
+        &mut self,
+        address_policy: NetworkAddressPolicy,
+        policy_target: impl Into<String>,
+    ) {
+        if let Some(resolution) = self.origin.as_mut() {
+            resolution.address_policy = address_policy;
+            resolution.policy_target = policy_target.into();
         }
     }
 
@@ -54,6 +83,9 @@ impl CurlDnsResolution {
         let Some(resolution) = self.origin.as_ref() else {
             return Ok(());
         };
+        resolution
+            .address_policy
+            .check_addresses(addresses, &resolution.policy_target)?;
         let mut resolve = List::new();
         for entry in &resolution.static_entries {
             resolve
@@ -257,6 +289,34 @@ mod tests {
             .install(&mut easy, &[IpAddr::from([127, 0, 0, 1])])
             .expect("resolved origin should install on curl");
         assert_eq!(policy.target(), None);
+    }
+
+    #[test]
+    fn blocked_address_prevents_installing_the_complete_dns_answer() {
+        let target = DnsTarget::new("example.test", 443);
+        let mut resolution = CurlDnsResolution::resolve_origin(target.clone(), Vec::new())
+            .with_network_address_policy(
+                NetworkAddressPolicy::new(true, Vec::new()),
+                "https://example.test/",
+            );
+        let mut easy = Easy2::new(TestHandler);
+
+        let error = resolution
+            .install(
+                &mut easy,
+                &[
+                    IpAddr::from([93, 184, 216, 34]),
+                    IpAddr::from([127, 0, 0, 1]),
+                ],
+            )
+            .expect_err("one private answer must reject the complete DNS result");
+
+        assert!(error.to_string().contains("127.0.0.1"));
+        assert_eq!(
+            resolution.target(),
+            Some(&target),
+            "a rejected answer must never transition to an installed state"
+        );
     }
 
     #[test]

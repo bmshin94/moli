@@ -31,3 +31,24 @@ async fn websocket_connector_follows_fetch_owner_lifetime() -> Result<()> {
     server.shutdown();
     Ok(())
 }
+
+#[test]
+fn websocket_connector_inherits_private_network_policy() {
+    let mut config = FetchConfig::default();
+    config.set_network_blocking(true, Vec::new());
+    let client = FetchClient::new(&config, new_shared_browser_cookie_store());
+
+    let error = client
+        .handle()
+        .websocket_connector()
+        .connect(CurlWebSocketRequest::new(
+            "ws://127.0.0.1/private".to_owned(),
+        ))
+        .expect_err("a WebSocket IP literal must use the fetch address policy");
+
+    assert!(
+        error
+            .to_string()
+            .contains("blocked private network address `127.0.0.1`")
+    );
+}

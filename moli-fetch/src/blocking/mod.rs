@@ -3,7 +3,7 @@ mod collectors;
 
 use std::{
     ffi::{c_char, c_long},
-    net::{IpAddr, ToSocketAddrs},
+    net::IpAddr,
     str,
     time::Duration,
 };
@@ -17,7 +17,7 @@ use moli_cookie_jar::{
 use moli_url::is_potentially_trustworthy_url;
 use moli_url_policy::ensure_http_network_transport_url;
 use tracing::debug;
-use url::Url;
+use url::{Host, Url};
 
 pub(crate) use self::cache::{
     CachedStreamingResponseLookup, cached_streaming_response_body_exceeds_response_limit,
@@ -645,7 +645,10 @@ pub(crate) fn configure_easy<H: Handler>(
     }
     if !config.http_host_resolve().is_empty() {
         let mut resolve = List::new();
-        for entry in normalized_http_host_resolve_entries(config.http_host_resolve())? {
+        let force_permanent = config.network_address_policy().is_enforced();
+        for entry in
+            normalized_http_host_resolve_entries(config.http_host_resolve(), force_permanent)?
+        {
             resolve
                 .append(&entry)
                 .with_context(|| anyhow!("failed to build curl host resolve entry `{entry}`"))?;
@@ -755,42 +758,31 @@ fn enforce_request_target_policy(config: &FetchConfig, request_url: &Url) -> Res
         return Ok(());
     }
 
-    let Some(host) = request_url.host_str() else {
+    let Some(host) = request_url.host() else {
         return Ok(());
     };
+    let host_text = request_url
+        .host_str()
+        .expect("a parsed URL host must have text");
     let port = request_url
         .port_or_known_default()
         .ok_or_else(|| anyhow!("could not determine port for request url `{request_url}`"))?;
 
-    let resolved_ips = resolve_target_ips(config, host, port)
-        .with_context(|| anyhow!("failed to resolve request host `{host}` for `{request_url}`"))?;
-    for ip in resolved_ips {
-        if config.block_private_networks() && is_private_or_internal_ip(ip) {
-            bail!("blocked private network address `{ip}` for `{request_url}`");
-        }
-        if let Some(cidr) = config.block_cidrs().iter().find(|cidr| cidr.contains(&ip)) {
-            bail!("blocked address `{ip}` for `{request_url}` because it matches `{cidr}`");
-        }
-    }
-
-    Ok(())
-}
-
-fn resolve_target_ips(config: &FetchConfig, host: &str, port: u16) -> Result<Vec<IpAddr>> {
-    if let Some(resolved_ips) =
-        resolve_host_resolve_override_ips(config.http_host_resolve(), host, port)?
+    let policy = config.network_address_policy();
+    if let Some(addresses) =
+        resolve_host_resolve_override_ips(config.http_host_resolve(), host_text, port)?
     {
-        return Ok(resolved_ips);
+        return policy.check_addresses(&addresses, request_url.as_str());
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(vec![ip]);
+    match host {
+        Host::Ipv4(address) => policy.check_address(IpAddr::V4(address), request_url.as_str()),
+        Host::Ipv6(address) => policy.check_address(IpAddr::V6(address), request_url.as_str()),
+        Host::Domain(_) => Ok(()),
     }
-
-    resolve_system_target_ips(host, port)
 }
 
-fn resolve_host_resolve_override_ips(
+pub(crate) fn resolve_host_resolve_override_ips(
     entries: &[String],
     host: &str,
     port: u16,
@@ -827,21 +819,6 @@ fn resolve_host_resolve_override_ips(
 
     Ok(exact_match.or(wildcard_match))
 }
-
-fn resolve_system_target_ips(host: &str, port: u16) -> Result<Vec<IpAddr>> {
-    let mut resolved = Vec::new();
-    for addr in (host, port).to_socket_addrs()? {
-        let ip = addr.ip();
-        if !resolved.contains(&ip) {
-            resolved.push(ip);
-        }
-    }
-    if resolved.is_empty() {
-        bail!("no addresses resolved");
-    }
-    Ok(resolved)
-}
-
 enum HttpHostResolveEntry {
     Add {
         plus_prefix: bool,
@@ -856,7 +833,7 @@ enum HttpHostResolveEntry {
 }
 
 impl HttpHostResolveEntry {
-    fn curl_entry(&self) -> String {
+    fn curl_entry(&self, force_permanent: bool) -> String {
         match self {
             Self::Add {
                 plus_prefix,
@@ -864,7 +841,11 @@ impl HttpHostResolveEntry {
                 port,
                 addresses,
             } => {
-                let prefix = if *plus_prefix { "+" } else { "" };
+                let prefix = if *plus_prefix && !force_permanent {
+                    "+"
+                } else {
+                    ""
+                };
                 let addresses = addresses
                     .iter()
                     .map(format_http_host_resolve_ip)
@@ -882,10 +863,15 @@ impl HttpHostResolveEntry {
     }
 }
 
-fn normalized_http_host_resolve_entries(entries: &[String]) -> Result<Vec<String>> {
+pub(crate) fn normalized_http_host_resolve_entries(
+    entries: &[String],
+    force_permanent: bool,
+) -> Result<Vec<String>> {
     entries
         .iter()
-        .map(|entry| parse_http_host_resolve_entry(entry).map(|entry| entry.curl_entry()))
+        .map(|entry| {
+            parse_http_host_resolve_entry(entry).map(|entry| entry.curl_entry(force_permanent))
+        })
         .collect()
 }
 
@@ -1005,31 +991,6 @@ fn format_http_host_resolve_ip(ip: &IpAddr) -> String {
     match ip {
         IpAddr::V4(ip) => ip.to_string(),
         IpAddr::V6(ip) => format!("[{ip}]"),
-    }
-}
-
-fn is_private_or_internal_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            ipv4.is_private()
-                || ipv4.is_loopback()
-                || ipv4.is_link_local()
-                || ipv4.is_broadcast()
-                || ipv4.is_documentation()
-                || ipv4.is_unspecified()
-                || ipv4.is_multicast()
-                || matches!(ipv4.octets(), [100, second, ..] if (64..=127).contains(&second))
-                || matches!(ipv4.octets(), [198, 18 | 19, ..])
-                || matches!(ipv4.octets(), [240..=255, ..])
-        }
-        IpAddr::V6(ipv6) => {
-            ipv6.is_loopback()
-                || ipv6.is_unspecified()
-                || ipv6.is_multicast()
-                || ipv6.is_unicast_link_local()
-                || ipv6.is_unique_local()
-                || (ipv6.segments()[0] == 0x2001 && ipv6.segments()[1] == 0x0db8)
-        }
     }
 }
 
@@ -1586,10 +1547,13 @@ mod tests {
 
     #[test]
     fn http_host_resolve_entries_are_normalized_before_curl_configuration() {
-        let entries = normalized_http_host_resolve_entries(&[
-            " localhost:80: 1.1.1.1 , [2001:db8::1] ".to_owned(),
-            " - localhost:80 ".to_owned(),
-        ])
+        let entries = normalized_http_host_resolve_entries(
+            &[
+                " localhost:80: 1.1.1.1 , [2001:db8::1] ".to_owned(),
+                " - localhost:80 ".to_owned(),
+            ],
+            false,
+        )
         .unwrap();
 
         assert_eq!(
@@ -1598,6 +1562,20 @@ mod tests {
                 "localhost:80:1.1.1.1,[2001:db8::1]".to_owned(),
                 "-localhost:80".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn address_policy_makes_temporary_host_resolve_entries_permanent() {
+        let entries = vec!["+example.test:443:93.184.216.34".to_owned()];
+
+        assert_eq!(
+            normalized_http_host_resolve_entries(&entries, false).unwrap(),
+            ["+example.test:443:93.184.216.34"]
+        );
+        assert_eq!(
+            normalized_http_host_resolve_entries(&entries, true).unwrap(),
+            ["example.test:443:93.184.216.34"]
         );
     }
 

@@ -9,12 +9,54 @@ use tokio::{sync::oneshot, time::timeout};
 use tokio_tungstenite::tungstenite::{self, Message, handshake::derive_accept_key};
 
 use super::*;
+use crate::NetworkAddressPolicy;
+use moli_dns_resolver::DnsTarget;
 
 mod readiness;
 mod shared;
 mod storage;
 
 const DEADLINE: Duration = Duration::from_secs(10);
+
+#[test]
+fn strict_connector_rejects_proxy_resolved_websocket_hostname() {
+    let runtime = CurlWebSocketRuntime::new().unwrap();
+    let connector = runtime
+        .connector()
+        .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
+    let mut request = CurlWebSocketRequest::new("wss://example.test/socket".to_owned());
+    request.proxy = Some("http://proxy.test:8080".to_owned());
+
+    let error = connector
+        .connect(request)
+        .expect_err("a strict connector cannot verify proxy-side DNS");
+
+    assert!(error.to_string().contains("proxied WebSocket hostname"));
+}
+
+#[tokio::test]
+async fn strict_connector_checks_shared_websocket_dns_before_connecting() {
+    let runtime = CurlWebSocketRuntime::new().unwrap();
+    let connector = runtime
+        .connector()
+        .with_network_address_policy(NetworkAddressPolicy::new(true, Vec::new()));
+    let mut request = CurlWebSocketRequest::new("ws://localhost:65534/socket".to_owned());
+    request.dns_resolution =
+        CurlDnsResolution::resolve_origin(DnsTarget::new("localhost", 65534), Vec::new());
+
+    let mut connection = connector.connect(request).unwrap();
+    let event = timeout(DEADLINE, connection.recv())
+        .await
+        .expect("WebSocket DNS policy deadline")
+        .expect("WebSocket DNS policy event");
+
+    match event {
+        CurlWebSocketEvent::Closed { result: Err(error) } => {
+            assert!(error.contains("blocked private network address"))
+        }
+        unexpected => panic!("expected a DNS policy failure, got {unexpected:?}"),
+    }
+}
 
 fn server(handler: impl FnOnce(TcpStream) + Send + 'static) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
