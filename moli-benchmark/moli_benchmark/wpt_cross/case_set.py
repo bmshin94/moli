@@ -728,10 +728,30 @@ def _script_content_type_handler_reference_patterns(directory: str) -> tuple[re.
     )
 
 
+@lru_cache(maxsize=None)
+def _json_module_handler_reference_patterns(directory: str) -> tuple[re.Pattern[str], ...]:
+    references = []
+    for name in (
+        "json-module/load-error-events.py", "serve-json-then-js.py",
+    ):
+        resource = "html/semantics/scripting-1/the-script-element/" + name
+        relative = posixpath.relpath(resource, directory)
+        references.extend(("/" + resource, relative, "./" + relative))
+    return tuple(
+        re.compile(
+            rf"(?<![A-Za-z0-9_./-]){re.escape(reference)}"
+            rf"{WPTSERVE_HANDLER_TRAILING_BOUNDARY}"
+        )
+        for reference in references
+    )
+
+
 def _supported_wptserve_handler_references(
     rel: str | None,
 ) -> tuple[re.Pattern[str], ...]:
     supported: tuple[re.Pattern[str], ...] = ()
+    if rel is not None:
+        supported += _json_module_handler_reference_patterns(posixpath.dirname(rel) or ".")
     if rel is not None:
         supported += _script_content_type_handler_reference_patterns(posixpath.dirname(rel) or ".")
     if rel is not None and rel.rsplit("/", 1)[0] == "fetch/api/abort":
