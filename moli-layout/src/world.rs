@@ -280,6 +280,7 @@ pub struct LayoutBox<N> {
     /// object. It is frozen with the rest of the layout tree for CSSOM reads.
     pub(crate) resolved_grid_tracks: Option<LayoutResolvedGridTracks>,
     pub(crate) cache: Cache,
+    pub(crate) table_measure_cache: Option<Box<crate::table::TableMeasureCache>>,
     pub(crate) unrounded_layout: Layout,
     pub(crate) final_layout: Layout,
 }
@@ -503,6 +504,13 @@ impl Default for ViewportLayoutState {
 }
 
 impl<N> LayoutBox<N> {
+    pub(crate) fn clear_layout_caches(&mut self) {
+        self.cache.clear();
+        if let Some(cache) = &mut self.table_measure_cache {
+            cache.clear();
+        }
+    }
+
     pub fn kind(&self) -> LayoutBoxKind {
         self.kind
     }
@@ -1133,6 +1141,7 @@ where
             inline_formatting_context: false,
             resolved_grid_tracks: None,
             cache: Cache::new(),
+            table_measure_cache: None,
             unrounded_layout: Layout::with_order(0),
             final_layout: Layout::with_order(0),
         }

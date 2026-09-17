@@ -23,6 +23,16 @@ function add(name, contents, tableStyle='', ownerStyle='', wrapperStyle='') {
   document.body.append(owner);
   cases.push({name, owner});
 }
+function addMarkup(name, markup, ownerStyle='') {
+  const owner = document.createElement('div');
+  owner.className = 'case';
+  owner.style.fontSize = '0';
+  owner.style.lineHeight = '0';
+  owner.style.cssText += ownerStyle;
+  owner.innerHTML = markup;
+  document.body.append(owner);
+  cases.push({name, owner});
+}
 function buildTableRowHeightCases() {
   for (const tag of ['thead','tbody','tfoot']) {
     add(`${tag}-fixed`, `<${tag} height="80">${row(10)}${row(30)}</${tag}>`);
@@ -76,6 +86,18 @@ function buildTableRowHeightCases() {
   add('percent-baseline', '<tbody><tr><td style="height:100px;vertical-align:baseline"><div style="height:50%;width:10px"></div></td><td style="vertical-align:baseline"><div style="height:20px;width:10px"></div></td></tr></tbody>');
   add('cell-padding', '<tbody style="height:100px"><tr><td style="height:40px;padding:10px;box-sizing:content-box"><div style="height:10px"></div></td><td style="padding:5%;vertical-align:bottom"><div style="height:10px"></div></td></tr></tbody>');
   add('rtl', `<tbody style="height:80px">${row(10)}${row(30)}</tbody>`, 'direction:rtl');
+  add('percentage-padding-spacing', '<tbody><tr><td style="padding:10%"><div style="height:10px;width:10px"></div></td></tr></tbody>', 'border-spacing:10px;border:5px solid;box-sizing:border-box');
+  for (const direction of ['row', 'column']) {
+    addMarkup(`caption-inflexible-${direction}`, `<div style="display:table;box-sizing:content-box;border:10px solid;width:80px;height:50px;flex:0 0 ${direction==='row'?80:50}px"><div style="display:table-caption;height:10px;border:10px solid"></div></div>`, `display:flex;flex-direction:${direction};align-items:flex-start`);
+  }
+  addMarkup('caption-no-grow', '<table style="height:90px"><caption style="height:10px"></caption><tbody><tr><td></td></tr></tbody></table>', 'display:flex;flex-direction:column;align-items:flex-start');
+  addMarkup('nested-anonymous-baseline', '<div style="display:table"><div style="display:table-row"><div style="display:table-cell;vertical-align:baseline"><span style="display:inline-block;width:20px;height:20px"></span></div><div style="display:table-row"><span style="display:inline-block;width:20px;height:10px"></span></div></div><div style="display:table-row"><div style="display:table-row-group"><span style="display:inline-block;width:20px;height:10px"></span></div><div style="display:table-cell;vertical-align:baseline"><span style="display:inline-block;width:20px;height:20px"></span></div></div></div>');
+  const twoLines = '<span style="display:inline-block;width:20px;height:10px"></span>'.repeat(2);
+  // Absolute positioning measures the same nested table before final layout;
+  // a size-only cache hit must not replace its first baseline with its bottom.
+  addMarkup('nested-table-baselines', '<div style="position:absolute;width:40px">' + ['table', 'inline-table'].map(display => `<div style="display:table-row"><div style="display:table-cell;width:20px">${twoLines}</div><span style="display:${display};width:20px">${twoLines}</span></div>`).join('') + '</div>', 'position:relative');
+  addMarkup('anonymous-caption-minimum', '<div style="width:120px"><div style="display:table-cell"><span style="display:inline-block;width:20px;height:10px"></span></div><div style="display:table-caption;caption-side:bottom"><span style="display:inline-block;width:100px;height:40px"></span></div></div>');
+  addMarkup('nested-empty-group', '<div style="display:table"><div style="display:table-row"><div style="display:table-row-group;height:16px;width:16px"></div><div style="display:table-cell"><span style="display:inline-block;width:20px;height:20px"></span></div></div><div style="display:table-row"><div style="display:table-cell"><span style="display:inline-block;width:20px;height:20px"></span></div><div style="display:table-cell"><span style="display:inline-block;width:20px;height:20px"></span></div></div></div>');
   for (const {owner} of cases) {
     for (const el of owner.querySelectorAll('table,thead,tbody,tfoot,tr,td,th,caption')) {
       el.dataset.originalHeight = el.style.height;
@@ -85,7 +107,8 @@ function buildTableRowHeightCases() {
 function setTableRowHeightPhase(phase) {
   for (const {owner} of cases) {
     owner.style.height = phase===1 ? '320px' : '240px';
-    owner.querySelector('table').style.width = phase===1 ? '160px' : '200px';
+    const table = owner.querySelector('table');
+    if (table) table.style.width = phase===1 ? '160px' : '200px';
     for (const el of owner.querySelectorAll('thead,tbody,tfoot')) {
       if (phase===1) el.style.height = '96px';
       else if (phase===2) { el.style.height = 'auto'; el.removeAttribute('height'); }

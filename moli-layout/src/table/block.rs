@@ -95,6 +95,12 @@ impl TableContext {
         N: Copy + Debug + Eq + Hash,
     {
         let mode = self.writing_mode;
+        // The Grid backend still places table tracks on physical axes. Keep
+        // the existing vertical-table path until that boundary is converted;
+        // logical block constraints must not become physical row heights.
+        if !mode.is_horizontal() {
+            return inputs;
+        }
         // Inline-only intrinsic probes do not need a second cell measurement.
         if inputs.run_mode == RunMode::ComputeSize
             && inputs.axis == RequestedAxis::from(mode.inline_axis())
@@ -158,16 +164,26 @@ impl TableContext {
             })
             .collect();
         let mut spans = Vec::new();
+        let cell_percentage_basis = self.column_sizes.iter().sum::<f32>()
+            + self.inline_border_spacing * self.column_count.saturating_sub(1) as f32;
+        // The first cell pass uses the table content box, including outer
+        // spacing. The final pass uses the row width. Their padding can
+        // differ without shrinking the row's first-pass minimum.
+        let measurement_percentage_basis = cell_percentage_basis + 2.0 * self.inline_border_spacing;
+        let mut fallback_descents = vec![None::<f32>; rows.len()];
         for index in 0..self.cells.len() {
             let cell = &self.cells[index];
             let authored_style = &world.boxes[cell.id.index()].style.taffy;
             let dimension = mode.to_logical(authored_style.size).block_size;
             let cell_padding = authored_style
                 .padding
-                .resolve_or_zero(space.known_size.inline_size, resolve_stylo_calc_value);
+                .resolve_or_zero(Some(measurement_percentage_basis), resolve_stylo_calc_value);
+            let final_padding = authored_style
+                .padding
+                .resolve_or_zero(Some(cell_percentage_basis), resolve_stylo_calc_value);
             let cell_border = authored_style
                 .border
-                .resolve_or_zero(space.known_size.inline_size, resolve_stylo_calc_value);
+                .resolve_or_zero(Some(cell_percentage_basis), resolve_stylo_calc_value);
             let cell_insets = block_sum(mode, cell_padding) + block_sum(mode, cell_border);
             let css_size = outer_fixed_size(dimension, cell_insets, authored_style.box_sizing);
             let cell_percent = percent(dimension);
@@ -204,8 +220,7 @@ impl TableContext {
                 block_auto_behavior: AutoSizeBehavior::FitContent,
                 vertical_margins_are_collapsible: Line::FALSE,
             };
-            // Percentage padding is relative to the table, not the cell's
-            // Grid area. Freeze that basis across both measurement and layout.
+            // Freeze the measurement basis while determining the row minimum.
             self.cells[index].style.padding = cell_padding.map(style_helpers::length);
             let restricted = !preferred.is_auto() || fixed(dimension).is_some();
             let cell_id = self.cells[index].id;
@@ -218,6 +233,7 @@ impl TableContext {
             let output = wrapper.with_grid_cell_style(index, |world, cell| {
                 world.compute_child_layout(cell.to_taffy(), measure_inputs)
             });
+            self.cells[index].style.padding = final_padding.map(style_helpers::length);
             for (id, style) in restored {
                 world.boxes[id.index()].style.taffy = style;
                 world.cache_clear(id.to_taffy());
@@ -234,6 +250,11 @@ impl TableContext {
             } else {
                 cell_padding.left + cell_border.left
             };
+            fallback_descents[cell.row] = Some(
+                fallback_descents[cell.row]
+                    .unwrap_or(f32::INFINITY)
+                    .min(end_inset),
+            );
             let baseline = (baseline_aligned && !world.boxes[cell.id.index()].children.is_empty())
                 .then(|| baseline.unwrap_or((natural - end_inset).max(0.0)));
             cell.block_layout = Some(CellBlockLayout {
@@ -362,6 +383,37 @@ impl TableContext {
                 .max(0.0),
             );
         }
+        let mut position = padding.top + border.top
+            - if explicit_spacing {
+                self.block_border_spacing
+            } else {
+                0.0
+            };
+        let starts: Vec<_> = tracks
+            .iter()
+            .map(|&size| {
+                let start = position;
+                position += size
+                    + if explicit_spacing {
+                        0.0
+                    } else {
+                        self.block_border_spacing
+                    };
+                start
+            })
+            .collect();
+        let baseline = |index: usize| {
+            starts[self.rows[index].grid_index]
+                + rows[index].ascent.unwrap_or_else(|| {
+                    fallback_descents[index]
+                        .map_or(0.0, |descent| (rows[index].size - descent).max(0.0))
+                })
+        };
+        self.measured_baselines = if rows.is_empty() {
+            (None, None)
+        } else {
+            (Some(baseline(0)), Some(baseline(rows.len() - 1)))
+        };
         self.style.grid_template_rows = tracks
             .into_iter()
             .map(|size| {
@@ -449,7 +501,16 @@ where
             .taffy
             .padding
             .resolve_or_zero(inputs.parent_size.width, resolve_stylo_calc_value);
-        output.first_baselines.y = Some(if inputs.run_mode == RunMode::PerformLayout {
+        output.first_baselines.y = Some(if !layout.definite {
+            let border = world.boxes[cell.index()]
+                .style
+                .taffy
+                .border
+                .resolve_or_zero(inputs.parent_size.width, resolve_stylo_calc_value);
+            // The natural border box includes empty block children whose
+            // overflow content size can be zero (for example an empty group).
+            (output.size.height - padding.bottom - border.bottom).max(0.0)
+        } else if inputs.run_mode == RunMode::PerformLayout {
             (output.content_size.height - padding.bottom).max(0.0)
         } else {
             layout.baseline.unwrap_or(0.0)

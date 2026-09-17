@@ -109,7 +109,7 @@ impl PreparedWorldLayout {
             }
             self.feedback_invalidation_marks[id.index()] = true;
             invalidated.push(id);
-            world.boxes[id.index()].cache.clear();
+            world.boxes[id.index()].clear_layout_caches();
             if let Some(parent) = world.boxes[id.index()].layout_parent {
                 self.feedback_invalidation_worklist.push(parent);
             }
@@ -135,7 +135,7 @@ where
     N: Copy + Debug + Eq + Hash,
 {
     for layout_box in &mut world.boxes {
-        layout_box.cache.clear();
+        layout_box.clear_layout_caches();
         layout_box.unrounded_layout = Layout::with_order(0);
         layout_box.final_layout = Layout::with_order(0);
         layout_box.layout_parent = None;
@@ -1662,6 +1662,28 @@ where
         if self.should_hide(node_id, inputs) {
             return compute_hidden_layout(self, node_id);
         }
+        let style = &self.boxes[LayoutBoxId::from_taffy(node_id).index()].style;
+        if inputs.run_mode == RunMode::ComputeSize
+            && style.taffy.item_is_table
+            && inputs.axis != taffy::RequestedAxis::from(style.writing_mode().inline_axis())
+        {
+            // The compact intrinsic-size cache drops baselines. Table
+            // measurement needs the complete result, without final fragments.
+            let id = LayoutBoxId::from_taffy(node_id);
+            if let Some(output) = self.boxes[id.index()]
+                .table_measure_cache
+                .as_mut()
+                .and_then(|cache| cache.get(inputs))
+            {
+                return output;
+            }
+            let output = self.compute_child_layout_uncached(node_id, inputs, None);
+            self.boxes[id.index()]
+                .table_measure_cache
+                .get_or_insert_with(Default::default)
+                .store(inputs, output);
+            return output;
+        }
         compute_cached_layout(self, node_id, inputs, |world, node_id, inputs| {
             world.compute_child_layout_uncached(node_id, inputs, None)
         })
@@ -1701,9 +1723,7 @@ where
         if self.is_viewport_taffy_node(node_id) {
             self.viewport_layout.cache.clear();
         } else {
-            self.boxes[LayoutBoxId::from_taffy(node_id).index()]
-                .cache
-                .clear();
+            self.boxes[LayoutBoxId::from_taffy(node_id).index()].clear_layout_caches();
         }
     }
 }
