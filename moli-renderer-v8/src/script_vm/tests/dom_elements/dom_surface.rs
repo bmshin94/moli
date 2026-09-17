@@ -332,6 +332,13 @@ fn wheel_default_action_scrolls_and_refreshes_geometry_unless_canceled() {
 #[test]
 fn window_scroll_refreshes_intersection_observer_geometry() {
     let mut vm = new_storage_test_vm("https://scroll-intersection-observer.test/");
+    vm.set_viewport_surface(Some(crate::protocol_types::ViewportSurface {
+        inner_width: 800,
+        inner_height: 600,
+        device_pixel_ratio: 1.0,
+        ..Default::default()
+    }))
+    .expect("intersection observer viewport should match the layout fixture");
     vm.eval(
         r#"
         (() => {

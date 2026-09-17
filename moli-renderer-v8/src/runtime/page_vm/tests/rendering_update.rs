@@ -116,7 +116,7 @@ getComputedStyle(document.getElementById('fallback')).display
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn geometry_batch_reuses_latest_tree_until_fresh_paint_replaces_it() {
+async fn geometry_batch_reuses_latest_tree_at_same_viewport_until_fresh_paint_replaces_it() {
     run_page_vm_async_test(async move {
         let loader =
             crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
@@ -169,10 +169,11 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
                 source: transformed,
             },
         ]);
+        let viewport = moli_layout::LayoutViewport::new(320, 200, 1.0);
         let first = moli_layout::GeometryProvider::answer(
             page_vm.vm_mut(),
             moli_layout::LayoutFlushReason::SynchronousGeometry,
-            moli_layout::LayoutViewport::new(320, 200, 1.0),
+            viewport,
             &batch,
         )?;
         let after_first = page_vm.vm().layout_pass_observability_for_test();
@@ -228,11 +229,10 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
         page_vm
             .vm_mut()
             .eval("document.getElementById('target').style.width='180px'; 'mutated'")?;
-        let second_viewport = moli_layout::LayoutViewport::new(480, 300, 2.0);
         let second = moli_layout::GeometryProvider::answer(
             page_vm.vm_mut(),
             moli_layout::LayoutFlushReason::SynchronousGeometry,
-            second_viewport,
+            viewport,
             &batch,
         )?;
         let after_second = page_vm.vm().layout_pass_observability_for_test();
@@ -257,12 +257,12 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
         assert!(matches!(
             second.answers[0],
             moli_layout::LayoutQueryAnswer::DocumentMetrics(metrics)
-                if metrics.viewport == second_viewport
+                if metrics.viewport == viewport
         ));
 
         let snapshot = page_vm
             .vm_mut()
-            .screenshot_layout_snapshot(moli_layout::LayoutViewport::new(320, 200, 1.0))?
+            .screenshot_layout_snapshot(viewport)?
             .expect("current document screenshot layout");
         let after_screenshot = page_vm.vm().layout_pass_observability_for_test();
         let cache_after_screenshot = page_vm
@@ -296,7 +296,7 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
         let third = moli_layout::GeometryProvider::answer(
             page_vm.vm_mut(),
             moli_layout::LayoutFlushReason::SynchronousGeometry,
-            moli_layout::LayoutViewport::new(320, 200, 1.0),
+            viewport,
             &batch,
         )?;
         let after_third = page_vm.vm().layout_pass_observability_for_test();
@@ -2933,6 +2933,12 @@ async fn screenshot_applies_legacy_table_width_spacing_and_colors() {
             Vec::new(),
             Url::parse("https://example.com/table-presentation-style.html")?,
         );
+        page_vm.set_viewport_surface(Some(crate::protocol_types::ViewportSurface {
+            inner_width: 200,
+            inner_height: 100,
+            device_pixel_ratio: 1.0,
+            ..Default::default()
+        }))?;
         page_vm.vm_mut().eval(
             r##"
 document.head.innerHTML = `<style>

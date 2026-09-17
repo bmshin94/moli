@@ -2422,7 +2422,7 @@ fn parser_coalesced_text_notifies_main_and_child_mutation_observers() {
     );
 }
 #[test]
-fn point_queries_use_current_viewport_bounds_with_reused_geometry() {
+fn point_queries_refresh_geometry_only_when_viewport_changes() {
     use moli_layout::{
         GeometryProvider, LayoutFlushReason, LayoutPoint, LayoutQuery, LayoutQueryAnswer,
         LayoutQueryBatch, LayoutViewport,
@@ -2457,7 +2457,13 @@ fn point_queries_use_current_viewport_bounds_with_reused_geometry() {
             point: LayoutPoint::new(150.0, 20.0),
         },
     ]);
-    for (width, expect_hit) in [(320, true), (100, false), (320, true)] {
+    for (width, expect_hit, expected_passes) in [
+        (320, true, 1),
+        (320, true, 1),
+        (100, false, 2),
+        (100, false, 2),
+        (320, true, 3),
+    ] {
         let answers = GeometryProvider::answer(
             &mut *vm,
             LayoutFlushReason::HitTest,
@@ -2485,9 +2491,117 @@ fn point_queries_use_current_viewport_bounds_with_reused_geometry() {
         assert_eq!(position.is_some(), expect_hit);
         assert_eq!(
             vm.layout_pass_observability_for_test().1,
-            before + 1,
-            "cold queries still prepare layout; later viewport checks reuse it"
+            before + expected_passes,
+            "viewport changes refresh geometry; same-viewport queries reuse it"
         );
+    }
+}
+
+#[test]
+fn point_queries_refresh_geometry_when_viewport_expands() {
+    use moli_layout::{
+        GeometryProvider, LayoutFlushReason, LayoutPoint, LayoutQuery, LayoutQueryAnswer,
+        LayoutQueryBatch, LayoutViewport,
+    };
+
+    for (initial_size, expanded_size, point) in [
+        ((100, 200), (320, 200), LayoutPoint::new(150.0, 20.0)),
+        ((320, 100), (320, 200), LayoutPoint::new(20.0, 150.0)),
+        ((320, 100), (100, 200), LayoutPoint::new(20.0, 150.0)),
+    ] {
+        let mut vm = new_parsed_test_vm(
+            "https://point-query-viewport-expansion.test/",
+            "<html><body style='margin:0'><div style='width:300px;height:300px'></div></body></html>",
+        );
+        let before = vm.layout_pass_observability_for_test().1;
+        let batch = LayoutQueryBatch::new(vec![
+            LayoutQuery::HitTest {
+                point,
+                ignore_pointer_events_none: false,
+            },
+            LayoutQuery::HitTestAll {
+                point,
+                ignore_pointer_events_none: false,
+            },
+            LayoutQuery::CaretPosition { point },
+        ]);
+        for ((width, height), expect_hit, expected_passes) in [
+            (initial_size, false, 1),
+            (expanded_size, true, 2),
+            (expanded_size, true, 2),
+        ] {
+            let answers = GeometryProvider::answer(
+                &mut *vm,
+                LayoutFlushReason::HitTest,
+                LayoutViewport::new(width, height, 1.0),
+                &batch,
+            )
+            .expect("point query batch after viewport expansion");
+            assert_eq!(
+                matches!(answers.answers[0], LayoutQueryAnswer::HitTest(Some(_))),
+                expect_hit,
+                "point {point:?} in {width}x{height} after {initial_size:?}"
+            );
+            let LayoutQueryAnswer::HitTestAll(hits) = &answers.answers[1] else {
+                panic!("expected hit list")
+            };
+            assert_eq!(!hits.is_empty(), expect_hit);
+            let LayoutQueryAnswer::CaretPosition(position) = &answers.answers[2] else {
+                panic!("expected caret position")
+            };
+            assert_eq!(position.is_some(), expect_hit);
+            assert_eq!(
+                vm.layout_pass_observability_for_test().1,
+                before + expected_passes,
+                "expansion must rebuild once; repeated queries reuse the expanded tree"
+            );
+        }
+    }
+}
+
+#[test]
+fn document_point_queries_refresh_responsive_geometry_after_viewport_resize() {
+    let mut vm = new_parsed_test_vm(
+        "https://document-point-query-viewport-expansion.test/",
+        "<html><body style='margin:0'><div id='target' style='width:50vw;height:100px'></div></body></html>",
+    );
+    let before = vm.layout_pass_observability_for_test().1;
+    let mut completed_passes = before;
+    for (width, expected, expected_passes) in [
+        (100, "[false,false,50]", 1),
+        (320, "[true,true,160]", 2),
+        (100, "[false,false,50]", 3),
+        (320, "[true,true,160]", 4),
+        (320, "[true,true,160]", 4),
+    ] {
+        vm.set_viewport_surface(Some(crate::protocol_types::ViewportSurface {
+            inner_width: width,
+            inner_height: 200,
+            device_pixel_ratio: 1.0,
+            ..Default::default()
+        }))
+        .expect("point query viewport should update");
+        assert_eq!(
+            vm.layout_pass_observability_for_test().1,
+            completed_passes,
+            "changing the viewport alone must not trigger layout"
+        );
+        let result = vm
+            .eval(
+                r#"JSON.stringify([
+                    document.elementFromPoint(75, 20)?.id === 'target',
+                    document.elementsFromPoint(75, 20).some(element => element.id === 'target'),
+                    document.getElementById('target').getBoundingClientRect().width
+                ])"#,
+            )
+            .expect("document point queries after viewport resize");
+        assert_eq!(result, expected, "viewport width {width}");
+        assert_eq!(
+            vm.layout_pass_observability_for_test().1,
+            before + expected_passes,
+            "both expanding and shrinking refresh the viewport-dependent geometry"
+        );
+        completed_passes = before + expected_passes;
     }
 }
 
@@ -8390,6 +8504,13 @@ fn inner_text_new_sources_wait_for_a_fresh_paint_layout() {
         "https://inner-text-latest-layout.test/",
         "<!doctype html><html><body><div id=target><span>a</span></div></body></html>",
     );
+    vm.set_viewport_surface(Some(crate::protocol_types::ViewportSurface {
+        inner_width: 320,
+        inner_height: 200,
+        device_pixel_ratio: 1.0,
+        ..Default::default()
+    }))
+    .expect("innerText viewport should match the paint layout");
     let passes_before = vm.layout_pass_observability_for_test().1;
     let cache_before = vm.layout_snapshot_cache_observability_for_test();
 

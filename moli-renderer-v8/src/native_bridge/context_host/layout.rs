@@ -327,16 +327,23 @@ impl JsContextHost {
         queries: &LayoutQueryBatch<DomHandle>,
     ) -> Result<LayoutAnswers<DomHandle>, LayoutError> {
         let viewport = self.layout_viewport_for_document(document);
-        self.answer_layout(document, reason, viewport, queries, false)
+        self.answer_layout_at_viewport(document, reason, viewport, queries)
     }
 
-    pub(crate) fn can_answer_layout_from_snapshot(&self, document: DomHandle) -> bool {
+    pub(crate) fn can_answer_layout_from_snapshot(
+        &self,
+        document: DomHandle,
+        reason: LayoutFlushReason,
+        viewport: LayoutViewport,
+    ) -> bool {
         #[cfg(test)]
         if self.force_fresh_layout_reads_for_test {
             return false;
         }
-        self.with_latest_layout_tree_for_document(document, |_| ())
-            .is_some()
+        self.with_latest_layout_tree_for_document(document, |tree| {
+            layout_tree_satisfies_request(tree, reason, viewport)
+        })
+        .unwrap_or(false)
     }
 
     /// Inspects the member tree for one exact Document in the single latest
@@ -362,16 +369,6 @@ impl JsContextHost {
             .map(inspect)
     }
 
-    pub(crate) fn answer_layout_at_viewport(
-        &self,
-        document: DomHandle,
-        reason: LayoutFlushReason,
-        viewport: LayoutViewport,
-        queries: &LayoutQueryBatch<DomHandle>,
-    ) -> Result<LayoutAnswers<DomHandle>, LayoutError> {
-        self.answer_layout(document, reason, viewport, queries, true)
-    }
-
     /// Ensures one exact-viewport tree exists without manufacturing a geometry
     /// query. Hit-test demands additionally require the complete embedded-frame
     /// projection owned by that same frozen tree.
@@ -381,17 +378,7 @@ impl JsContextHost {
         reason: LayoutFlushReason,
         viewport: LayoutViewport,
     ) -> Result<(), LayoutError> {
-        #[cfg(test)]
-        let reuse_latest = !self.force_fresh_layout_reads_for_test;
-        #[cfg(not(test))]
-        let reuse_latest = true;
-        let cached = reuse_latest
-            && self
-                .with_latest_layout_tree_for_document(document, |tree| {
-                    layout_tree_satisfies_request(tree, reason, viewport, true)
-                })
-                .unwrap_or(false);
-        if cached {
+        if self.can_answer_layout_from_snapshot(document, reason, viewport) {
             self.layout_snapshot_cache_hits
                 .set(self.layout_snapshot_cache_hits.get().saturating_add(1));
             return Ok(());
@@ -407,13 +394,12 @@ impl JsContextHost {
         .ok_or(LayoutError::NoLayoutRoot)
     }
 
-    fn answer_layout(
+    pub(crate) fn answer_layout_at_viewport(
         &self,
         document: DomHandle,
         reason: LayoutFlushReason,
         viewport: LayoutViewport,
         queries: &LayoutQueryBatch<DomHandle>,
-        exact_viewport: bool,
     ) -> Result<LayoutAnswers<DomHandle>, LayoutError> {
         #[cfg(test)]
         let reuse_latest = !self.force_fresh_layout_reads_for_test;
@@ -421,7 +407,7 @@ impl JsContextHost {
         let reuse_latest = true;
         let cached = if reuse_latest {
             self.with_latest_layout_tree_for_document(document, |tree| {
-                if !layout_tree_satisfies_request(tree, reason, viewport, exact_viewport) {
+                if !layout_tree_satisfies_request(tree, reason, viewport) {
                     return None;
                 }
                 self.last_layout_pass_metrics
@@ -460,10 +446,8 @@ impl JsContextHost {
             .iter()
             .map(|query| match query {
                 LayoutQuery::DocumentMetrics => {
-                    // The content extent and scroll position are sampled
-                    // geometry, but the viewport is explicit browser state.
-                    // Window/viewport protocol commands must observe a resize
-                    // immediately without forcing a new layout pass.
+                    // The viewport comes from the current request; cached
+                    // geometry is reusable only for that same viewport.
                     LayoutQueryAnswer::DocumentMetrics(moli_layout::LayoutDocumentMetrics {
                         viewport,
                         viewport_scroll: tree.viewport_scroll,
@@ -477,8 +461,7 @@ impl JsContextHost {
                     ),
                 ),
                 // Layout preparation still runs, but an out-of-viewport point
-                // needs no fragment walk. Use the current request's viewport
-                // even when ordinary reads reuse an older, larger tree.
+                // needs no fragment walk.
                 LayoutQuery::HitTest { point, .. } if !viewport.contains(*point) => {
                     LayoutQueryAnswer::HitTest(None)
                 }
@@ -630,9 +613,10 @@ fn layout_tree_satisfies_request(
     tree: &FrozenLayoutTree<DomHandle>,
     reason: LayoutFlushReason,
     viewport: LayoutViewport,
-    exact_viewport: bool,
 ) -> bool {
-    (!exact_viewport || tree.viewport == viewport)
+    // A changed viewport can change reflow, viewport units, and clipping in
+    // either direction. Rebuild on the next geometry demand, not on resize.
+    tree.viewport == viewport
         && (!matches!(reason, LayoutFlushReason::HitTest) || tree.embedded_frames_complete())
 }
 
@@ -646,7 +630,7 @@ impl GeometryProvider for JsContextHost {
         queries: &LayoutQueryBatch<Self::NodeId>,
     ) -> Result<LayoutAnswers<Self::NodeId>, LayoutError> {
         let document = self.document_handle();
-        self.answer_layout(document, reason, viewport, queries, false)
+        self.answer_layout_at_viewport(document, reason, viewport, queries)
     }
 }
 
