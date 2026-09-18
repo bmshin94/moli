@@ -2606,7 +2606,7 @@ fn document_point_queries_refresh_responsive_geometry_after_viewport_resize() {
 }
 
 #[test]
-fn geometry_queries_refresh_after_screen_only_environment_changes() {
+fn geometry_queries_refresh_after_screen_and_resolution_environment_changes() {
     // Exercise each entry point without first warming the other layout mode.
     for hit_test in [false, true] {
         let mut vm = new_parsed_test_vm(
@@ -2614,7 +2614,7 @@ fn geometry_queries_refresh_after_screen_only_environment_changes() {
             r#"<html><head><style>
                 body { margin: 0 }
                 #target { width: 100px; height: 100px }
-                @media (device-width: 1280px), (device-height: 720px) {
+                @media (device-width: 1280px), (device-height: 720px), (resolution: 2dppx) {
                     #target { width: 200px }
                 }
             </style></head><body><div id=target></div></body></html>"#,
@@ -2626,17 +2626,21 @@ fn geometry_queries_refresh_after_screen_only_environment_changes() {
             ..Default::default()
         };
         let before = vm.layout_pass_observability_for_test().1;
-        for (screen_width, screen_height, expected_width, expected_passes) in [
-            (1920, 1080, 100, 1),
-            (1280, 1080, 200, 2),
-            (1280, 1080, 200, 2),
-            (1920, 1080, 100, 3),
-            (1920, 720, 200, 4),
-            (1920, 720, 200, 4),
-            (1920, 1080, 100, 5),
+        for (screen_width, screen_height, dpr, expected_width, expected_passes) in [
+            (1920, 1080, 1.0, 100, 1),
+            (1280, 1080, 1.0, 200, 2),
+            (1280, 1080, 1.0, 200, 2),
+            (1920, 1080, 1.0, 100, 3),
+            (1920, 720, 1.0, 200, 4),
+            (1920, 720, 1.0, 200, 4),
+            (1920, 1080, 1.0, 100, 5),
+            (1920, 1080, 2.0, 200, 6),
+            (1920, 1080, 2.0, 200, 6),
+            (1920, 1080, 1.0, 100, 7),
         ] {
             surface.screen_width = screen_width;
             surface.screen_height = screen_height;
+            surface.device_pixel_ratio = dpr;
             // Moving the window changes the surface but not the style environment.
             surface.window_x += 1;
             let passes = vm.layout_pass_observability_for_test().1;
@@ -2666,11 +2670,14 @@ fn geometry_queries_refresh_after_screen_only_environment_changes() {
             } else {
                 expected_width.to_string()
             };
-            assert_eq!(result, expected, "screen {screen_width}x{screen_height}");
+            assert_eq!(
+                result, expected,
+                "screen {screen_width}x{screen_height}, DPR {dpr}"
+            );
             assert_eq!(
                 vm.layout_pass_observability_for_test().1,
                 before + expected_passes,
-                "screen media changes refresh once; unchanged style inputs reuse the tree"
+                "screen/resolution changes refresh once; unchanged style inputs reuse the tree"
             );
         }
     }
@@ -2689,13 +2696,19 @@ fn geometry_queries_refresh_after_media_environment_changes() {
             color_scheme: Some("dark".to_owned()),
             ..Default::default()
         },
+        EmulatedMediaOverrides {
+            reduced_motion: Some("reduce".to_owned()),
+            ..Default::default()
+        },
     ] {
         let mut vm = new_parsed_test_vm(
             "https://geometry-media-environment.test/",
             r#"<html><head><style>
                 body { margin: 0 }
                 #target { width: 100px; height: 100px }
-                @media print, (prefers-color-scheme: dark) { #target { width: 200px } }
+                @media print, (prefers-color-scheme: dark), (prefers-reduced-motion: reduce) {
+                    #target { width: 200px }
+                }
             </style></head><body><div id=target></div></body></html>"#,
         );
         let defaults = EmulatedMediaOverrides::default();
