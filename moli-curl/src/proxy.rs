@@ -309,8 +309,8 @@ pub fn select_proxy_route_with_env(
         Some(no_proxy) => Some(no_proxy.to_owned()),
         None => env_no_proxy(&mut env),
     };
-    if let (Some(host), Some(port)) = (target.host_str(), target.port_or_known_default())
-        && no_proxy_matches(host, port, no_proxy.as_deref())
+    if let Some(host) = target.host_str()
+        && no_proxy_matches(host, no_proxy.as_deref())
     {
         return Ok(ProxyRoute::Direct);
     }
@@ -348,10 +348,19 @@ fn env_no_proxy(env: &mut impl FnMut(&str) -> Option<String>) -> Option<String> 
         .or_else(|| env("NO_PROXY").filter(|value| !value.is_empty()))
 }
 
-fn no_proxy_matches(host: &str, port: u16, no_proxy: Option<&str>) -> bool {
+fn no_proxy_matches(host: &str, no_proxy: Option<&str>) -> bool {
     let Some(no_proxy) = no_proxy else {
         return false;
     };
+    if host.is_empty() {
+        return false;
+    }
+    // libcurl's Curl_check_noproxy() only receives a hostname: a port suffix
+    // is not a request-port constraint. Its wildcard applies only when the
+    // entire setting is "*", not when "*" occurs inside a comma-separated list.
+    if no_proxy == "*" {
+        return true;
+    }
     let host = host
         .trim_matches(['[', ']'])
         .trim_end_matches('.')
@@ -362,50 +371,25 @@ fn no_proxy_matches(host: &str, port: u16, no_proxy: Option<&str>) -> bool {
         if token.is_empty() {
             return false;
         }
-        if token == "*" {
-            return true;
+        if let Some(host_ip) = host_ip {
+            // IPv6 entries in NO_PROXY are bare addresses, without brackets.
+            return token.parse::<IpAddr>().is_ok_and(|ip| ip == host_ip)
+                || token
+                    .parse::<AnyIpCidr>()
+                    .is_ok_and(|cidr| cidr.contains(&host_ip));
         }
-        let (token_host, token_port) = split_no_proxy_host_port(token);
-        if let Some(token_port) = token_port
-            && token_port != port
-        {
-            return false;
-        }
-        let token_host = token_host
-            .trim_matches(['[', ']'])
+        let token_host = token
             .trim_start_matches('.')
             .trim_end_matches('.')
             .to_ascii_lowercase();
         if token_host.is_empty() {
             return false;
         }
-        if let Some(host_ip) = host_ip {
-            return token_host.parse::<IpAddr>().is_ok_and(|ip| ip == host_ip)
-                || token_host
-                    .parse::<AnyIpCidr>()
-                    .is_ok_and(|cidr| cidr.contains(&host_ip));
-        }
         host == token_host
             || host
                 .strip_suffix(&token_host)
                 .is_some_and(|prefix| prefix.ends_with('.'))
     })
-}
-
-fn split_no_proxy_host_port(token: &str) -> (&str, Option<u16>) {
-    if let Some(bracketed) = token.strip_prefix('[')
-        && let Some((host, port)) = bracketed.rsplit_once("]:")
-        && let Ok(port) = port.parse::<u16>()
-    {
-        return (host, Some(port));
-    }
-    let Some((host, port)) = token.rsplit_once(':') else {
-        return (token, None);
-    };
-    match port.parse::<u16>() {
-        Ok(port) if !host.contains(':') => (host, Some(port)),
-        _ => (token, None),
-    }
 }
 
 #[cfg(test)]
@@ -515,31 +499,100 @@ mod tests {
     }
 
     #[test]
-    fn no_proxy_handles_domains_ports_ip_cidrs_and_trailing_dots() {
-        assert!(no_proxy_matches(
-            "api.example.test",
-            8443,
-            Some("example.test:8443")
-        ));
+    fn no_proxy_handles_domains_ip_cidrs_and_trailing_dots() {
+        assert!(no_proxy_matches("api.example.test", Some("example.test")));
         assert!(!no_proxy_matches(
             "api.example.test",
-            443,
             Some("example.test:8443")
         ));
-        assert!(!no_proxy_matches(
-            "notexample.test",
-            443,
-            Some("example.test")
-        ));
-        assert!(no_proxy_matches("anything.test", 443, Some("*")));
-        assert!(no_proxy_matches(
-            "api.example.test.",
-            443,
-            Some("example.test.")
-        ));
-        assert!(no_proxy_matches("192.0.2.42", 80, Some("192.0.2.0/24")));
-        assert!(!no_proxy_matches("198.51.100.42", 80, Some("192.0.2.0/24")));
-        assert!(no_proxy_matches("[::1]", 8443, Some("[::1]:8443")));
+        assert!(!no_proxy_matches("notexample.test", Some("example.test")));
+        assert!(no_proxy_matches("anything.test", Some("*")));
+        assert!(no_proxy_matches("api.example.test.", Some("example.test.")));
+        assert!(no_proxy_matches("192.0.2.42", Some("192.0.2.0/24")));
+        assert!(!no_proxy_matches("198.51.100.42", Some("192.0.2.0/24")));
+        assert!(no_proxy_matches("[::1]", Some("::1")));
+        assert!(!no_proxy_matches("[::1]", Some("[::1]")));
+        assert!(!no_proxy_matches("[::1]", Some("[::1]:8443")));
+    }
+
+    #[test]
+    fn no_proxy_routes_match_libcurl_for_ports_and_wildcards() {
+        use std::{net::TcpListener, time::Duration};
+
+        use curl::easy::{Easy, List};
+
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        origin.set_nonblocking(true).unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        let proxy_port = proxy.local_addr().unwrap().port();
+        let proxy_url = format!("http://127.0.0.1:{proxy_port}");
+        let host_with_port = format!("api.example.test:{origin_port}");
+        let domain_with_port = format!("example.test:{origin_port}");
+
+        for no_proxy in [
+            "",
+            "api.example.test",
+            ".example.test",
+            &host_with_port,
+            &domain_with_port,
+            "example.test:1",
+            "*",
+            "*,unrelated.test",
+            "unrelated.test,*",
+            "unrelated.test,*,.example.test",
+            " * ",
+        ] {
+            // Both candidate endpoints are local listeners. Ask libcurl to
+            // connect without sending a request, and observe which port it
+            // actually chose rather than duplicating the matcher in the test.
+            let mut easy = Easy::new();
+            easy.url(&format!("http://api.example.test:{origin_port}/"))
+                .unwrap();
+            easy.proxy(&proxy_url).unwrap();
+            easy.noproxy(no_proxy).unwrap();
+            easy.connect_only(true).unwrap();
+            easy.timeout(Duration::from_secs(2)).unwrap();
+            let mut resolve = List::new();
+            resolve
+                .append(&format!("api.example.test:{origin_port}:127.0.0.1"))
+                .unwrap();
+            easy.resolve(resolve).unwrap();
+            easy.perform().unwrap();
+            let connected_port = easy.primary_port().unwrap();
+            assert!(connected_port == origin_port || connected_port == proxy_port);
+            let curl_uses_proxy = connected_port == proxy_port;
+            let listener = if curl_uses_proxy { &proxy } else { &origin };
+            let _connection = listener.accept().unwrap();
+
+            for (scheme, proxy_env) in [
+                ("http", "http_proxy"),
+                ("https", "HTTPS_PROXY"),
+                ("ws", "http_proxy"),
+                ("wss", "HTTPS_PROXY"),
+            ] {
+                let target = format!("{scheme}://api.example.test:{origin_port}/");
+                let configured = route(&target, Some(&proxy_url), Some(no_proxy), &[]).unwrap();
+                let environment = route(
+                    &target,
+                    None,
+                    None,
+                    &[(proxy_env, &proxy_url), ("NO_PROXY", no_proxy)],
+                )
+                .unwrap();
+                assert_eq!(
+                    configured.is_proxy(),
+                    curl_uses_proxy,
+                    "configured NO_PROXY={no_proxy:?} for {target}"
+                );
+                assert_eq!(
+                    environment.is_proxy(),
+                    curl_uses_proxy,
+                    "environment NO_PROXY={no_proxy:?} for {target}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -492,6 +492,10 @@ pub struct CommonArgs {
     #[arg(long, value_name = "URL")]
     pub http_proxy: Option<String>,
 
+    /// Comma-separated hostnames, domains, IP addresses, or CIDRs that bypass
+    /// the proxy. Port suffixes are not supported; IPv6 entries omit brackets.
+    /// A single `*` as the entire value bypasses all hosts; `*` inside a list
+    /// does not act as a wildcard. Also applies to `no_proxy` / `NO_PROXY`.
     #[arg(long)]
     pub http_no_proxy: Option<String>,
 

@@ -2104,10 +2104,9 @@ fn fetch_redirect_reselects_direct_or_proxy_endpoint_per_hop() {
             .with_header("Location", "http://redirect-target.invalid/final"),
     ]);
     let direct_url = Url::parse(&direct.url()).unwrap();
-    let direct_port = direct_url.port().expect("direct URL should include a port");
     let mut config = FetchConfig::default();
     config.set_http_proxy(Some(format!("http://localhost:{proxy_port}")));
-    config.set_http_no_proxy(Some(format!("127.0.0.1:{direct_port}")));
+    config.set_http_no_proxy(Some("127.0.0.1".to_owned()));
 
     let response = fetch_with_config_for_test(
         &config,
@@ -2133,7 +2132,7 @@ fn fetch_client_applies_selected_no_proxy_route_to_curl() {
         .expect("scripted server URL should include a port");
     let mut config = FetchConfig::default();
     config.set_http_proxy(Some("http://127.0.0.1:1".to_owned()));
-    config.set_http_no_proxy(Some(format!("localhost:{port}")));
+    config.set_http_no_proxy(Some("localhost".to_owned()));
 
     let response = fetch_with_config_for_test(
         &config,
