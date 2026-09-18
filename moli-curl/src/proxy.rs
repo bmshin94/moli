@@ -361,10 +361,11 @@ fn no_proxy_matches(host: &str, no_proxy: Option<&str>) -> bool {
     if no_proxy == "*" {
         return true;
     }
-    let host = host
-        .trim_matches(['[', ']'])
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    // libcurl removes only one trailing dot from the hostname and at most
+    // one dot at each end of a domain token. Removing repeated dots could
+    // turn malformed input into a broader proxy bypass rule.
+    let host = host.trim_matches(['[', ']']);
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
     let host_ip = host.parse::<IpAddr>().ok();
     no_proxy.split(',').any(|token| {
         let token = token.trim();
@@ -378,9 +379,10 @@ fn no_proxy_matches(host: &str, no_proxy: Option<&str>) -> bool {
                     .parse::<AnyIpCidr>()
                     .is_ok_and(|cidr| cidr.contains(&host_ip));
         }
-        let token_host = token
-            .trim_start_matches('.')
-            .trim_end_matches('.')
+        let token_host = token.strip_suffix('.').unwrap_or(token);
+        let token_host = token_host
+            .strip_prefix('.')
+            .unwrap_or(token_host)
             .to_ascii_lowercase();
         if token_host.is_empty() {
             return false;
@@ -516,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn no_proxy_routes_match_libcurl_for_ports_and_wildcards() {
+    fn no_proxy_routes_match_libcurl() {
         use std::{net::TcpListener, time::Duration};
 
         use curl::easy::{Easy, List};
@@ -528,69 +530,80 @@ mod tests {
         let origin_port = origin.local_addr().unwrap().port();
         let proxy_port = proxy.local_addr().unwrap().port();
         let proxy_url = format!("http://127.0.0.1:{proxy_port}");
-        let host_with_port = format!("api.example.test:{origin_port}");
         let domain_with_port = format!("example.test:{origin_port}");
 
-        for no_proxy in [
-            "",
+        for host in [
             "api.example.test",
-            ".example.test",
-            &host_with_port,
-            &domain_with_port,
-            "example.test:1",
-            "*",
-            "*,unrelated.test",
-            "unrelated.test,*",
-            "unrelated.test,*,.example.test",
-            " * ",
+            "api.example.test.",
+            "api.example.test..",
         ] {
-            // Both candidate endpoints are local listeners. Ask libcurl to
-            // connect without sending a request, and observe which port it
-            // actually chose rather than duplicating the matcher in the test.
-            let mut easy = Easy::new();
-            easy.url(&format!("http://api.example.test:{origin_port}/"))
-                .unwrap();
-            easy.proxy(&proxy_url).unwrap();
-            easy.noproxy(no_proxy).unwrap();
-            easy.connect_only(true).unwrap();
-            easy.timeout(Duration::from_secs(2)).unwrap();
-            let mut resolve = List::new();
-            resolve
-                .append(&format!("api.example.test:{origin_port}:127.0.0.1"))
-                .unwrap();
-            easy.resolve(resolve).unwrap();
-            easy.perform().unwrap();
-            let connected_port = easy.primary_port().unwrap();
-            assert!(connected_port == origin_port || connected_port == proxy_port);
-            let curl_uses_proxy = connected_port == proxy_port;
-            let listener = if curl_uses_proxy { &proxy } else { &origin };
-            let _connection = listener.accept().unwrap();
-
-            for (scheme, proxy_env) in [
-                ("http", "http_proxy"),
-                ("https", "HTTPS_PROXY"),
-                ("ws", "http_proxy"),
-                ("wss", "HTTPS_PROXY"),
+            let host_with_port = format!("{host}:{origin_port}");
+            for no_proxy in [
+                "",
+                "api.example.test",
+                "example.test",
+                ".example.test",
+                "example.test.",
+                ".example.test.",
+                "..example.test",
+                "example.test..",
+                "..example.test..",
+                &host_with_port,
+                &domain_with_port,
+                "example.test:1",
+                "*",
+                "*,unrelated.test",
+                "unrelated.test,*",
+                "unrelated.test,*,.example.test",
+                " * ",
             ] {
-                let target = format!("{scheme}://api.example.test:{origin_port}/");
-                let configured = route(&target, Some(&proxy_url), Some(no_proxy), &[]).unwrap();
-                let environment = route(
-                    &target,
-                    None,
-                    None,
-                    &[(proxy_env, &proxy_url), ("NO_PROXY", no_proxy)],
-                )
-                .unwrap();
-                assert_eq!(
-                    configured.is_proxy(),
-                    curl_uses_proxy,
-                    "configured NO_PROXY={no_proxy:?} for {target}"
-                );
-                assert_eq!(
-                    environment.is_proxy(),
-                    curl_uses_proxy,
-                    "environment NO_PROXY={no_proxy:?} for {target}"
-                );
+                // Both candidate endpoints are local listeners. Ask libcurl to
+                // connect without sending a request, and observe which port it
+                // actually chose rather than duplicating the matcher in the test.
+                let mut easy = Easy::new();
+                easy.url(&format!("http://{host}:{origin_port}/")).unwrap();
+                easy.proxy(&proxy_url).unwrap();
+                easy.noproxy(no_proxy).unwrap();
+                easy.connect_only(true).unwrap();
+                easy.timeout(Duration::from_secs(2)).unwrap();
+                let mut resolve = List::new();
+                resolve
+                    .append(&format!("{host}:{origin_port}:127.0.0.1"))
+                    .unwrap();
+                easy.resolve(resolve).unwrap();
+                easy.perform().unwrap();
+                let connected_port = easy.primary_port().unwrap();
+                assert!(connected_port == origin_port || connected_port == proxy_port);
+                let curl_uses_proxy = connected_port == proxy_port;
+                let listener = if curl_uses_proxy { &proxy } else { &origin };
+                let _connection = listener.accept().unwrap();
+
+                for (scheme, proxy_env) in [
+                    ("http", "http_proxy"),
+                    ("https", "HTTPS_PROXY"),
+                    ("ws", "http_proxy"),
+                    ("wss", "HTTPS_PROXY"),
+                ] {
+                    let target = format!("{scheme}://{host}:{origin_port}/");
+                    let configured = route(&target, Some(&proxy_url), Some(no_proxy), &[]).unwrap();
+                    let environment = route(
+                        &target,
+                        None,
+                        None,
+                        &[(proxy_env, &proxy_url), ("NO_PROXY", no_proxy)],
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        configured.is_proxy(),
+                        curl_uses_proxy,
+                        "configured NO_PROXY={no_proxy:?} for {target}"
+                    );
+                    assert_eq!(
+                        environment.is_proxy(),
+                        curl_uses_proxy,
+                        "environment NO_PROXY={no_proxy:?} for {target}"
+                    );
+                }
             }
         }
     }
