@@ -2005,7 +2005,17 @@ mod tests {
                 },
                 ..LayoutInput::HIDDEN
             };
+            let before: Vec<_> = world.boxes.iter().map(|b| b.unrounded_layout).collect();
             let cold = world.compute_child_layout(root.to_taffy(), inputs);
+            assert_eq!(
+                world
+                    .boxes
+                    .iter()
+                    .map(|b| b.unrounded_layout)
+                    .collect::<Vec<_>>(),
+                before,
+                "complete baseline measurement must not publish numeric layouts"
+            );
             assert_eq!(
                 cold.size,
                 Size {

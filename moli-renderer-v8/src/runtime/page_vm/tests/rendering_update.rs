@@ -2873,6 +2873,84 @@ async fn screenshot_preserves_table_cell_dimension_hints_and_avatar_columns() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn table_cell_absolute_descendants_use_final_geometry() {
+    run_page_vm_async_test(async move {
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        let mut page = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/table-cell-absolute.html")?,
+        );
+        page.vm_mut().set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+        page.vm_mut().eval(r#"
+document.head.innerHTML = `<style>
+body { margin:0 } table { width:200px;border-spacing:0;table-layout:fixed }
+td { padding:0;font-size:0;line-height:0;vertical-align:top }
+</style>`;
+document.body.innerHTML = `<table><tr>
+<td id=cell style="position:relative">
+  <div style="height:10px"></div><div id=inflow style="height:50%"></div>
+  <div id=percent style="position:absolute;top:0;left:0;height:50%;width:10px"></div>
+  <div id=fill style="position:absolute;inset:0"></div>
+</td><td><div id=tall style="height:100px"></div></td>
+</tr></table>`;
+"#)?;
+        for height in [100, 160, 100] {
+            page.vm_mut().eval(&format!("document.getElementById('tall').style.height='{height}px'"))?;
+            for _ in 0..2 {
+                page.vm_mut().screenshot_layout_snapshot(moli_layout::PaintViewport::new(320, 240, 1.0))?.expect("table root");
+                let actual = page.vm_mut().eval(r#"
+['cell','inflow','percent','fill'].map(id => document.getElementById(id).getBoundingClientRect().height).join('|')
+"#)?;
+                assert_eq!(actual, format!("{height}|0|{}|{height}", height / 2),
+                    "absolute descendants use the final cell box; normal-flow percentages remain indefinite");
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await.expect("table cell absolute layout should match Chromium");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn table_cell_nested_percentage_baseline_reaches_parent_measurement() {
+    run_page_vm_async_test(async move {
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        let mut page = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/table-cell-nested-baseline.html")?,
+        );
+        page.vm_mut().set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+        page.vm_mut().eval(r#"
+document.head.innerHTML = `<style>
+body { margin:0 } table { width:200px;border-spacing:0;table-layout:fixed }
+td { padding:0;font-size:0;line-height:0;vertical-align:baseline }
+</style>`;
+document.body.innerHTML = `<table id=outer><tr><td>
+<table id=inner style="width:100px"><tr>
+  <td id=cell style="height:100px"><div id=percent style="height:50%;width:10px"></div></td>
+  <td><div id=peer style="height:20px;width:10px"></div></td>
+</tr></table>
+</td><td><span id=reference style="display:inline-block;height:50px;width:10px"></span></td></tr></table>`;
+"#)?;
+        for height in [100, 160, 100] {
+            page.vm_mut().eval(&format!("document.getElementById('cell').style.height='{height}px'"))?;
+            for _ in 0..2 {
+                page.vm_mut().screenshot_layout_snapshot(moli_layout::PaintViewport::new(320, 240, 1.0))?.expect("nested table root");
+                let actual = page.vm_mut().eval(r#"(() => {
+const rect = id => document.getElementById(id).getBoundingClientRect();
+const outer = rect('outer');
+return [outer.height,rect('inner').height,rect('percent').height,
+        rect('peer').y-outer.y,rect('reference').y-outer.y].join('|');
+})()"#)?;
+                assert_eq!(actual, format!("{height}|{height}|{}|{}|{}", height / 2, height / 2 - 20, height / 2 - 50),
+                    "outer row measurement must use the nested table's final percentage-dependent baseline");
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await.expect("nested percentage baseline should match Chromium");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn screenshot_table_row_heights_match_chromium() {
     run_page_vm_async_test(async move {
         let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;

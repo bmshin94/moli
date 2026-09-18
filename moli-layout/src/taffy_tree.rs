@@ -33,6 +33,9 @@ use crate::{
     world::InlineStaticPosition,
 };
 
+mod measurement;
+use measurement::FullMeasurementTree;
+
 pub(crate) struct PreparedWorldLayout {
     positioned_static_sources: Vec<PositionedStaticSource>,
     numeric_unrounded_layouts: Vec<Layout>,
@@ -1684,6 +1687,9 @@ where
                 .store(inputs, output);
             return output;
         }
+        if self.measure_baselines && inputs.run_mode == RunMode::ComputeSize {
+            return self.compute_child_layout_uncached(node_id, inputs, None);
+        }
         compute_cached_layout(self, node_id, inputs, |world, node_id, inputs| {
             world.compute_child_layout_uncached(node_id, inputs, None)
         })
@@ -1747,6 +1753,17 @@ where
 
     fn get_block_child_style(&self, child_node_id: NodeId) -> Self::BlockItemStyle<'_> {
         self.get_core_container_style(child_node_id)
+    }
+
+    fn get_block_percentage_resolution_height(
+        &self,
+        node_id: NodeId,
+        height: Option<f32>,
+    ) -> Option<f32> {
+        match self.table_cell_percentage_height {
+            Some((cell, false)) if cell.to_taffy() == node_id => None,
+            _ => height,
+        }
     }
 
     fn compute_block_child_layout(
@@ -1869,6 +1886,19 @@ impl<N> LayoutWorld<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
+    /// Obtain baselines and content bounds without publishing numeric or paint layout.
+    pub(crate) fn measure_complete_layout(
+        &mut self,
+        node_id: NodeId,
+        inputs: LayoutInput,
+    ) -> LayoutOutput {
+        debug_assert_eq!(inputs.run_mode, RunMode::ComputeSize);
+        let previous = std::mem::replace(&mut self.measure_baselines, true);
+        let output = self.compute_child_layout(node_id, inputs);
+        self.measure_baselines = previous;
+        output
+    }
+
     fn should_hide(&self, node_id: NodeId, inputs: LayoutInput) -> bool {
         inputs.run_mode == RunMode::PerformHiddenLayout
             || self.boxes[LayoutBoxId::from_taffy(node_id).index()]
@@ -1906,6 +1936,29 @@ where
 
         if inline_formatting_context {
             return self.compute_inline_formatting_context(id, inputs, block_context);
+        }
+
+        if self.measure_baselines
+            && inputs.run_mode == RunMode::ComputeSize
+            && !matches!(
+                kind,
+                LayoutBoxKind::TableWrapper
+                    | LayoutBoxKind::InlineTableWrapper
+                    | LayoutBoxKind::AnonymousTableWrapper
+            )
+        {
+            let mut tree = FullMeasurementTree(self);
+            let full_inputs = LayoutInput {
+                run_mode: RunMode::PerformLayout,
+                ..inputs
+            };
+            return if display.is_flex_container() {
+                compute_flexbox_layout(&mut tree, node_id, full_inputs)
+            } else if display.is_grid_container() {
+                compute_grid_layout(&mut tree, node_id, full_inputs)
+            } else {
+                compute_block_layout(&mut tree, node_id, full_inputs, block_context)
+            };
         }
 
         // Pseudo origins retain a pseudo-specific box kind, so their computed
@@ -2058,6 +2111,17 @@ where
             }
         } else {
             inputs
+        };
+        // The leaf adapter's size-only shortcut drops the line baselines.
+        // Only the adapter needs full measurement: the original inputs still
+        // keep Parley on its measurement path without final paint fragments.
+        let leaf_inputs = if self.measure_baselines && inputs.run_mode == RunMode::ComputeSize {
+            LayoutInput {
+                run_mode: RunMode::PerformLayout,
+                ..leaf_inputs
+            }
+        } else {
+            leaf_inputs
         };
         let alignment = self.boxes[id.index()].style.text_align();
         let mut inline_context = self.boxes[id.index()]
@@ -2218,7 +2282,7 @@ where
         reset_inline_layout_for_probe(layout);
 
         let parent_writing_mode = self.boxes[owner.index()].style.writing_mode();
-        let child_inputs = LayoutInput {
+        let mut child_inputs = LayoutInput {
             run_mode: inputs.run_mode,
             sizing_mode: SizingMode::InherentSize,
             sizing_purpose: inputs.sizing_purpose,
@@ -2231,6 +2295,9 @@ where
             block_auto_behavior: AutoSizeBehavior::FitContent,
             vertical_margins_are_collapsible: Line::FALSE,
         };
+        if self.table_cell_percentage_height == Some((owner, false)) {
+            child_inputs.parent_size.height = None;
+        }
         // A float's max-content contribution is measured independently from
         // the finite line slot it will eventually occupy. Final fit-content
         // layout still uses the IFC owner's content width; it must not use

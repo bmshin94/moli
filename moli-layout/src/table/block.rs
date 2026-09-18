@@ -231,7 +231,7 @@ impl TableContext {
                 context: self,
             };
             let output = wrapper.with_grid_cell_style(index, |world, cell| {
-                world.compute_child_layout(cell.to_taffy(), measure_inputs)
+                world.measure_complete_layout(cell.to_taffy(), measure_inputs)
             });
             self.cells[index].style.padding = final_padding.map(style_helpers::length);
             for (id, style) in restored {
@@ -323,6 +323,62 @@ impl TableContext {
                 .sum::<f32>()
                 + cell.row_span.saturating_sub(1) as f32 * self.block_border_spacing;
             layout.definite |= !preferred.is_auto() && layout.size > layout.natural_size;
+        }
+        // Percentage descendants can acquire a different baseline once the
+        // row heights are known. Return that baseline even during ComputeSize:
+        // a parent table uses it to solve its own ascent/descent constraints.
+        // These probes retain content bounds without publishing child layouts.
+        for row in &mut rows {
+            row.ascent = None;
+        }
+        for index in 0..self.cells.len() {
+            let cell = &self.cells[index];
+            let layout = cell.block_layout.unwrap();
+            if layout.baseline.is_none() {
+                continue;
+            }
+            let inline = self.column_sizes[cell.column..cell.column + cell.column_span]
+                .iter()
+                .sum::<f32>()
+                + self.inline_border_spacing * cell.column_span.saturating_sub(1) as f32;
+            let measure_inputs = LayoutInput {
+                known_dimensions: Size {
+                    width: Some(inline),
+                    height: None,
+                },
+                definite_dimensions: Size {
+                    width: Some(inline),
+                    height: None,
+                },
+                parent_size: Size {
+                    width: Some(cell_percentage_basis),
+                    height: None,
+                },
+                parent_writing_mode: mode,
+                available_space: Size {
+                    width: AvailableSpace::Definite(inline),
+                    height: AvailableSpace::Definite(layout.size),
+                },
+                run_mode: RunMode::ComputeSize,
+                sizing_mode: SizingMode::InherentSize,
+                sizing_purpose: SizingPurpose::Layout,
+                axis: RequestedAxis::Both,
+                block_auto_behavior: AutoSizeBehavior::FitContent,
+                vertical_margins_are_collapsible: Line::FALSE,
+            };
+            let mut wrapper = TableTreeWrapper {
+                world,
+                context: self,
+            };
+            let output = wrapper.with_grid_cell_style(index, |world, cell| {
+                layout_cell(world, cell, measure_inputs, mode, Some(layout))
+            });
+            let cell = &mut self.cells[index];
+            cell.block_layout.as_mut().unwrap().baseline = output.first_baselines.y;
+            if let Some(baseline) = output.first_baselines.y {
+                let row = &mut rows[cell.row];
+                row.ascent = Some(row.ascent.unwrap_or(0.0).max(baseline));
+            }
         }
         let mut tracks = Vec::new();
         // Empty sections take up height, but do not introduce cell spacing.
@@ -459,24 +515,23 @@ where
         return world.compute_child_layout(cell.to_taffy(), inputs);
     };
     set_block(mode, &mut inputs.parent_size, None);
-    set_block(
-        mode,
-        &mut inputs.known_dimensions,
-        layout.definite.then_some(layout.size),
-    );
+    set_block(mode, &mut inputs.known_dimensions, Some(layout.size));
     set_block(
         mode,
         &mut inputs.definite_dimensions,
         layout.definite.then_some(layout.size),
     );
-    if !layout.definite {
-        set_block(
-            mode,
-            &mut inputs.available_space,
-            AvailableSpace::MaxContent,
-        );
-    }
-    let mut output = world.compute_child_layout(cell.to_taffy(), inputs);
+    // The used border box is always the absolute containing block, including
+    // auto-height cells. Normal-flow percentages need a separate guarantee.
+    let previous = world
+        .table_cell_percentage_height
+        .replace((cell, layout.definite));
+    let mut output = if inputs.run_mode == RunMode::ComputeSize {
+        world.measure_complete_layout(cell.to_taffy(), inputs)
+    } else {
+        world.compute_child_layout(cell.to_taffy(), inputs)
+    };
+    world.table_cell_percentage_height = previous;
     let free = (layout.size - mode.to_logical(output.size).block_size).max(0.0);
     let alignment = world.boxes[cell.index()].style.taffy.align_content;
     let offset = if layout.baseline.is_some() {
@@ -509,11 +564,9 @@ where
                 .resolve_or_zero(inputs.parent_size.width, resolve_stylo_calc_value);
             // The natural border box includes empty block children whose
             // overflow content size can be zero (for example an empty group).
-            (output.size.height - padding.bottom - border.bottom).max(0.0)
-        } else if inputs.run_mode == RunMode::PerformLayout {
-            (output.content_size.height - padding.bottom).max(0.0)
+            (layout.natural_size - padding.bottom - border.bottom).max(0.0)
         } else {
-            layout.baseline.unwrap_or(0.0)
+            (output.content_size.height - padding.bottom).max(0.0)
         });
     }
     output.content_size.height += offset;

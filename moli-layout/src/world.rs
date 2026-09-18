@@ -609,6 +609,10 @@ where
     pub(crate) viewport_scroll_policy: ViewportScrollPolicy,
     pub(crate) viewport_layout: ViewportLayoutState,
     pub(crate) css_image_references: Vec<LayoutCssImageReference<N>>,
+    /// Full numeric measurement retains baselines without publishing layouts.
+    pub(crate) measure_baselines: bool,
+    /// The active table cell's used height need not be a percentage guarantee.
+    pub(crate) table_cell_percentage_height: Option<(LayoutBoxId, bool)>,
     numeric_layout_tracking: bool,
     numeric_layout_touched: Vec<LayoutBoxId>,
     numeric_layout_touched_marks: Vec<bool>,
@@ -628,6 +632,8 @@ where
             viewport_scroll_policy: ViewportScrollPolicy::default(),
             viewport_layout: ViewportLayoutState::default(),
             css_image_references: Vec::new(),
+            measure_baselines: false,
+            table_cell_percentage_height: None,
             numeric_layout_tracking: false,
             numeric_layout_touched: Vec::new(),
             numeric_layout_touched_marks: vec![false],
