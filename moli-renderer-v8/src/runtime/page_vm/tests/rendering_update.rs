@@ -2951,6 +2951,105 @@ return [outer.height,rect('inner').height,rect('percent').height,
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn table_cell_synthetic_baselines_ignore_positioned_overflow() {
+    run_page_vm_async_test(async move {
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        let mut page = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/table-cell-flow-baseline.html")?,
+        );
+        page.vm_mut().set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+        page.vm_mut().eval(r#"
+document.head.innerHTML = `<style>
+body { margin:0 } table { width:200px;border-spacing:0;table-layout:fixed }
+td { padding:0;font-size:0;line-height:0;vertical-align:baseline }
+</style>`;
+document.body.innerHTML = `<table><tr>
+<td id=cell style="height:100px;position:relative">
+  <div id=content style="height:10px;width:10px"></div>
+  <div id=overlay style="position:absolute;inset:0"></div>
+</td><td><span id=peer style="display:inline-block;height:20px;width:10px"></span></td>
+</tr></table>`;
+"#)?;
+        for relative in [false, true, false] {
+            for height in [100, 160, 100] {
+                page.vm_mut().eval(&format!(r#"
+document.getElementById('cell').style.height='{height}px';
+document.getElementById('overlay').style.display='{}';
+document.getElementById('content').style.cssText='height:10px;width:10px;{}';
+"#, if relative { "none" } else { "block" }, if relative { "position:relative;top:50%" } else { "" }))?;
+                for _ in 0..2 {
+                    page.vm_mut().screenshot_layout_snapshot(moli_layout::PaintViewport::new(320, 240, 1.0))?.expect("table root");
+                    let actual = page.vm_mut().eval(r#"
+['cell','peer','content','overlay'].map(id => {
+  const r=document.getElementById(id).getBoundingClientRect(); return [r.y,r.height].join(',');
+}).join('|')
+"#)?;
+                    let content_y = 10 + if relative { height / 2 } else { 0 };
+                    let overlay_height = if relative { 0 } else { height };
+                    assert_eq!(actual, format!("0,{height}|0,20|{content_y},10|0,{overlay_height}"),
+                        "relative={relative}: synthetic baselines use normal-flow geometry, while positioned descendants retain final cell geometry");
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await.expect("positioned overflow must not move adjacent cell baselines");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn table_cell_vertical_alignment_includes_floats() {
+    run_page_vm_async_test(async move {
+        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;
+        let mut page = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/table-cell-float-alignment.html")?,
+        );
+        page.vm_mut().set_layout_policy(moli_page_types::LayoutPolicy::OnDemand);
+        page.vm_mut().eval(r#"
+document.head.innerHTML = `<style>
+body { margin:0 } table { width:200px;border-spacing:0;table-layout:fixed }
+td { padding:0;font-size:0;line-height:0 }
+</style>`;
+document.body.innerHTML = `<table><tr>
+<td id=cell style="position:relative">
+  <div id=float style="float:left;width:10px;height:30px"></div>
+  <div id=block style="margin-left:15px;width:10px;height:20px"></div>
+  <div id=overlay style="position:absolute;inset:0"></div>
+</td><td><div id=tall></div></td></tr></table>`;
+"#)?;
+        for align in ["middle", "bottom"] {
+            for mixed in [false, true] {
+                for padding in [0, 5] {
+                    for height in [100, 160, 100] {
+                        page.vm_mut().eval(&format!(r#"
+document.getElementById('cell').style.cssText='position:relative;vertical-align:{align};padding:{padding}px';
+document.getElementById('block').style.display='{}';
+document.getElementById('tall').style.height='{height}px';
+"#, if mixed { "block" } else { "none" }))?;
+                        for _ in 0..2 {
+                            page.vm_mut().screenshot_layout_snapshot(moli_layout::PaintViewport::new(320, 240, 1.0))?.expect("table root");
+                            let actual = page.vm_mut().eval(r#"
+['cell','float','block','overlay'].map(id => {
+  const r=document.getElementById(id).getBoundingClientRect(); return [r.y,r.height].join(',');
+}).join('|')
+"#)?;
+                            let free = height - 2 * padding - 30;
+                            let y = padding + if align == "middle" { free / 2 } else { free };
+                            let block = if mixed { format!("{y},20") } else { "0,0".to_owned() };
+                            assert_eq!(actual, format!("0,{height}|{y},30|{block}|0,{height}"),
+                                "{align}, mixed={mixed}, padding={padding}: align floats and normal flow together without shifting the absolute overlay");
+                        }
+                    }
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await.expect("table-cell vertical alignment must include floats");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn screenshot_table_row_heights_match_chromium() {
     run_page_vm_async_test(async move {
         let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())?;

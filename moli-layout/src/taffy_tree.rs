@@ -1766,6 +1766,14 @@ where
         }
     }
 
+    fn block_alignment_includes_floats(&self, node_id: NodeId) -> bool {
+        !self.is_viewport_taffy_node(node_id)
+            && matches!(
+                self.boxes[LayoutBoxId::from_taffy(node_id).index()].kind,
+                LayoutBoxKind::TableCell | LayoutBoxKind::AnonymousTableCell
+            )
+    }
+
     fn compute_block_child_layout(
         &mut self,
         node_id: NodeId,
@@ -2202,6 +2210,13 @@ where
                 content_box_height - measurement.alignment_block_size,
             );
             measurement.translate_block_axis(block_offset);
+            output.block_content_end = Some(
+                measurement.alignment_block_size
+                    + padding.top
+                    + border.top
+                    + scrollbar_insets.top
+                    + block_offset,
+            );
             output.content_size.height = output.content_size.height.max(
                 measurement.alignment_block_size
                     + padding.top

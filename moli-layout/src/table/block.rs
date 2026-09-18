@@ -241,7 +241,7 @@ impl TableContext {
             let natural = mode.to_logical(output.size).block_size;
             let cell = &mut self.cells[index];
             let baseline = if mode.is_horizontal() {
-                output.first_baselines.y
+                output.first_baselines.y.or(output.block_content_end)
             } else {
                 output.first_baselines.x
             };
@@ -532,44 +532,13 @@ where
         world.compute_child_layout(cell.to_taffy(), inputs)
     };
     world.table_cell_percentage_height = previous;
-    let free = (layout.size - mode.to_logical(output.size).block_size).max(0.0);
-    let alignment = world.boxes[cell.index()].style.taffy.align_content;
-    let offset = if layout.baseline.is_some() {
-        0.0
-    } else {
-        crate::taffy_tree::single_subject_block_alignment_offset(alignment, free)
-    };
-    if inputs.run_mode == RunMode::PerformLayout && offset != 0.0 {
-        shift_cell_contents(world, cell, offset);
-    }
-    if let Some(baseline) = &mut output.first_baselines.y {
-        *baseline += offset;
-    }
-    if let Some(baseline) = &mut output.last_baselines.y {
-        *baseline += offset;
-    }
     if layout.baseline.is_some() && output.first_baselines.y.is_none() {
-        // Cells with no line baseline use the content's block-end edge. This
-        // must be sampled again after percentage descendants have laid out.
-        let padding = world.boxes[cell.index()]
-            .style
-            .taffy
-            .padding
-            .resolve_or_zero(inputs.parent_size.width, resolve_stylo_calc_value);
-        output.first_baselines.y = Some(if !layout.definite {
-            let border = world.boxes[cell.index()]
-                .style
-                .taffy
-                .border
-                .resolve_or_zero(inputs.parent_size.width, resolve_stylo_calc_value);
-            // The natural border box includes empty block children whose
-            // overflow content size can be zero (for example an empty group).
-            (layout.natural_size - padding.bottom - border.bottom).max(0.0)
-        } else {
-            (output.content_size.height - padding.bottom).max(0.0)
-        });
+        // This is measured again with final percentage constraints, but before
+        // relative positioning or absolute descendants contribute overflow.
+        output.first_baselines.y = output.block_content_end;
     }
-    output.content_size.height += offset;
+    // Block/inline layout has already aligned the content group inside this
+    // final geometry. Only baseline alignment needs a later table-wide shift.
     set_block(mode, &mut output.size, layout.size);
     output
 }

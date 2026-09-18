@@ -110,6 +110,10 @@ impl<N: Copy + Debug + Eq + Hash> LayoutBlockContainer for FullMeasurementTree<'
             .get_block_percentage_resolution_height(node_id, height)
     }
 
+    fn block_alignment_includes_floats(&self, node_id: NodeId) -> bool {
+        self.0.block_alignment_includes_floats(node_id)
+    }
+
     fn compute_block_child_layout(
         &mut self,
         node_id: NodeId,
