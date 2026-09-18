@@ -2443,6 +2443,7 @@ where
             .any(|object| object.role == InlineObjectRole::Float);
         let mut float_height = None;
         let mut alignment_float_height = 0.0;
+        let mut float_line_clearances = Vec::new();
         if has_inline_float
             || block_context
                 .as_ref()
@@ -2465,7 +2466,7 @@ where
                     padding_border.top,
                     [padding_border.left, padding_border.right],
                 );
-                self.break_inline_lines_with_floats(
+                float_line_clearances = self.break_inline_lines_with_floats(
                     context,
                     layout,
                     width,
@@ -2489,7 +2490,7 @@ where
                     padding_border.top,
                     [padding_border.left, padding_border.right],
                 );
-                self.break_inline_lines_with_floats(
+                float_line_clearances = self.break_inline_lines_with_floats(
                     context,
                     layout,
                     width,
@@ -2520,6 +2521,7 @@ where
                 layout,
                 &atomic_baseline_ascents,
                 &structural_edge_contributions,
+                &float_line_clearances,
             );
             (metrics, Some(placements))
         } else {
@@ -2529,6 +2531,7 @@ where
                     layout,
                     &atomic_baseline_ascents,
                     &structural_edge_contributions,
+                    &float_line_clearances,
                 ),
                 None,
             )
@@ -2587,32 +2590,67 @@ where
         block_context: &mut BlockContext<'_>,
         content_offset: Point<f32>,
         floats: &mut Vec<InlineFloatPlacement>,
-    ) {
+    ) -> Vec<f32> {
+        let wraps = self.boxes[context.root_style.index()]
+            .style
+            .computed
+            .as_ref()
+            .is_none_or(|computed| {
+                computed.get_inherited_text().text_wrap_mode
+                    == style::computed_values::text_wrap_mode::T::Wrap
+            });
         let mut breaker = layout.break_lines();
-        let initial_slot = block_context.find_content_slot(0.0, Clear::None, None);
-        let mut has_active_floats = initial_slot.segment_id.is_some();
+        let mut slot = inline_float_slot(block_context, 0.0, None, 0.0);
+        let mut clearance = slot.y.max(0.0);
+        let mut line_clearances = Vec::new();
         {
             let state = breaker.state_mut();
             state.set_layout_max_advance(width);
-            state.set_line_max_advance(initial_slot.width.max(0.0));
-            state.set_line_x(initial_slot.x);
-            state.set_line_y(f64::from(initial_slot.y));
+            state.set_line_max_advance(slot.width.max(0.0));
+            state.set_line_x(slot.x);
+            state.set_line_y(f64::from(slot.y));
         }
 
         while let Some(yield_data) = breaker.break_next() {
             match yield_data {
-                YieldData::LineBreak(_) => {
-                    let state = breaker.state_mut();
-                    if has_active_floats {
-                        let next_slot = block_context.find_content_slot(
-                            state.line_y() as f32,
-                            Clear::None,
-                            None,
+                YieldData::LineBreak(data) => {
+                    // An unbreakable item may overflow a rectangular paragraph,
+                    // but a float-reduced slot can have more room below it.
+                    // Regular breaks can hang trailing whitespace beyond the
+                    // slot; that whitespace alone must not move a fitting line.
+                    // Preformatted/nowrap lines deliberately overflow their
+                    // available width instead of moving below adjacent floats.
+                    let tolerance = width.abs().max(1.0) * f32::EPSILON * 8.0;
+                    if wraps
+                        && slot.segment_id.is_some()
+                        && (data.reason != parley::BreakReason::Regular || slot.width <= 0.0)
+                        && data.advance > slot.width.max(0.0) + tolerance
+                        && breaker.revert()
+                    {
+                        slot = inline_float_slot(
+                            block_context,
+                            data.line_y_start as f32,
+                            slot.segment_id,
+                            data.advance,
                         );
-                        has_active_floats = next_slot.segment_id.is_some();
-                        state.set_line_max_advance(next_slot.width.max(0.0));
-                        state.set_line_x(next_slot.x);
-                        state.set_line_y(f64::from(next_slot.y));
+                        clearance = clearance.max(slot.y);
+                        let state = breaker.state_mut();
+                        state.set_line_max_advance(slot.width.max(0.0));
+                        state.set_line_x(slot.x);
+                        state.set_line_y(f64::from(slot.y));
+                        continue;
+                    }
+                    line_clearances.push(clearance);
+                    let state = breaker.state_mut();
+                    if slot.segment_id.is_some() {
+                        let line_y = state.line_y() as f32;
+                        slot = inline_float_slot(block_context, line_y, None, 0.0);
+                        if slot.y > line_y {
+                            clearance = clearance.max(slot.y);
+                        }
+                        state.set_line_max_advance(slot.width.max(0.0));
+                        state.set_line_x(slot.x);
+                        state.set_line_y(f64::from(slot.y));
                     } else {
                         state.set_line_x(0.0);
                         state.set_line_max_advance(width);
@@ -2670,17 +2708,20 @@ where
                         order: usize::try_from(data.inline_box_id).unwrap_or(usize::MAX),
                         parent_width: child_inputs.parent_size.width,
                     });
-                    let next_slot =
-                        block_context.find_content_slot(state.line_y() as f32, Clear::None, None);
-                    has_active_floats = next_slot.segment_id.is_some();
-                    state.set_line_max_advance(next_slot.width.max(0.0));
-                    state.set_line_x(next_slot.x);
-                    state.set_line_y(f64::from(next_slot.y));
+                    let line_y = state.line_y() as f32;
+                    slot = inline_float_slot(block_context, line_y, None, 0.0);
+                    if slot.y > line_y {
+                        clearance = clearance.max(slot.y);
+                    }
+                    state.set_line_max_advance(slot.width.max(0.0));
+                    state.set_line_x(slot.x);
+                    state.set_line_y(f64::from(slot.y));
                     state.append_inline_box_to_line(data.advance, 0.0);
                 }
             }
         }
         breaker.finish();
+        line_clearances
     }
 
     fn position_inline_objects(
@@ -2796,6 +2837,21 @@ where
             padding,
             margin,
         };
+    }
+}
+
+fn inline_float_slot(
+    context: &BlockContext<'_>,
+    min_y: f32,
+    mut after: Option<usize>,
+    minimum_width: f32,
+) -> taffy::ContentSlot {
+    loop {
+        let slot = context.find_content_slot(min_y, Clear::None, after);
+        if slot.segment_id.is_none() || slot.width >= minimum_width {
+            return slot;
+        }
+        after = slot.segment_id;
     }
 }
 

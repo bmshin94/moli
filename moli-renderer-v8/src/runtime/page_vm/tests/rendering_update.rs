@@ -1762,6 +1762,60 @@ document.body.innerHTML = `<div id=stage>
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn float_line_clearance_respects_pre_and_nowrap() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/float-nowrap.html")?,
+        );
+        page_vm.vm_mut().eval(
+            r#"
+document.head.innerHTML = `<style>
+html,body{margin:0;padding:0}
+.case{position:absolute;top:0;width:200px;height:120px;font:16px/20px monospace}
+.float{float:left;width:60px;height:80px}
+p{margin:0;width:200px}
+#pre{left:0;white-space:pre}
+#nowrap{left:240px;white-space:nowrap}
+#wrap{left:480px;white-space:normal}
+.atom{display:inline-block;width:240px;height:24px;vertical-align:top}
+</style>`;
+document.body.innerHTML = `<div class=case id=pre><div class=float></div><p>abcdefghijabcdefghij  <br>abcdefghijabcdefghij</p></div><div class=case id=nowrap><div class=float></div><p><span class=atom></span></p></div><div class=case id=wrap><div class=float></div><p><span class=atom></span></p></div>`;
+"#,
+        )?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        let geometry = page_vm.vm_mut().eval(
+            r#"JSON.stringify(['pre','nowrap','wrap'].map(id=>{
+const c=document.getElementById(id), p=c.querySelector('p');
+const r=c.getBoundingClientRect(), t=(p.querySelector('span')||p).getBoundingClientRect();
+return [t.x-r.x,t.y-r.y,p.getBoundingClientRect().height];
+}))"#,
+        )?;
+        let geometry: Vec<[f32; 3]> = serde_json::from_str(&geometry)?;
+        // Chromium: pre/nowrap content stays beside the float and overflows;
+        // a wrapping paragraph moves its oversized atom below the float.
+        for (actual, expected) in geometry.iter().zip([
+            [0.0, 0.0, 40.0],
+            [60.0, 0.0, 24.0],
+            [0.0, 80.0, 104.0],
+        ]) {
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() <= 0.05,
+                    "expected {expected}, got {actual}; geometry={geometry:?}"
+                );
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("float nowrap fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn floated_auto_width_inline_formatting_contexts_shrink_to_fit() {
     run_page_vm_async_test(async move {
         let loader =
