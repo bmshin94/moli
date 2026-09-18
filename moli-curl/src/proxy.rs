@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use anyhow::{Context, Result, bail};
 use cidr::AnyIpCidr;
 use moli_dns_resolver::DnsTarget;
-use url::{Host, Url};
+use url::{Host, Position, Url};
 
 use crate::HostResolveOverrides;
 
@@ -48,14 +48,6 @@ impl ProxyScheme {
     pub fn uses_http_headers(self) -> bool {
         matches!(self, Self::Http | Self::Https)
     }
-
-    fn default_port(self) -> u16 {
-        match self {
-            Self::Http => 80,
-            Self::Https => 443,
-            Self::Socks5h | Self::Socks4a => 1080,
-        }
-    }
 }
 
 /// Parsed proxy selected for a single request target.
@@ -64,7 +56,7 @@ pub struct SelectedProxy {
     /// Proxy URL as configured by the caller, retained for diagnostics.
     url: Url,
     /// Equivalent remote-DNS URL understood by libcurl.
-    curl_url: Url,
+    curl_url: String,
     scheme: ProxyScheme,
     endpoint_port: u16,
 }
@@ -96,11 +88,28 @@ impl SelectedProxy {
         if url.host().is_none() {
             bail!("proxy URL `{raw}` is missing a host");
         }
-        let endpoint_port = url.port().unwrap_or_else(|| scheme.default_port());
+        // CURLOPT_PROXY defaults to port 1080 when the proxy URL omits a
+        // port, including for HTTP and HTTPS proxies. This differs from an
+        // origin URL's scheme-specific default port. Read the explicit port
+        // from the original authority because `url::Url` deliberately drops
+        // explicit default ports such as `:80` and `:443`.
+        let endpoint_port = explicit_proxy_port(&normalized)?.unwrap_or(1080);
         let mut curl_url = url.clone();
         curl_url
             .set_scheme(curl_scheme)
             .map_err(|()| anyhow::anyhow!("failed to normalize proxy URL `{raw}` for curl"))?;
+        curl_url
+            .set_port(None)
+            .map_err(|()| anyhow::anyhow!("failed to normalize proxy URL `{raw}` for curl"))?;
+        // Always spell out the chosen port. Apart from preserving explicit
+        // `:80`/`:443`, this makes CURLOPT_RESOLVE and CURLOPT_PROXY name the
+        // exact same connection endpoint and prevents curl from applying a
+        // different implicit port after Moli has pinned DNS.
+        let curl_url = format!(
+            "{}:{endpoint_port}{}",
+            &curl_url[..Position::AfterHost],
+            &curl_url[Position::AfterHost..]
+        );
         Ok(Self {
             url,
             curl_url,
@@ -115,7 +124,7 @@ impl SelectedProxy {
 
     /// Proxy URL passed to libcurl after applying Moli's remote-DNS semantics.
     pub fn curl_url(&self) -> &str {
-        self.curl_url.as_str()
+        &self.curl_url
     }
 
     pub fn scheme(&self) -> ProxyScheme {
@@ -147,6 +156,34 @@ impl SelectedProxy {
     pub fn target_resolution(&self) -> ProxyTargetResolution {
         ProxyTargetResolution::Proxy
     }
+}
+
+fn explicit_proxy_port(raw_url: &str) -> Result<Option<u16>> {
+    let (_, remainder) = raw_url
+        .split_once("://")
+        .expect("proxy URL is normalized with a scheme");
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .expect("split always yields the authority");
+    let host_and_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host_and_port)| host_and_port);
+
+    let port = if let Some(bracketed) = host_and_port.strip_prefix('[') {
+        let closing_bracket = bracketed
+            .find(']')
+            .expect("proxy URL parser validated the IPv6 host");
+        bracketed[closing_bracket + 1..].strip_prefix(':')
+    } else {
+        host_and_port.rsplit_once(':').map(|(_, port)| port)
+    };
+
+    port.map(|port| {
+        port.parse::<u16>()
+            .with_context(|| format!("proxy URL `{raw_url}` has an invalid port"))
+    })
+    .transpose()
 }
 
 /// Concrete route selected exactly once for a request target.
@@ -504,23 +541,48 @@ mod tests {
 
     #[test]
     fn proxy_parser_normalizes_socks_schemes_to_remote_dns_for_curl() {
-        for (raw, scheme, port, curl_scheme) in [
-            ("proxy.test:8080", ProxyScheme::Http, 8080, "http"),
-            ("https://proxy.test", ProxyScheme::Https, 443, "https"),
-            ("socks://proxy.test", ProxyScheme::Socks5h, 1080, "socks5h"),
-            ("socks5://proxy.test", ProxyScheme::Socks5h, 1080, "socks5h"),
+        for (raw, scheme, port, curl_url) in [
+            (
+                "proxy.test:8080",
+                ProxyScheme::Http,
+                8080,
+                "http://proxy.test:8080/",
+            ),
+            (
+                "https://proxy.test",
+                ProxyScheme::Https,
+                1080,
+                "https://proxy.test:1080/",
+            ),
+            (
+                "socks://proxy.test",
+                ProxyScheme::Socks5h,
+                1080,
+                "socks5h://proxy.test:1080",
+            ),
+            (
+                "socks5://proxy.test",
+                ProxyScheme::Socks5h,
+                1080,
+                "socks5h://proxy.test:1080",
+            ),
             (
                 "socks5h://proxy.test",
                 ProxyScheme::Socks5h,
                 1080,
-                "socks5h",
+                "socks5h://proxy.test:1080",
             ),
-            ("socks4://proxy.test", ProxyScheme::Socks4a, 1080, "socks4a"),
+            (
+                "socks4://proxy.test",
+                ProxyScheme::Socks4a,
+                1080,
+                "socks4a://proxy.test:1080",
+            ),
             (
                 "socks4a://proxy.test",
                 ProxyScheme::Socks4a,
                 1080,
-                "socks4a",
+                "socks4a://proxy.test:1080",
             ),
         ] {
             let proxy = SelectedProxy::parse(raw).unwrap();
@@ -528,13 +590,29 @@ mod tests {
             assert_eq!(proxy.endpoint_host(), "proxy.test");
             assert_eq!(proxy.endpoint_port(), port);
             assert_eq!(proxy.target_resolution(), ProxyTargetResolution::Proxy);
-            assert_eq!(Url::parse(proxy.curl_url()).unwrap().scheme(), curl_scheme);
+            assert_eq!(proxy.curl_url(), curl_url);
             if raw.contains("://") {
                 assert_eq!(
                     Url::parse(proxy.url()).unwrap().scheme(),
                     raw.split_once("://").unwrap().0
                 );
             }
+        }
+    }
+
+    #[test]
+    fn proxy_parser_keeps_curl_endpoint_port_aligned_with_dns_endpoint() {
+        for (raw, expected_port, expected_curl_url) in [
+            ("http://proxy.test", 1080, "http://proxy.test:1080/"),
+            ("https://proxy.test", 1080, "https://proxy.test:1080/"),
+            ("http://proxy.test:80", 80, "http://proxy.test:80/"),
+            ("https://proxy.test:443", 443, "https://proxy.test:443/"),
+            ("http://proxy.test:8080", 8080, "http://proxy.test:8080/"),
+            ("https://proxy.test:8443", 8443, "https://proxy.test:8443/"),
+        ] {
+            let proxy = SelectedProxy::parse(raw).unwrap();
+            assert_eq!(proxy.endpoint_port(), expected_port, "{raw}");
+            assert_eq!(proxy.curl_url(), expected_curl_url, "{raw}");
         }
     }
 
