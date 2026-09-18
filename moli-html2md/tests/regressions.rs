@@ -251,80 +251,19 @@ fn images_without_sources_do_not_emit_placeholder_markdown() {
 }
 
 #[test]
-fn empty_svg_lazy_image_placeholders_do_not_emit_data_uris() {
-    let placeholder = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20720%20960'%3E%3C/svg%3E";
-    let html = format!("before<img alt='Recipe photo' src=\"{placeholder}\">after");
-    assert_eq!(markdown(&html, false), "beforeRecipe photoafter");
-
+fn embedded_image_references_survive_regardless_of_pixel_content() {
     for src in [
-        "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'/>",
-        "data:image/svg+xml;charset=utf-8,%3Csvg%3E%20%3C!--empty--%3E%20%3C/svg%3E",
-        "data:image/svg+xml;base64,PHN2Zy8+",
-    ] {
-        let html = format!("before<img src=\"{src}\">after");
-        assert_eq!(markdown(&html, false), "beforeafter");
-    }
-
-    let html =
-        format!("before<img alt='Recipe photo' aria-hidden='true' src=\"{placeholder}\">after");
-    assert_eq!(markdown(&html, false), "beforeafter");
-
-    let real_svg = "data:image/svg+xml,%3Csvg%3E%3Cpath%20d='M0%200'/%3E%3C/svg%3E";
-    let html = format!("<img alt='Logo' src=\"{real_svg}\">");
-    assert!(markdown(&html, false).contains(real_svg));
-    let text_svg = "data:image/svg+xml,%3Csvg%3E%3Ctext%3ELogo%3C/text%3E%3C/svg%3E";
-    let html = format!("<img alt='Logo' src=\"{text_svg}\">");
-    assert!(markdown(&html, false).contains(text_svg));
-    let styled_svg = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20style='background:red'%20width='32'%20height='32'/%3E";
-    let html = format!("<img alt='Color' src=\"{styled_svg}\">");
-    assert!(markdown(&html, false).contains(styled_svg));
-}
-
-#[test]
-fn single_pixel_embedded_raster_placeholders_do_not_emit_data_uris() {
-    let malformed_gif =
-        "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
-    let transparent_gif =
-        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
-    let html = format!("before<img alt='Product photo' src=\"{transparent_gif}\">after");
-    assert_eq!(markdown(&html, false), "beforeProduct photoafter");
-    // An invalid image cannot be shown to be transparent; retain its reference.
-    let html = format!("before<img alt='Product photo' src=\"{malformed_gif}\">after");
-    assert!(markdown(&html, false).contains(malformed_gif));
-    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==";
-    let html = format!("before<img aria-hidden='true' src=\"{png}\">after");
-    assert_eq!(markdown(&html, false), "beforeafter");
-
-    for src in [
+        "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20720%20960'%3E%3C/svg%3E",
+        "data:image/svg+xml,%3Csvg%20style='background:red'%20width='32'%20height='32'/%3E",
+        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
         "data:image/gif;base64,R0lGODdhAQABAIEAAP8AAAAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==",
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==",
     ] {
-        let html = format!("<img alt='Red status pixel' src=\"{src}\">");
+        let html = format!("<img alt='Status image' src=\"{src}\">");
         assert!(markdown(&html, false).contains(src), "{src}");
+        let responsive = format!("<picture><source srcset='/status-2x.png 2x'>{html}</picture>");
+        assert!(markdown(&responsive, false).contains(src), "{responsive}");
     }
-
-    let html = format!(
-        "<img alt='Product' src=\"{}\" srcset='/product.png 2x'>",
-        transparent_gif
-    );
-    assert!(markdown(&html, false).contains(transparent_gif));
-    let html = format!(
-        "<picture><source srcset='/product.png 2x'><img alt='Product' src=\"{}\"></picture>",
-        transparent_gif
-    );
-    assert!(markdown(&html, false).contains(transparent_gif));
-
-    use base64::Engine as _;
-    let mut wide = base64::engine::general_purpose::STANDARD
-        .decode(transparent_gif.split_once(',').unwrap().1)
-        .unwrap();
-    wide[6] = 2;
-    let wide = format!(
-        "data:image/gif;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(wide)
-    );
-    let html = format!("<img alt='Wide image' src=\"{wide}\">");
-    assert!(markdown(&html, false).contains(&wide));
 }
 
 #[test]

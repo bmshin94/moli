@@ -14,7 +14,6 @@ enum Task<'a, Id> {
     EndList(usize),
     EndItem(String),
     RawChildren(Option<Id>, usize, bool),
-    EndPicture,
     EndRawBlock,
     EndCode,
     EndPre(Option<&'a str>),
@@ -37,7 +36,6 @@ struct Machine<'a, D: Dom + ?Sized> {
     lists: Vec<List>,
     tables: Vec<Table<D::NodeId>>,
     raw: String,
-    picture_sources: Vec<bool>,
     serial: usize,
 }
 
@@ -50,7 +48,6 @@ pub(crate) fn convert<D: Dom + ?Sized>(dom: &D, root: D::NodeId, options: &Optio
         lists: Vec::new(),
         tables: Vec::new(),
         raw: String::new(),
-        picture_sources: Vec::new(),
         serial: 0,
     };
     machine.run();
@@ -134,9 +131,6 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     self.writer().block(item.into(), separation, separation);
                 }
                 Task::RawChildren(Some(node), depth, inline) => self.raw_node(node, depth, inline),
-                Task::EndPicture => {
-                    self.picture_sources.pop();
-                }
                 Task::EndRawBlock => {
                     if !self.raw.ends_with('\n') {
                         self.raw.push('\n');
@@ -246,45 +240,8 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
                     .attribute(node, "src")
                     .filter(|src| !src.is_empty())
                 {
-                    // Embedded placeholders carry no useful image. Keep
-                    // accessible alternate text without emitting a data URI.
-                    let alternate = self
-                        .dom
-                        .attribute(node, "srcset")
-                        .is_some_and(|s| !s.trim().is_empty())
-                        || self.picture_sources.last().copied().unwrap_or(false);
-                    if !alternate && is_noncontent_data_image(src) {
-                        if !alt.is_empty()
-                            && !self
-                                .dom
-                                .attribute(node, "aria-hidden")
-                                .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
-                        {
-                            self.writer().text(alt);
-                        }
-                    } else {
-                        self.writer().image(alt, src, title);
-                    }
+                    self.writer().image(alt, src, title);
                 }
-                return;
-            }
-            "picture" => {
-                let mut child = self.dom.first_child(node);
-                let mut alternate = false;
-                while let Some(id) = child {
-                    if self.dom.node_kind(id) == NodeKind::Element("source")
-                        && self
-                            .dom
-                            .attribute(id, "srcset")
-                            .is_some_and(|s| !s.trim().is_empty())
-                    {
-                        alternate = true;
-                    }
-                    child = self.dom.next_sibling(id);
-                }
-                self.picture_sources.push(alternate);
-                self.tasks.push(Task::EndPicture);
-                self.children(node, depth + 1);
                 return;
             }
             "code" | "pre" => {
@@ -482,116 +439,6 @@ impl<'a, D: Dom + ?Sized> Machine<'a, D> {
         }
         block.push_str(&fence);
         self.writer().block(block.into(), 2, 2);
-    }
-}
-
-fn is_noncontent_data_image(src: &str) -> bool {
-    use base64::Engine as _;
-
-    let Some((media_type, payload)) = src
-        .get(5..)
-        .filter(|_| {
-            src.get(..5)
-                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
-        })
-        .and_then(|uri| uri.split_once(','))
-    else {
-        return false;
-    };
-    let mut parts = media_type.split(';');
-    let Some(kind) = parts.next() else {
-        return false;
-    };
-    if !["image/svg+xml", "image/gif", "image/png"]
-        .iter()
-        .any(|supported| kind.eq_ignore_ascii_case(supported))
-        || payload.len() > 1_000_000
-    {
-        return false;
-    }
-    let encoded = parts.any(|part| part.eq_ignore_ascii_case("base64"));
-    let bytes = if encoded {
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(payload) else {
-            return false;
-        };
-        bytes
-    } else {
-        percent_encoding::percent_decode_str(payload).collect::<Vec<_>>()
-    };
-    if kind.eq_ignore_ascii_case("image/gif") {
-        return transparent_gif(&bytes);
-    }
-    if kind.eq_ignore_ascii_case("image/png") {
-        return transparent_png(&bytes);
-    }
-    let Ok(svg) = std::str::from_utf8(&bytes) else {
-        return false;
-    };
-    let Ok(document) = roxmltree::Document::parse(svg) else {
-        return false;
-    };
-    let root = document.root_element();
-    root.tag_name().name() == "svg"
-        && root.attributes().all(|attr| {
-            matches!(
-                attr.name(),
-                "xmlns" | "width" | "height" | "viewBox" | "preserveAspectRatio"
-            )
-        })
-        && root.children().all(|child| {
-            child.is_comment()
-                || child.is_text() && child.text().is_none_or(|text| text.trim().is_empty())
-        })
-}
-
-fn transparent_gif(bytes: &[u8]) -> bool {
-    if bytes.get(6..10) != Some(&[1, 0, 1, 0][..]) {
-        return false;
-    }
-    let mut options = gif::DecodeOptions::new();
-    options.set_color_output(gif::ColorOutput::RGBA);
-    let Ok(mut decoder) = options.read_info(std::io::Cursor::new(bytes)) else {
-        return false;
-    };
-    let mut found = false;
-    loop {
-        match decoder.read_next_frame() {
-            Ok(Some(frame)) => {
-                found = true;
-                if frame.width != 1 || frame.height != 1 || frame.buffer.get(3) != Some(&0) {
-                    return false;
-                }
-            }
-            Ok(None) => return found,
-            Err(_) => return false,
-        }
-    }
-}
-
-fn transparent_png(bytes: &[u8]) -> bool {
-    if bytes.get(16..24) != Some(&[0, 0, 0, 1, 0, 0, 0, 1][..]) {
-        return false;
-    }
-    let mut decoder =
-        png::Decoder::new_with_limits(std::io::Cursor::new(bytes), png::Limits { bytes: 64 });
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let Ok(mut reader) = decoder.read_info() else {
-        return false;
-    };
-    if reader.info().animation_control.is_some() {
-        return false;
-    }
-    let Some(size) = reader.output_buffer_size() else {
-        return false;
-    };
-    let mut buffer = vec![0; size];
-    let Ok(frame) = reader.next_frame(&mut buffer) else {
-        return false;
-    };
-    match frame.color_type {
-        png::ColorType::Rgba => buffer.get(3) == Some(&0),
-        png::ColorType::GrayscaleAlpha => buffer.get(1) == Some(&0),
-        _ => false,
     }
 }
 
