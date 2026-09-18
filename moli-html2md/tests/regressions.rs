@@ -275,25 +275,48 @@ fn empty_svg_lazy_image_placeholders_do_not_emit_data_uris() {
     let text_svg = "data:image/svg+xml,%3Csvg%3E%3Ctext%3ELogo%3C/text%3E%3C/svg%3E";
     let html = format!("<img alt='Logo' src=\"{text_svg}\">");
     assert!(markdown(&html, false).contains(text_svg));
+    let styled_svg = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20style='background:red'%20width='32'%20height='32'/%3E";
+    let html = format!("<img alt='Color' src=\"{styled_svg}\">");
+    assert!(markdown(&html, false).contains(styled_svg));
 }
 
 #[test]
 fn single_pixel_embedded_raster_placeholders_do_not_emit_data_uris() {
-    let gifs = [
-        "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==",
-        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
-    ];
-    for src in gifs {
-        let html = format!("before<img alt='Product photo' src=\"{src}\">after");
-        assert_eq!(markdown(&html, false), "beforeProduct photoafter");
-    }
-    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==";
+    let malformed_gif =
+        "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+    let transparent_gif =
+        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
+    let html = format!("before<img alt='Product photo' src=\"{transparent_gif}\">after");
+    assert_eq!(markdown(&html, false), "beforeProduct photoafter");
+    // An invalid image cannot be shown to be transparent; retain its reference.
+    let html = format!("before<img alt='Product photo' src=\"{malformed_gif}\">after");
+    assert!(markdown(&html, false).contains(malformed_gif));
+    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==";
     let html = format!("before<img aria-hidden='true' src=\"{png}\">after");
     assert_eq!(markdown(&html, false), "beforeafter");
 
+    for src in [
+        "data:image/gif;base64,R0lGODdhAQABAIEAAP8AAAAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==",
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+    ] {
+        let html = format!("<img alt='Red status pixel' src=\"{src}\">");
+        assert!(markdown(&html, false).contains(src), "{src}");
+    }
+
+    let html = format!(
+        "<img alt='Product' src=\"{}\" srcset='/product.png 2x'>",
+        transparent_gif
+    );
+    assert!(markdown(&html, false).contains(transparent_gif));
+    let html = format!(
+        "<picture><source srcset='/product.png 2x'><img alt='Product' src=\"{}\"></picture>",
+        transparent_gif
+    );
+    assert!(markdown(&html, false).contains(transparent_gif));
+
     use base64::Engine as _;
     let mut wide = base64::engine::general_purpose::STANDARD
-        .decode(gifs[0].split_once(',').unwrap().1)
+        .decode(transparent_gif.split_once(',').unwrap().1)
         .unwrap();
     wide[6] = 2;
     let wide = format!(
